@@ -225,13 +225,35 @@ def main():
     print("[PIPELINE] Quick check PASS", flush=True)
 
     # === Step 2: Eval ===
+    # Multi-shape: scale the eval_wrapper subprocess wall-clock cap by
+    # num_cases. eval_client._effective_timeout already scales the
+    # WORKER-side budget (HTTP timeout / local subprocess kill); this
+    # is the OUTER cap that wraps the eval_wrapper run. Use the same
+    # per-shape multiplier + 300s buffer for IPC / package transfer.
+    try:
+        from task_config.eval_client import _count_ref_cases
+        probed_cases = _count_ref_cases(task_dir, config)
+    except Exception:
+        probed_cases = 1
+    progress_for_count = load_progress(task_dir) or {}
+    num_cases = progress_for_count.get("num_cases")
+    if not isinstance(num_cases, int) or num_cases < 1:
+        num_cases = probed_cases
+    per_shape_budget = int(getattr(config, "eval_timeout", 600) or 600)
+    pipeline_eval_cap = per_shape_budget * max(num_cases, 1) + 300
+    if num_cases > 1:
+        print(f"[PIPELINE] multi-shape: num_cases={num_cases}, "
+              f"eval subprocess cap = {pipeline_eval_cap}s "
+              f"({per_shape_budget}s/shape x {num_cases} cases + 300s buffer)",
+              flush=True)
     print("[PIPELINE] Running eval...", flush=True)
     eval_cmd = [sys.executable, os.path.join(SCRIPT_DIR, "eval_wrapper.py"), task_dir] + worker_flag
     try:
-        ev = subprocess.run(eval_cmd, capture_output=True, text=True, timeout=600)
+        ev = subprocess.run(eval_cmd, capture_output=True, text=True,
+                            timeout=pipeline_eval_cap)
     except subprocess.TimeoutExpired:
         auto_rollback(task_dir)
-        print("[PIPELINE] EVAL TIMEOUT. Rolled back.")
+        print(f"[PIPELINE] EVAL TIMEOUT (>{pipeline_eval_cap}s). Rolled back.")
         sys.exit(0)
 
     eval_json = parse_last_json_line(ev.stdout)

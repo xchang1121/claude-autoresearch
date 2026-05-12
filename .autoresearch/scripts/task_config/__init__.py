@@ -54,5 +54,9 @@ from .eval_client import (
     _worker_acquire_device, _worker_release_device,
     _worker_verify, _worker_profile,
     _assemble_eval_result,
+    # Multi-shape helpers: pipeline.py uses _count_ref_cases for timeout
+    # scaling; tests reach into the others.
+    _count_ref_cases, _effective_timeout,
+    _last_json_line, _finite, _resolve_profile, _per_shape_floats,
 )
 # fmt: on

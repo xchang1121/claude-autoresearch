@@ -99,6 +99,12 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
     baseline_commit = _git_short_head(task_dir)
     baseline_commit_recorded = existing_baseline_commit or baseline_commit
 
+    # Multi-shape: eval_client populates `num_cases` + `per_shape_descs` from
+    # the profile artifact. Store them on the Progress dataclass so PLAN's
+    # multi-shape note + DIAGNOSE's failed-shape block can look them up
+    # without re-parsing history.jsonl. Single-shape ops leave both absent.
+    n_cases = metrics.get("num_cases")
+    descs = metrics.get("per_shape_descs")
     save_progress(task_dir, Progress(
         task=config.name,
         eval_rounds=0,
@@ -114,6 +120,12 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         consecutive_failures=0,
         plan_version=0,
         status="no_plan",
+        num_cases=(int(n_cases) if isinstance(n_cases, int)
+                   and n_cases >= 1 else None),
+        per_shape_descs=(
+            [str(d) for d in descs if d]
+            if isinstance(descs, list) and descs else None
+        ),
     ), stamp=True)
 
     # Round 0 logs the SEED kernel's initial eval. `metrics.latency_us` is the
