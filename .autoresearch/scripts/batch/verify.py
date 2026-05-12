@@ -38,7 +38,9 @@ import manifest as mf
 # source of truth for the allclose comparison — verify.py and
 # autoresearch's eval can't drift.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from correctness import compare_outputs_per_case  # noqa: E402
+from correctness import (  # noqa: E402
+    compare_outputs_per_case, DEFAULT_ATOL, DEFAULT_RTOL,
+)
 from input_groups import resolve as _resolve_groups  # noqa: E402
 
 VERIFY_RESULTS = "verify_results.json"
@@ -47,10 +49,11 @@ TIER1_TIMEOUT = 30
 # minutes for kernels with constexpr-driven specialisations. Bump the
 # Tier-2 cap so multi-shape verifies aren't killed mid-loop.
 TIER2_TIMEOUT = 600
-# Defaults match autoresearch's loader fallback (loader.py:49-50). They are
-# only used when neither the CLI flag nor the manifest provides a value.
-DEFAULT_ATOL = 1e-2
-DEFAULT_RTOL = 1e-2
+# atol/rtol are imported from correctness — the single source of truth.
+# Previously this file accepted --atol/--rtol CLI flags + a
+# manifest.correctness_atol/_rtol override; those entry points were
+# removed to eliminate drift between batch verify and the per-round
+# worker verify.
 
 # Reference must export Model + get_init_inputs + one of (get_inputs,
 # get_input_groups). The "input provider" is checked separately (per
@@ -114,12 +117,15 @@ def _tier1_inspect(path: Path, required: tuple[str, ...]) -> dict:
     return out
 
 
-def _tier2_run(ref_path: Path, kernel_path: Path,
-               atol: float, rtol: float) -> dict:
+def _tier2_run(ref_path: Path, kernel_path: Path) -> dict:
     """Run ref + kernel, compare outputs via the shared correctness module
-    (autoresearch's eval calls into the same `compare_outputs`)."""
+    (autoresearch's eval calls into the same `compare_outputs`).
+
+    atol/rtol are imported from correctness (DEFAULT_ATOL / DEFAULT_RTOL);
+    this function no longer takes them as args. Tweak the constants at
+    module level if you really need to (you almost certainly don't)."""
     out: dict = {"status": "skip", "msg": "", "max_abs_diff": None,
-                 "atol": atol, "rtol": rtol}
+                 "atol": DEFAULT_ATOL, "rtol": DEFAULT_RTOL}
 
     try:
         import torch  # type: ignore
@@ -193,7 +199,7 @@ def _tier2_run(ref_path: Path, kernel_path: Path,
         return out
 
     cmp = compare_outputs_per_case(out_ref_per_case, out_new_per_case,
-                                   atol, rtol)
+                                   DEFAULT_ATOL, DEFAULT_RTOL)
     out["max_abs_diff"] = cmp["max_abs_diff"]
     out["num_cases"] = len(cases)
     out["per_case"] = cmp["per_case"]
@@ -217,8 +223,6 @@ def _worker_main() -> int:
     ap.add_argument("--ref", required=True)
     ap.add_argument("--kernel", default="")
     ap.add_argument("--sidecar", required=True)
-    ap.add_argument("--atol", type=float, default=DEFAULT_ATOL)
-    ap.add_argument("--rtol", type=float, default=DEFAULT_RTOL)
     args = ap.parse_args(sys.argv[2:])  # skip the --tier-worker sentinel
 
     ref_path = Path(args.ref)
@@ -236,7 +240,9 @@ def _worker_main() -> int:
         if kernel_path is None:
             result = {"status": "skip", "msg": "ref-only mode; no kernel to compare"}
         else:
-            result = _tier2_run(ref_path, kernel_path, args.atol, args.rtol)
+            # atol/rtol are no longer worker arguments — locked to
+            # correctness.DEFAULT_ATOL / DEFAULT_RTOL.
+            result = _tier2_run(ref_path, kernel_path)
 
     Path(args.sidecar).write_text(json.dumps(result), encoding="utf-8")
     return 0
@@ -246,8 +252,7 @@ def _worker_main() -> int:
 # Driver
 # ---------------------------------------------------------------------------
 def _run_subprocess(*, tier: str, ref: Path, kernel: Path | None,
-                    timeout: int, atol: float = DEFAULT_ATOL,
-                    rtol: float = DEFAULT_RTOL) -> dict:
+                    timeout: int) -> dict:
     sidecar = Path(os.environ.get("TMP", "/tmp")) / f"_verify_{os.getpid()}_{tier}_{ref.stem}.json"
     if sidecar.exists():
         sidecar.unlink()
@@ -258,8 +263,6 @@ def _run_subprocess(*, tier: str, ref: Path, kernel: Path | None,
            "--sidecar", str(sidecar)]
     if kernel is not None:
         cmd += ["--kernel", str(kernel)]
-    if tier == "2":
-        cmd += ["--atol", repr(atol), "--rtol", repr(rtol)]
 
     env = os.environ.copy()
     # Default the Windows libomp/libiomp5md double-init workaround so users
@@ -295,8 +298,7 @@ def _run_subprocess(*, tier: str, ref: Path, kernel: Path | None,
     return result
 
 
-def _verify_one(case: dict, mode: str, full: bool,
-                atol: float, rtol: float) -> dict:
+def _verify_one(case: dict, mode: str, full: bool) -> dict:
     op = case["op_name"]
     ref = Path(case["ref"])
     kernel = Path(case["kernel"]) if case.get("kernel") else None
@@ -319,8 +321,7 @@ def _verify_one(case: dict, mode: str, full: bool,
     if full and mode == "ref-kernel":
         if tier1_ok:
             out["tier2"] = _run_subprocess(tier="2", ref=ref, kernel=kernel,
-                                           timeout=TIER2_TIMEOUT,
-                                           atol=atol, rtol=rtol)
+                                           timeout=TIER2_TIMEOUT)
         else:
             out["tier2"] = {"status": "skip",
                             "msg": "tier1 failed; skipping tier2",
@@ -401,13 +402,15 @@ def _print_table(results: dict, mode: str, full: bool) -> None:
 
 
 def run_verification(batch_dir: Path, *, mode: str | None = None,
-                     full: bool = False, only: str = "",
-                     atol_override: float | None = None,
-                     rtol_override: float | None = None) -> int:
+                     full: bool = False, only: str = "") -> int:
     """Run the verification loop programmatically (so prepare.py and other
     scripts can call us without subprocessing). Returns the same exit code
     main() would: 0 if everything passed, 1 if any FAIL/ERROR. All output
-    still goes to stdout for the caller to surface."""
+    still goes to stdout for the caller to surface.
+
+    atol/rtol are not configurable — they're constants in correctness.py.
+    Manifest's `correctness_atol` / `correctness_rtol` keys are now
+    ignored; the CLI no longer exposes overrides."""
     batch_dir = Path(batch_dir).resolve()
     if not batch_dir.is_dir():
         sys.exit(f"batch dir not found: {batch_dir}")
@@ -423,11 +426,6 @@ def run_verification(batch_dir: Path, *, mode: str | None = None,
         sys.exit("--mode is required (also accepted as `mode:` in manifest)")
     if mode not in mf.VALID_MODES:
         sys.exit(f"--mode must be one of {mf.VALID_MODES}, got {mode!r}")
-
-    atol = (atol_override if atol_override is not None
-            else float(manifest_data.get("correctness_atol", DEFAULT_ATOL)))
-    rtol = (rtol_override if rtol_override is not None
-            else float(manifest_data.get("correctness_rtol", DEFAULT_RTOL)))
 
     try:
         cases = mf.resolve_cases(batch_dir, manifest_data, mode)
@@ -445,7 +443,7 @@ def run_verification(batch_dir: Path, *, mode: str | None = None,
 
     print(f"verify  batch_dir={batch_dir}  mode={mode}  "
           f"tier={'1+2' if full else '1'}  ops={len(cases)}  "
-          f"tols: atol={atol:g}  rtol={rtol:g}")
+          f"tols: atol={DEFAULT_ATOL:g}  rtol={DEFAULT_RTOL:g}")
     print()
 
     results: dict = {}
@@ -454,7 +452,7 @@ def run_verification(batch_dir: Path, *, mode: str | None = None,
         op = case["op_name"]
         sys.stdout.write(f"  [{i:>3}/{len(cases)}] {op} ... ")
         sys.stdout.flush()
-        rec = _verify_one(case, mode, full=full, atol=atol, rtol=rtol)
+        rec = _verify_one(case, mode, full=full)
         results[op] = rec
         ok = _summary_status(rec, mode, full=full)
         sys.stdout.write(f"{ok}\n")
@@ -462,7 +460,8 @@ def run_verification(batch_dir: Path, *, mode: str | None = None,
 
     out_path = batch_dir / VERIFY_RESULTS
     out_path.write_text(json.dumps({
-        "mode": mode, "full": full, "atol": atol, "rtol": rtol,
+        "mode": mode, "full": full,
+        "atol": DEFAULT_ATOL, "rtol": DEFAULT_RTOL,
         "results": results,
     }, indent=2), encoding="utf-8")
 
@@ -495,22 +494,11 @@ def main() -> int:
                          "needs the same hardware /autoresearch eval would use")
     ap.add_argument("--only", default="",
                     help="comma-separated op names")
-    ap.add_argument("--correctness-atol", type=float, default=None,
-                    help="Tier 2 absolute tolerance for torch.allclose. "
-                         "Precedence: CLI > manifest.correctness_atol > "
-                         f"default ({DEFAULT_ATOL}). Mirrors the value "
-                         "scaffold writes into task.yaml.metric.correctness_atol.")
-    ap.add_argument("--correctness-rtol", type=float, default=None,
-                    help="Tier 2 relative tolerance for torch.allclose. "
-                         "Precedence: CLI > manifest.correctness_rtol > "
-                         f"default ({DEFAULT_RTOL}).")
     args = ap.parse_args()
 
     return run_verification(
         Path(args.batch_dir),
         mode=args.mode, full=args.full, only=args.only,
-        atol_override=args.correctness_atol,
-        rtol_override=args.correctness_rtol,
     )
 
 

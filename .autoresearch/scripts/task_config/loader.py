@@ -45,9 +45,11 @@ class TaskConfig:
     lower_is_better: bool = True
     improvement_threshold: float = 0.0
 
-    # Correctness tolerance (torch.allclose against cached reference)
-    correctness_atol: float = 1e-2
-    correctness_rtol: float = 1e-2
+    # Correctness tolerance is no longer a TaskConfig field. atol/rtol are
+    # hardcoded in correctness.DEFAULT_ATOL / DEFAULT_RTOL — the previous
+    # task.yaml `metric.correctness_atol` / `correctness_rtol` paths fed
+    # four independent comparison sites (worker verify, batch verify,
+    # scaffold default, hardcoded fallback) and routinely drifted.
 
     # Constraints: {metric_name: (operator_str, threshold)}
     constraints: dict = field(default_factory=dict)
@@ -141,8 +143,6 @@ def load_task_config(task_dir: str) -> Optional[TaskConfig]:
         primary_metric=metric_block.get("primary", "score"),
         lower_is_better=metric_block.get("lower_is_better", True),
         improvement_threshold=metric_block.get("improvement_threshold", 0.0),
-        correctness_atol=metric_block.get("correctness_atol", 1e-2),
-        correctness_rtol=metric_block.get("correctness_rtol", 1e-2),
         constraints=constraints,
         smoke_test_script=smoke_block.get("script"),
         smoke_test_timeout=smoke_block.get("timeout", 10),

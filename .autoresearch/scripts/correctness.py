@@ -19,6 +19,17 @@ from __future__ import annotations
 from typing import Any
 
 
+# Single source of truth for autoresearch correctness tolerance. Both the
+# generated worker verify script and the batch pre-flight Tier-2 check
+# import these and pass them through compare_outputs[_per_case]. The
+# previous task.yaml `metric.correctness_atol` / `metric.correctness_rtol`
+# / scaffold `--correctness-atol` / batch `--atol` paths all fed the same
+# comparison and routinely drifted; locking the values here removes that
+# possibility. Override by editing this file, not via CLI / yaml.
+DEFAULT_ATOL = 1e-2
+DEFAULT_RTOL = 1e-2
+
+
 def compare_outputs(out_ref: list, out_new: list,
                     atol: float, rtol: float) -> dict:
     """torch.allclose comparison with autoresearch's exact semantics.

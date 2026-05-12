@@ -76,8 +76,6 @@ def scaffold_task_dir(
     output_dir: str | None = None,
     editable_filename: str = "kernel.py",
     code_checker_enabled: bool = True,
-    correctness_atol: float = 1e-2,
-    correctness_rtol: float = 1e-2,
 ) -> str:
     """Create task directory with all files. Returns absolute path.
 
@@ -123,12 +121,10 @@ def scaffold_task_dir(
         "metric": {
             "primary": "latency_us",
             "lower_is_better": True,
-            # Correctness tolerances are written explicitly so loader.py's
-            # `metric_block.get("correctness_atol", 1e-2)` actually consumes
-            # what the user (or default) chose, instead of always falling
-            # through to the loader-side default.
-            "correctness_atol": float(correctness_atol),
-            "correctness_rtol": float(correctness_rtol),
+            # atol / rtol used to live here too; they're hardcoded in
+            # correctness.DEFAULT_ATOL / DEFAULT_RTOL now (single source
+            # of truth). Loader silently ignores any stale fields a user
+            # might still have in their task.yaml.
         },
         "agent": {
             "ref_file": "reference.py",
@@ -248,18 +244,9 @@ def _make_arg_parser() -> argparse.ArgumentParser:
                               "kernel style. Writes "
                               "`code_checker: {enabled: false}` into "
                               "task.yaml; flip the field to re-enable later."))
-    parser.add_argument("--correctness-atol", type=float, default=1e-2,
-                        help=("torch.allclose absolute tolerance for the "
-                              "ref/kernel correctness check. Written into "
-                              "task.yaml's `metric.correctness_atol` and "
-                              "consumed by the eval-package verify script. "
-                              "Default 1e-2 matches autoresearch's loader "
-                              "fallback."))
-    parser.add_argument("--correctness-rtol", type=float, default=1e-2,
-                        help=("torch.allclose relative tolerance for the "
-                              "ref/kernel correctness check. Written into "
-                              "task.yaml's `metric.correctness_rtol`. "
-                              "Default 1e-2."))
+    # --correctness-atol / --correctness-rtol used to live here. atol/rtol
+    # are now locked to correctness.DEFAULT_ATOL / DEFAULT_RTOL — see the
+    # comment in scaffold.create_task() and in correctness.py.
     return parser
 
 
@@ -412,8 +399,6 @@ def main():
         eval_timeout=args.eval_timeout,
         output_dir=args.output_dir,
         code_checker_enabled=not args.no_code_checker,
-        correctness_atol=args.correctness_atol,
-        correctness_rtol=args.correctness_rtol,
     )
 
     print(f"[scaffold] Task directory created: {task_dir}", file=sys.stderr)

@@ -82,8 +82,13 @@ def _gen_verify_script(config: TaskConfig, device_id: int = 0) -> str:
     device = _detect_device_type(config)
     kernel_file = config.editable_files[0].replace(".py", "")
     ref_file = config.ref_file.replace(".py", "")
-    atol = config.correctness_atol
-    rtol = config.correctness_rtol
+    # Tolerance is locked to correctness.DEFAULT_ATOL / DEFAULT_RTOL —
+    # the single source of truth for the comparison. TaskConfig no longer
+    # carries atol/rtol; yaml/CLI no longer override.
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from correctness import DEFAULT_ATOL as atol, DEFAULT_RTOL as rtol
 
     adapter = _get_dsl_adapter(config.dsl)
     dsl_imports = adapter.get_import_statements(config.framework or "torch")
