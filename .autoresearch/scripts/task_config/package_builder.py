@@ -8,7 +8,6 @@ same tarball and run the same auto-generated `verify_<op>.py` /
   - DSL-adapter resolution (`_get_dsl_adapter`, `_detect_device_type`).
   - The verify-script template (`_gen_verify_script`).
   - The profile-script template (`_gen_profile_script`).
-  - Ref-cache path computation (`_compute_worker_ref_path`).
   - Tarball assembly (`_build_package`) + the pycache/dotfile filter.
 
 What's NOT here:
@@ -17,7 +16,6 @@ What's NOT here:
   - Metric comparison / EvalResult — those live in metric_policy; the
     generated scripts emit JSON that eval_client parses, not us.
 """
-import hashlib
 import io
 import os
 import sys
@@ -63,21 +61,23 @@ def _get_dsl_adapter(dsl: Optional[str]):
 # Verify script template
 # ---------------------------------------------------------------------------
 
-def _gen_verify_script(config: TaskConfig, device_id: int = 0,
-                       worker_ref_path: str = "") -> str:
+def _gen_verify_script(config: TaskConfig, device_id: int = 0) -> str:
     """Generate verify_{op_name}.py for the Worker Service.
 
-    Reference outputs live in a worker-local cache keyed by op_name + sha of
-    reference.py (path passed as `worker_ref_path`). On first verify the
-    script computes Model on the target device, writes the cache, and uses
-    the result. On subsequent verifies it loads the cache. The cache is
-    invalidated automatically when reference.py content changes (different
-    sha → different path).
+    Reference outputs are re-computed on the device every round. We used
+    to torch.save them to /tmp/ar_cache/<op>_<sha>/reference.pt and
+    torch.load on subsequent rounds; on multi-shape ops that .pt is
+    List[List[Tensor]] of length num_cases * outputs-per-case and the
+    weights_only=False reload rebuilds the entire pickle graph, which
+    on NPU workers with slow /tmp stalled for minutes — looking like
+    the worker had frozen. Re-computing the ref every round is cheaper
+    end-to-end (one forward * num_cases) and the triton JIT cache for
+    ModelNew is the actual amortisation source across rounds.
 
     DSL adapter (ar_vendored.op.verifier.adapters) supplies DSL-specific
     imports (triton autotune patches, tilelang compile patches, etc.) via
     `get_import_statements`. The verify body itself is uniform across DSLs:
-    instantiate ModelNew, one forward, allclose vs cached reference.
+    instantiate ModelNew, run forward per case, allclose vs ref.
     """
     device = _detect_device_type(config)
     kernel_file = config.editable_files[0].replace(".py", "")
@@ -93,9 +93,9 @@ def _gen_verify_script(config: TaskConfig, device_id: int = 0,
 #!/usr/bin/env python3
 """Auto-generated verify script (dsl={config.dsl}, backend={config.backend}).
 
-Worker-side reference cache: if WORKER_REF_PT exists, load it; otherwise
-run Model on device once, save outputs there, then use them. No local
-PyTorch forward — local client never runs Model.
+Reference outputs are re-computed on the device every round - no .pt
+cache, no torch.load. The previous /tmp/ar_cache/<op>_<sha>/reference.pt
+path stalled multi-shape workers on the weights_only=False reload.
 """
 import os, sys, json, traceback
 
@@ -124,7 +124,6 @@ else:
 
 ATOL = {atol!r}
 RTOL = {rtol!r}
-WORKER_REF_PT = {worker_ref_path!r}
 
 try:
     from {kernel_file} import ModelNew
@@ -146,7 +145,7 @@ try:
     # and get_inputs() (legacy single-shape) and always returns List[List].
     # Single-shape ops collapse to a 1-element list.
     import {ref_file} as _ref_mod
-    from {ref_file} import get_init_inputs
+    from {ref_file} import Model, get_init_inputs
     from input_groups import resolve as _resolve_groups, describe_case as _describe_case
     init_inputs = get_init_inputs()
     cases_cpu = _resolve_groups(_ref_mod)
@@ -154,47 +153,31 @@ try:
     if num_cases == 0:
         raise RuntimeError("reference module returned 0 input cases")
 
-    # --- Obtain reference outputs per case (cache-or-compute, worker-side only) ---
-    out_ref_per_case = None
-    if WORKER_REF_PT and os.path.isfile(WORKER_REF_PT):
-        ref_data = torch.load(WORKER_REF_PT, map_location="cpu", weights_only=False)
-        cached_per_case = ref_data.get("outputs_per_case")
-        cached_legacy = ref_data.get("outputs")
-        if cached_per_case is not None and len(cached_per_case) == num_cases:
-            out_ref_per_case = cached_per_case
-            ref_source = "cached-worker"
-        elif cached_legacy is not None and num_cases == 1:
-            # Pre-multi-shape cache from an earlier run on the same ref sha.
-            # Wrap the single-shape payload into the new per-case shape.
-            out_ref_per_case = [cached_legacy]
-            ref_source = "cached-worker-legacy"
-
-    if out_ref_per_case is None:
-        from {ref_file} import Model
-        model_ref = Model(*init_inputs).to(device).eval()
-        out_ref_per_case = []
-        with torch.no_grad():
-            for case in cases_cpu:
-                ref_inputs_dev = [x.to(device) if hasattr(x, "to") else x
-                                  for x in case]
-                out_ref_raw = model_ref(*ref_inputs_dev)
-                out_ref_per_case.append(_to_cpu_list(out_ref_raw))
-                del ref_inputs_dev, out_ref_raw
-        if WORKER_REF_PT:
-            try:
-                os.makedirs(os.path.dirname(WORKER_REF_PT), exist_ok=True)
-                torch.save({{"outputs_per_case": out_ref_per_case}}, WORKER_REF_PT)
-            except Exception as _e:
-                print(f"[verify] WARNING: ref cache write failed ({{WORKER_REF_PT}}): {{_e}}",
-                      file=sys.stderr)
-        ref_source = "computed-worker"
-        # Free the ref model before ModelNew allocates — BatchNorm-scale
-        # tensors on HBM don't fit both at once.
-        del model_ref
-        if device_type == "npu":
-            torch.npu.empty_cache()
-        elif device_type == "cuda":
-            torch.cuda.empty_cache()
+    # --- Compute reference outputs per case ---
+    # Previously cached to /tmp/ar_cache/<op>_<sha>/reference.pt via
+    # torch.save and reloaded with torch.load(weights_only=False) on
+    # subsequent rounds. On multi-shape ops the .pt is List[List[Tensor]]
+    # of length num_cases * outputs-per-case, and the pickle graph rebuild
+    # on NPU workers stalled for minutes (looked like a hang). Re-computing
+    # every round is cheaper than the load + the triton JIT cache amortises
+    # ModelNew across rounds anyway.
+    model_ref = Model(*init_inputs).to(device).eval()
+    out_ref_per_case = []
+    with torch.no_grad():
+        for case in cases_cpu:
+            ref_inputs_dev = [x.to(device) if hasattr(x, "to") else x
+                              for x in case]
+            out_ref_raw = model_ref(*ref_inputs_dev)
+            out_ref_per_case.append(_to_cpu_list(out_ref_raw))
+            del ref_inputs_dev, out_ref_raw
+    ref_source = "computed-worker"
+    # Free the ref model before ModelNew allocates — BatchNorm-scale
+    # tensors on HBM don't fit both at once.
+    del model_ref
+    if device_type == "npu":
+        torch.npu.empty_cache()
+    elif device_type == "cuda":
+        torch.cuda.empty_cache()
 
     # --- Run kernel on device for every case ---
     model_new = ModelNew(*init_inputs).to(device).eval()
@@ -477,23 +460,9 @@ print(f"PROFILE_RESULT: {{avg_us}}")
 # Tarball assembly
 # ---------------------------------------------------------------------------
 
-_WORKER_CACHE_ROOT = "/tmp/ar_cache"
-
-
-def _compute_worker_ref_path(task_dir: str, config: TaskConfig) -> str:
-    """Stable worker-side cache path, keyed by op_name + sha(reference.py).
-
-    Different reference.py content → different path → automatic invalidation.
-    Same reference.py across many kernel iterations → cache hits after round 1.
-    """
-    ref_file = config.ref_file
-    ref_full = os.path.join(task_dir, ref_file)
-    if os.path.isfile(ref_full):
-        with open(ref_full, "rb") as f:
-            ref_hash = hashlib.sha256(f.read()).hexdigest()[:12]
-    else:
-        ref_hash = "unknown"
-    return f"{_WORKER_CACHE_ROOT}/{config.name}_{ref_hash}/reference.pt"
+# /tmp/ar_cache/<op>_<sha>/reference.pt used to live here. Removed when
+# the multi-shape .pt reload was found to stall NPU workers — refs are
+# now recomputed every round inside verify_<op>.py.
 
 
 def _exclude_pycache(tarinfo: tarfile.TarInfo):
@@ -508,17 +477,16 @@ def _build_package(task_dir: str, config: TaskConfig, device_id: int = 0) -> byt
     """Build a tar.gz package with worker-compatible scripts.
 
     Generates and includes:
-      - verify_{op_name}.py     (correctness check, self-caches ref on worker)
+      - verify_{op_name}.py     (correctness check; recomputes ref per round)
       - profile_{op_name}_base.py (reference timing)
       - profile_{op_name}_generation.py (kernel timing)
       - kernel.py, reference.py, and any support .py files
 
-    Reference outputs are NEVER shipped in the tarball — worker computes them
-    on first verify and caches under /tmp/ar_cache/<op>_<ref_sha>/reference.pt.
+    Reference outputs are never shipped in the tarball and never cached on
+    the worker — verify_<op>.py recomputes Model on every round.
     """
     op_name = config.name
     buf = io.BytesIO()
-    worker_ref_path = _compute_worker_ref_path(task_dir, config)
 
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         # Add editable files
@@ -561,8 +529,7 @@ def _build_package(task_dir: str, config: TaskConfig, device_id: int = 0) -> byt
                 tar.add(lib_src, arcname=lib_name)
 
         _add_script(f"verify_{op_name}.py",
-                     _gen_verify_script(config, device_id,
-                                        worker_ref_path=worker_ref_path))
+                     _gen_verify_script(config, device_id))
         _add_script(f"profile_{op_name}_base.py",
                      _gen_profile_script(config, device_id, mode="base"))
         _add_script(f"profile_{op_name}_generation.py",
