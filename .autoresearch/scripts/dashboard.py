@@ -222,12 +222,24 @@ def render(task_dir, history_offset=0, history_window=None):
     except Exception:
         updated = updated_raw
 
-    # Improvement (baseline is PyTorch reference latency; best is kernel latency)
+    # Improvement: speedup = baseline / best. The ANCHOR depends on
+    # baseline_source — "ref" means PyTorch reference (genuine speedup vs
+    # ref); "seed_fallback" means we never measured the ref and baseline
+    # is the seed timing itself (so the ratio is self-relative, not
+    # vs-ref). Mis-labeling seed_fallback as "vs ref" is a lie the user
+    # would not catch from the Best line alone.
     if best is not None and baseline is not None and baseline != 0 and best != 0:
         improv_pct = (baseline - best) / abs(baseline) * 100
         speedup = baseline / best
         color = GREEN if improv_pct > 0 else RED
-        improv_str = f"{color}{speedup:.2f}x vs ref ({improv_pct:+.1f}%){RESET}"
+        src = progress.get("baseline_source")
+        if src == "ref":
+            anchor_label = "vs ref"
+        elif src == "seed_fallback":
+            anchor_label = "vs seed (no ref measured)"
+        else:
+            anchor_label = "vs baseline"
+        improv_str = f"{color}{speedup:.2f}x {anchor_label} ({improv_pct:+.1f}%){RESET}"
     else:
         improv_str = f"{DIM}N/A{RESET}"
 

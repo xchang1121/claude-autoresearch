@@ -329,17 +329,26 @@ def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
     metrics: dict = {}
 
     # --- timing + speedup -------------------------------------------------
+    # ref_latency_us and latency_us are INDEPENDENT measurements. A broken
+    # kernel round (gen_time=None) must NOT drop the ref baseline — base
+    # profile runs reference.py only, has nothing to do with kernel.py.
+    # The previous `if gen_ok and base_ok: metrics["ref_latency_us"]=...`
+    # path silently swallowed a valid ref reading whenever the kernel
+    # crashed, leaving baseline_init to fall back to seed_fallback even
+    # though we successfully measured the ref. Surface each independently;
+    # gate only the speedup RATIO on both being valid.
     if gen_ok:
         metrics["latency_us"] = gen_time
     else:
         print(f"[eval] WARNING: no valid gen_time (got {gen_time!r}) — "
               f"kernel profile likely failed", file=sys.stderr)
-    if gen_ok and base_ok:
+    if base_ok:
         metrics["ref_latency_us"] = base_time
-        metrics["speedup_vs_ref"] = base_time / gen_time
-    elif not base_ok:
+    else:
         print(f"[eval] WARNING: no valid base_time (got {base_time!r}) — "
               f"speedup vs reference unavailable", file=sys.stderr)
+    if gen_ok and base_ok:
+        metrics["speedup_vs_ref"] = base_time / gen_time
     elif profile_resp.get("speedup"):
         metrics["speedup_vs_ref"] = profile_resp["speedup"]
 

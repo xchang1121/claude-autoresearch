@@ -570,15 +570,26 @@ def get_guidance(task_dir: str) -> str:
 
         # Compact metric snapshot — saves the subagent from reading
         # history.jsonl just to answer "how big a delta do we need?".
+        # Label baseline accurately: when baseline_source=="ref" the
+        # anchor is the PyTorch reference; when "seed_fallback" the
+        # anchor IS the seed timing itself (no ref ever measured) and
+        # claiming ref_baseline=<value> to the subagent would be a lie.
         metric_line = ""
         if progress:
             seed = progress.get("seed_metric")
             base = progress.get("baseline_metric")
             best = progress.get("best_metric")
+            src = progress.get("baseline_source")
             if any(v is not None for v in (seed, base, best)):
+                if src == "ref":
+                    base_label = f"ref_baseline={base}"
+                elif src == "seed_fallback":
+                    base_label = f"baseline={base} (seed fallback, no ref measured)"
+                else:
+                    base_label = f"baseline={base}"
                 metric_line = (
                     f"\nMetrics ({primary_metric}): "
-                    f"seed={seed} | ref_baseline={base} | current_best={best}"
+                    f"seed={seed} | {base_label} | current_best={best}"
                 )
         # Single source of plan_version + per-pv attempt counter (also
         # validates the artifact, but the result is unused here — accepting
@@ -746,8 +757,19 @@ def get_guidance(task_dir: str) -> str:
     if phase == FINISH:
         best = progress.get("best_metric") if progress else "?"
         baseline = progress.get("baseline_metric") if progress else "?"
+        src = progress.get("baseline_source") if progress else None
+        # When baseline_source=="seed_fallback" the anchor IS the seed
+        # timing itself — the FINISH summary needs to say so explicitly,
+        # otherwise "Best: 12.3, baseline: 12.3" reads as a no-op when in
+        # fact the user just learned that no PyTorch ref was ever measured.
+        if src == "seed_fallback":
+            anchor = f"seed-fallback baseline: {baseline} (no PyTorch ref measured)"
+        elif src == "ref":
+            anchor = f"ref baseline: {baseline}"
+        else:
+            anchor = f"baseline: {baseline}"
         return (f"[AR Phase: FINISH] Done. Best {primary_metric}: {best} "
-                f"(baseline: {baseline}). Report auto-generated at "
+                f"({anchor}). Report auto-generated at "
                 f".ar_state/report.md. Summarize for user; do not write any "
                 f"files.")
 
