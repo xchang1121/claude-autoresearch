@@ -222,6 +222,138 @@ def _skills_hint(dsl) -> str:
     )
 
 
+def _multi_shape_plan_note(progress: Optional[dict],
+                           task_dir: Optional[str] = None) -> str:
+    """One-line note for the PLAN phase: say the op is multi-shape and point
+    at the actual file(s) holding the shape spec. Deliberately does NOT
+    list individual shapes — plan items are coarse-grained decisions, a
+    30-line case dump in the planning prompt makes the agent over-engineer
+    for shape generality at the expense of writing good plan items.
+
+    NPUKernelBench-style refs read shapes from a sidecar JSON (the ref's
+    `get_input_groups()` opens a same-directory `<basename>.json`). When
+    that JSON is present in `task_dir`, this note names it explicitly —
+    pointing at reference.py alone is not enough because the .py file is
+    just a loader; the actual shape list lives in the JSON.
+
+    Returns "" for single-shape ops (progress.num_cases <= 1) and when
+    progress.json hasn't been written yet (pre-BASELINE).
+    """
+    if not progress:
+        return ""
+    n = progress.get("num_cases")
+    if not isinstance(n, int) or n <= 1:
+        return ""
+
+    sidecar_names: list[str] = []
+    if task_dir and os.path.isdir(task_dir):
+        try:
+            for fname in sorted(os.listdir(task_dir)):
+                if not fname.endswith(".json"):
+                    continue
+                if fname.startswith("."):
+                    continue
+                if os.path.isfile(os.path.join(task_dir, fname)):
+                    sidecar_names.append(fname)
+        except OSError:
+            pass
+
+    if sidecar_names:
+        full_paths = [f"{task_dir}/{name}" for name in sidecar_names]
+        if len(full_paths) == 1:
+            where = f"shape list: {full_paths[0]}"
+        else:
+            where = "shape lists:\n  - " + "\n  - ".join(full_paths)
+    else:
+        where = (
+            f"shape list: {task_dir}/reference.py "
+            f"(in the get_input_groups() body)"
+        )
+
+    return (
+        f"Note: multi-shape op — reference exposes {n} input groups "
+        f"via get_input_groups(). {where}\n"
+        f"Plan items must hold across all shapes; rely on shape-aware "
+        f"logic (read shape at runtime, dispatch on dtype/rank, adapt "
+        f"tile size) rather than constants pinned to one shape."
+    )
+
+
+def _last_failure_metrics(task_dir: str) -> Optional[dict]:
+    """Return the metrics dict of the most recent FAIL/SEED record in
+    history.jsonl whose `correctness` is False. Used by GENERATE_KERNEL
+    retry guidance (the seed kernel's BASELINE just failed correctness;
+    the round-0 SEED record carries the per-shape detail). Returns None
+    when no failed record exists or history is missing.
+    """
+    hpath = history_path(task_dir)
+    if not os.path.exists(hpath):
+        return None
+    last = None
+    try:
+        with open(hpath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("correctness") is False:
+                    last = rec
+    except OSError:
+        return None
+    if not last:
+        return None
+    metrics = last.get("metrics")
+    return metrics if isinstance(metrics, dict) else None
+
+
+def _failed_shapes_block(metrics: Optional[dict],
+                         progress: Optional[dict],
+                         *, max_listed: int = 5) -> str:
+    """Render the per-shape failure detail used in DIAGNOSE / GENERATE_KERNEL
+    retry. Pulls from the metrics block of a single FAIL history record
+    (eval_client populates these from the verify subprocess's verify_json):
+      - correctness_failed_cases: list of failing case indices
+      - correctness_total_cases:  total case count at FAIL time
+      - correctness_worst_case:   index with the largest max_abs_diff
+      - correctness_worst_max_abs: that diff
+
+    Resolves indices to describe_case() strings via progress.per_shape_descs
+    so the agent sees both the index and the actual shape it fouled up.
+    Returns "" when none of those fields are present (e.g. compile-error
+    failure with no per-case detail, or single-shape op where the failure
+    block is redundant).
+    """
+    if not metrics:
+        return ""
+    failed = metrics.get("correctness_failed_cases")
+    total = metrics.get("correctness_total_cases")
+    if not isinstance(failed, list) or not failed:
+        return ""
+    if not isinstance(total, int) or total <= 1:
+        return ""
+
+    descs = (progress or {}).get("per_shape_descs") or []
+    parts = [f"      failed shapes: {len(failed)}/{total}"]
+    for idx in failed[:max_listed]:
+        if isinstance(idx, int) and 0 <= idx < len(descs):
+            parts.append(f"        [{idx}] {descs[idx]}")
+        else:
+            parts.append(f"        [{idx}] (desc unavailable)")
+    if len(failed) > max_listed:
+        parts.append(f"        ... ({len(failed)} failures total)")
+    worst_idx = metrics.get("correctness_worst_case")
+    worst_max = metrics.get("correctness_worst_max_abs")
+    if isinstance(worst_idx, int) and isinstance(worst_max, (int, float)):
+        parts.append(
+            f"      worst: case [{worst_idx}] max_abs={worst_max:.3e}"
+        )
+    return "\n".join(parts)
+
+
 def _diagnose_plan_next_step(task_dir: str, *,
                              artifact_path: Optional[str] = None,
                              fallback: bool = False) -> str:
@@ -274,7 +406,9 @@ def get_guidance(task_dir: str) -> str:
         description = config.description if config else "(no description)"
         return (f"[AR Phase: GENERATE_REF] Write reference.py for: {description}\n"
                 f"Write to: {task_dir}/reference.py\n"
-                f"Must contain: class Model(nn.Module) with forward(), get_inputs(), get_init_inputs().\n"
+                f"Must contain: class Model(nn.Module) with forward(), "
+                f"get_init_inputs(), and one of get_inputs() (single-shape) "
+                f"or get_input_groups() (multi-shape, returns List[List]).\n"
                 f"This is the BASELINE implementation — no optimization, just correct.")
 
     if phase == GENERATE_KERNEL:
@@ -325,6 +459,25 @@ def get_guidance(task_dir: str) -> str:
                 "faster.\n"
             )
 
+        # Failed-shape detail: only on retry, only when BASELINE failed
+        # because some shapes mismatched (not when seed_metric is None,
+        # i.e. compile/profile failed — that has no per-shape signal).
+        # Read the round-0 SEED record from history; eval_client surfaces
+        # correctness_failed_cases etc. into its metrics dict.
+        failed_shapes_section = ""
+        if is_retry and progress.get("baseline_correctness") is False:
+            fail_metrics = _last_failure_metrics(task_dir)
+            block = _failed_shapes_block(fail_metrics, progress)
+            if block:
+                failed_shapes_section = (
+                    f"\n\nThe BASELINE correctness failure had per-shape "
+                    f"detail (from the round-0 SEED record):\n{block}\n"
+                    f"Fix the kernel for those shape(s) specifically; "
+                    f"common pitfalls: block size hardcoded for a different "
+                    f"shape, dtype dispatch missing, broadcast assumed but "
+                    f"not present.\n"
+                )
+
         return (
             f"{header} {verb} kernel from reference.\n"
             f"Task: {description}\n"
@@ -335,6 +488,7 @@ def get_guidance(task_dir: str) -> str:
             f"Must contain: class ModelNew (can inherit from Model)."
             f"{_skills_hint(dsl)}\n"
             f"{retry_block}"
+            f"{failed_shapes_section}"
             f"\n"
             f"Start simple — the autoresearch loop will iterate from here."
         )
@@ -349,9 +503,17 @@ def get_guidance(task_dir: str) -> str:
             baseline = progress.get("baseline_metric")
             if baseline is not None:
                 metric_hint = f" Baseline {primary_metric}: {baseline}."
+        # PLAN gets a short multi-shape note (count + pointer to the sidecar
+        # JSON / ref). Detailed case lists stay out-of-band in the actual
+        # file — clogging the planning context with 30 lines of
+        # `case i: tensor[...]` makes the agent over-engineer for shape
+        # generality rather than write good plan items. Returns "" for
+        # single-shape ops, so most tasks see no extra prompt content.
+        plan_note = _multi_shape_plan_note(progress, task_dir=task_dir)
+        plan_note_section = f"\n\n{plan_note}" if plan_note else ""
 
         return (f"[AR Phase: PLAN] "
-                f"Read task.yaml, editable files ({editable}), and reference.py.{_skills_hint(dsl)}{metric_hint}\n"
+                f"Read task.yaml, editable files ({editable}), and reference.py.{_skills_hint(dsl)}{metric_hint}{plan_note_section}\n"
                 f"\n"
                 f"{_create_plan_instruction(task_dir)}"
                 f"\n"
