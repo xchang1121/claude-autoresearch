@@ -77,7 +77,7 @@ def main():
     # we forward it whole — the pipeline falls back to printing it verbatim
     # when no pattern matched.
     if not result.correctness or result.error:
-        output["failure_signals"] = extract_failure_signals(result.raw_output)
+        output["failure_signals"] = extract_failure_signals(result.raw_output).to_dict()
         output["raw_output_tail"] = result.raw_output or ""
     print(json.dumps(output))
 

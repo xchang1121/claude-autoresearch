@@ -5,7 +5,8 @@ and NPU runtime errors. Diagnosing from a small structured summary is much
 faster than from 4KB of raw text, both for Claude-in-the-loop and for
 humans reading pipeline output.
 
-This module pattern-matches known failure modes and emits a compact JSON:
+This module pattern-matches known failure modes and emits an
+`EvalDiagnostic` whose JSON shape is:
 
     {
         "primary": "ub_overflow",      # most actionable kind, or None
@@ -22,7 +23,54 @@ Add new patterns to `PATTERNS` below. Keep them ordered by specificity
 from __future__ import annotations
 
 import re
-from typing import Any, Callable
+from dataclasses import dataclass, field, asdict
+from typing import Any, Callable, List, Optional
+
+
+@dataclass
+class EvalDiagnostic:
+    """Structured failure summary produced by `extract_failure_signals`.
+
+    Single source of truth for the failure_signals schema that flows
+    eval subprocess stderr -> failure_extractor -> eval_wrapper ->
+    record_round -> history.jsonl -> guidance prompt. Every consumer
+    either takes an instance directly or reads its `to_dict()` form
+    back off disk; the field set is owned here.
+
+    `signals` stays a list of dicts because each pattern brings its own
+    fields (ub_overflow has requested_bits / available_bits, npu_oom has
+    tried_gib, ...). Promoting Signal to its own dataclass would require
+    a discriminated union per kind and adds nothing for current consumers,
+    which inspect `s["kind"]` plus the kind-specific keys.
+    """
+    primary: Optional[str] = None
+    signals: List[dict] = field(default_factory=list)
+    python_error: Optional[str] = None
+
+    # ---- dict-compat read API ------------------------------------------
+    # Existing readers in record_round / guidance use `diag.get("X", default)`
+    # because the value off disk is a plain dict. Keeping `.get` here means
+    # in-memory EvalDiagnostic objects pass the same accessors without a
+    # rewrite at every read site.
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "EvalDiagnostic":
+        if not data:
+            return cls()
+        return cls(
+            primary=data.get("primary"),
+            signals=list(data.get("signals") or []),
+            python_error=data.get("python_error"),
+        )
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.signals and not self.python_error
 
 
 # Each pattern: (kind, compiled regex, extractor(match) -> dict, hint)
@@ -137,15 +185,16 @@ _PYTHON_EXCEPTION_RE = re.compile(
 )
 
 
-def extract_failure_signals(raw_output: str, max_excerpt: int = 200) -> dict[str, Any]:
+def extract_failure_signals(raw_output: str,
+                            max_excerpt: int = 200) -> EvalDiagnostic:
     """Scan combined worker log for known failure patterns.
 
     `raw_output` is the `log` field from the worker's verify/profile response
-    (or a concatenation of both). Returns a dict with `primary`, `signals`,
-    and `python_error` fields (see module docstring).
+    (or a concatenation of both). Returns an EvalDiagnostic; callers that
+    need the JSON form for stdout / history.jsonl call `.to_dict()`.
     """
     if not raw_output:
-        return {"primary": None, "signals": [], "python_error": None}
+        return EvalDiagnostic()
 
     signals: list[dict[str, Any]] = []
     seen_kinds: set[str] = set()
@@ -164,11 +213,11 @@ def extract_failure_signals(raw_output: str, max_excerpt: int = 200) -> dict[str
     exceptions = _PYTHON_EXCEPTION_RE.findall(raw_output)
     python_error = exceptions[-1][:240] if exceptions else None
 
-    return {
-        "primary": signals[0]["kind"] if signals else None,
-        "signals": signals,
-        "python_error": python_error,
-    }
+    return EvalDiagnostic(
+        primary=(signals[0]["kind"] if signals else None),
+        signals=signals,
+        python_error=python_error,
+    )
 
 
 def format_for_stdout(sig: dict[str, Any]) -> str:
@@ -205,5 +254,5 @@ if __name__ == "__main__":
 
     data = sys.stdin.read()
     result = extract_failure_signals(data)
-    json.dump(result, sys.stdout, indent=2)
+    json.dump(result.to_dict(), sys.stdout, indent=2)
     sys.stdout.write("\n")

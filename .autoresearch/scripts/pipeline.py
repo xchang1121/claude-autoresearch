@@ -24,10 +24,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 from task_config import load_task_config
 from failure_extractor import format_for_stdout
 from phase_machine import (
-    write_phase, compute_next_phase, get_active_item,
+    get_active_item,
     get_guidance, auto_rollback, load_progress, edit_marker_path,
     pending_settle_path, parse_last_json_line, FINISH,
 )
+from workflow import PhaseController, record_round
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -102,8 +103,7 @@ def _post_settle(task_dir: str, decision: str, settled_id: str) -> None:
     """Common path after a successful settle: advance phase, clear edit
     marker, print status. Runs whether settle succeeded the first time or
     on the replay-only retry."""
-    next_phase = compute_next_phase(task_dir)
-    write_phase(task_dir, next_phase)
+    next_phase = PhaseController(task_dir).on_round_settled()
     marker = edit_marker_path(task_dir)
     if os.path.exists(marker):
         os.remove(marker)
@@ -263,14 +263,16 @@ def main():
             print(eval_json["raw_output_tail"], flush=True)
 
     # === Step 3: Keep or discard ===
-    kd_cmd = [sys.executable, os.path.join(SCRIPT_DIR, "keep_or_discard.py"),
-              task_dir, json.dumps(eval_json), "--description", desc]
-    if plan_item:
-        kd_cmd += ["--plan-item", plan_item]
-    kd = subprocess.run(kd_cmd, capture_output=True, text=True, timeout=30)
-    kd_json = parse_last_json_line(kd.stdout)
-    if kd_json is None:
-        print(f"[PIPELINE] KEEP/DISCARD ERROR: {kd.stdout[:200]}")
+    # In-process call (no subprocess + stdout JSON round-trip). Earlier this
+    # was a `subprocess.run` whose stdout was parsed by parse_last_json_line;
+    # any stray stdout from an imported module before the JSON line would
+    # corrupt the decision protocol. record_round returns the same dict the
+    # CLI shell prints.
+    try:
+        kd_json = record_round(task_dir, eval_json,
+                               description=desc, plan_item=plan_item)
+    except Exception as exc:
+        print(f"[PIPELINE] KEEP/DISCARD ERROR: {exc}")
         sys.exit(1)
 
     decision = kd_json.get("decision", "FAIL")

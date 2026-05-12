@@ -55,16 +55,15 @@ Output: writes plan.md, prints JSON status.
 """
 import json
 import os
-import re
 import sys
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(__file__))
 from phase_machine import (
-    load_progress, save_progress, get_plan_items,
-    plan_path, progress_path, PLAN_ITEMS_FILE,
-    is_settled_table_header,
+    load_progress, update_progress,
+    progress_path, PLAN_ITEMS_FILE,
 )
+from workflow import PlanStore
 
 
 # Words that indicate parameter tuning, used by `_check_diversity` to flag
@@ -224,77 +223,6 @@ def _check_diversity(items):
         )
 
 
-def _parse_old_plan(task_dir: str):
-    """Return (settled_rows_str, pending_items) from the existing plan.md.
-
-    Pending items are produced by the canonical parser; settled-history rows
-    are carried forward verbatim so history layout stays stable.
-    """
-    pending = [
-        {"id": it["id"], "description": it["description"]}
-        for it in get_plan_items(task_dir)
-        if not it["done"]
-    ]
-
-    settled_rows = ""
-    ppath = plan_path(task_dir)
-    if os.path.exists(ppath):
-        with open(ppath, "r", encoding="utf-8") as f:
-            content = f.read()
-        in_table = False
-        for line in content.split("\n"):
-            stripped = line.strip()
-            if is_settled_table_header(line):
-                in_table = True
-                continue
-            if in_table and stripped.startswith("|---"):
-                continue
-            if in_table and stripped.startswith("|"):
-                settled_rows += line + "\n"
-            elif in_table:
-                in_table = False
-    return settled_rows, pending
-
-
-def _compute_next_pid(progress: dict, ppath: str) -> int:
-    """Monotonic pid allocator. Falls back to scanning plan.md when the counter
-    is missing (old tasks that predate the field)."""
-    n = progress.get("next_pid")
-    if n is not None:
-        return n
-    n = 1
-    if os.path.exists(ppath):
-        with open(ppath, "r", encoding="utf-8") as f:
-            for m in re.finditer(r'\*\*p(\d+)\*\*', f.read()):
-                n = max(n, int(m.group(1)) + 1)
-    return n
-
-
-def _allocate_ids(n_items: int, next_pid: int) -> tuple:
-    """Assign `n_items` fresh pids from the monotonic counter.
-
-    Returns (item_ids, new_next_pid). Pids are never reused — dropped pids
-    from the previous plan stay dropped; they don't free their slot.
-    """
-    ids = [f"p{next_pid + i}" for i in range(n_items)]
-    return ids, next_pid + n_items
-
-
-def _render_plan(version: int, item_ids: list, items: list, settled_rows: str) -> str:
-    lines = [f"# Plan v{version}", "", "## Active Items"]
-    for i, (item, pid) in enumerate(zip(items, item_ids)):
-        marker = " (ACTIVE)" if i == 0 else ""
-        lines.append(f"- [ ] **{pid}**{marker}: {item['desc'].strip()}")
-        lines.append(f"  - rationale: {item['rationale'].strip()}")
-    lines.append("")
-    lines.append("## Settled History")
-    lines.append("| Item | Outcome | Metric | Reason |")
-    lines.append("|------|---------|--------|--------|")
-    if settled_rows:
-        lines.append(settled_rows.rstrip())
-    return "\n".join(lines) + "\n"
-
-
 def main():
     global _SOURCE_MODE
     if len(sys.argv) < 2:
@@ -342,29 +270,25 @@ def main():
     _validate_items(items)
     _check_diversity(items)
 
-    progress = load_progress(task_dir) or {}
-    version = progress.get("plan_version", 0) + 1
-    ppath = plan_path(task_dir)
-    next_pid = _compute_next_pid(progress, ppath)
+    progress = load_progress(task_dir)
+    version = (progress.plan_version if progress else 0) + 1
+    next_pid_saved = progress.next_pid if progress else None
+    store = PlanStore(task_dir)
+    next_pid = store.compute_next_pid(next_pid_saved)
 
     # Carry the existing Settled History table forward verbatim. Old
     # pending items (still-unrun pids from the previous plan) are silently
     # dropped: no fake DISCARD row, no history.jsonl entry. Their pids
     # remain consumed (next_pid does not regress) so the audit chain is
     # plan_version + history.jsonl absence — see module docstring.
-    settled_rows, old_pending = _parse_old_plan(task_dir)
-    dropped_pids = [it["id"] for it in old_pending]
+    settled_rows = store.parse_settled_history()
+    dropped_pids = [it["id"] for it in store.parse_pending()]
 
-    item_ids, new_next_pid = _allocate_ids(len(items), next_pid)
+    item_ids, new_next_pid = PlanStore.allocate_ids(len(items), next_pid)
+    store.write(version, item_ids, items, settled_rows)
 
-    os.makedirs(os.path.dirname(ppath), exist_ok=True)
-    with open(ppath, "w", encoding="utf-8") as f:
-        f.write(_render_plan(version, item_ids, items, settled_rows))
-
-    progress["next_pid"] = new_next_pid
-    progress["plan_version"] = version
     if os.path.exists(progress_path(task_dir)):
-        save_progress(task_dir, progress, stamp=False)
+        update_progress(task_dir, next_pid=new_next_pid, plan_version=version)
 
     print(json.dumps({
         "ok": True,
@@ -372,7 +296,7 @@ def main():
         "items": item_ids,
         "active": item_ids[0],
         "dropped": dropped_pids,
-        "path": ppath,
+        "path": store.path,
     }))
 
 

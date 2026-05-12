@@ -12,18 +12,17 @@ Usage:
 
 Output (stdout, last line):
     {"next_phase": "EDIT", "settled_item": "p1", "decision": "KEEP", "metric": 1294.8}
+
+All plan.md mutation goes through workflow.PlanStore so the parse / render
+formats can't drift across files. Phase advancement goes through
+workflow.PhaseController so the phase rule lives in one place.
 """
 import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-# Single owner of plan.md regex parsing lives in validators.py;
-# settle.py mutates the file but uses the canonical matcher for finding
-# the lines to mutate. _PLAN_ITEM_RE captures (status, item_id, rest)
-# where status is ' '/'x'.
-from phase_machine import (compute_next_phase, plan_path, _PLAN_ITEM_RE,
-                           is_settled_table_header)
+from workflow import PhaseController, PlanStore
 
 
 def main():
@@ -51,93 +50,25 @@ def main():
     # For KEEP, best_metric is this round's value. For DISCARD we have no metric.
     metric_val = best_metric if decision == "KEEP" else None
 
-    ppath = plan_path(task_dir)
-    if not os.path.exists(ppath):
+    store = PlanStore(task_dir)
+    if not store.exists():
         print(json.dumps({"error": "plan.md not found"}))
         sys.exit(1)
 
-    with open(ppath, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    lines = content.split("\n")
-    settled_item_id = None
-    settled_item_desc = ""
-    active_line_idx = None
-
-    if decision == "KEEP" and metric_val is not None:
-        tag = f"[KEEP, metric={metric_val:.1f}]"
-    elif decision == "DISCARD":
-        tag = "[DISCARD]"
-    else:
-        tag = "[FAIL]"
-
-    # Find the (ACTIVE) item using the canonical _PLAN_ITEM_RE so this
-    # parser can never drift from validators.get_plan_items.
-    for i, line in enumerate(lines):
-        m = _PLAN_ITEM_RE.match(line)
-        if m is None or m.group(1) != ' ' or "(ACTIVE)" not in line:
-            continue
-        active_line_idx = i
-        settled_item_id = m.group(2)
-        rest = m.group(3).replace("(ACTIVE)", "").strip().lstrip(": ").strip()
-        # Keep the full description. Display-time truncation (dashboard,
-        # hook status lines) happens at render time against actual
-        # terminal width.
-        settled_item_desc = rest
-        # Rewrite from `[ ]` onwards; preserve the leading "  - " prefix.
-        b = line.index('[ ]')
-        lines[i] = line[:b] + f"[x] **{settled_item_id}** {tag}: {rest}"
-        break
-
-    if active_line_idx is None:
-        print(json.dumps({"error": "no (ACTIVE) item found in plan.md"}))
+    try:
+        settled_item_id, _settled_desc = store.settle_active(decision, metric_val)
+    except RuntimeError as exc:
+        print(json.dumps({"error": str(exc)}))
         sys.exit(1)
 
-    # Find next pending item and mark it (ACTIVE).
-    for i, line in enumerate(lines):
-        if i == active_line_idx:
-            continue
-        m = _PLAN_ITEM_RE.match(line)
-        if m is None or m.group(1) != ' ' or "(ACTIVE)" in line:
-            continue
-        item_id = m.group(2)
-        rest = m.group(3).lstrip(": ").strip()
-        b = line.index('[ ]')
-        lines[i] = line[:b] + f"[ ] **{item_id}** (ACTIVE): {rest}"
-        break
+    next_phase = PhaseController(task_dir).on_round_settled()
 
-    # Add to settled history table
-    history_line = f"| {settled_item_id} | {decision} | {metric_val if metric_val is not None else 'N/A'} | {settled_item_desc} |"
-    # Find the table and append
-    table_end = None
-    for i, line in enumerate(lines):
-        if is_settled_table_header(line):
-            # Found header, skip header + separator
-            table_end = i + 2
-            # Find last row
-            for j in range(i + 2, len(lines)):
-                if lines[j].strip().startswith("|"):
-                    table_end = j + 1
-                else:
-                    break
-
-    if table_end is not None:
-        lines.insert(table_end, history_line)
-
-    # Write back
-    with open(ppath, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-    # Compute next phase
-    next_phase = compute_next_phase(task_dir)
-
-    output = {
+    print(json.dumps({
         "settled_item": settled_item_id,
         "decision": decision,
         "metric": metric_val,
         "next_phase": next_phase,
-    }
-    print(json.dumps(output))
+    }))
 
 
 if __name__ == "__main__":

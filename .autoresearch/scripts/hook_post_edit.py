@@ -16,11 +16,12 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from hook_utils import read_hook_input, emit_status, norm_abs_fwd_slash, extract_target_path
 from phase_machine import (
-    read_phase, write_phase, get_guidance, _load_config_safe,
+    read_phase, get_guidance, _load_config_safe,
     get_task_dir, touch_heartbeat,
     validate_reference, validate_kernel, is_placeholder_file,
     EDIT, BASELINE, GENERATE_REF, GENERATE_KERNEL,
 )
+from workflow import PhaseController
 from git_utils import commit_in_task
 
 
@@ -64,7 +65,7 @@ def _seed_and_advance(task_dir: str, current_phase: str, kind: str,
             f"retry the commit."
         )
         return False
-    write_phase(task_dir, next_phase)
+    PhaseController(task_dir).on_seed_validated(next_phase)
     emit_status(f"[AR] {kind} validated. Phase -> {next_phase}. "
                 f"{get_guidance(task_dir)}")
     return True

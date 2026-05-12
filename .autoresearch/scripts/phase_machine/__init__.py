@@ -11,6 +11,7 @@ directly from the submodule (`from phase_machine.state_store import ...`).
 that still import it from phase_machine.
 """
 # fmt: off
+from .models import Progress
 from .state_store import (
     # Phase constants
     INIT, GENERATE_REF, GENERATE_KERNEL, BASELINE, PLAN, EDIT,

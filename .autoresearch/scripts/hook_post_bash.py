@@ -26,7 +26,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from hook_utils import read_hook_input, emit_status, emit_todowrite_context
 from phase_machine import (
-    read_phase, write_phase, get_guidance, compute_resume_phase,
+    read_phase, get_guidance,
     get_task_dir, set_task_dir, get_active_item, touch_heartbeat,
     load_progress, update_progress,
     validate_reference, validate_kernel, is_placeholder_file,
@@ -35,6 +35,7 @@ from phase_machine import (
     PHASE_FILE,
     BASELINE, PLAN, EDIT, DIAGNOSE, REPLAN, GENERATE_REF, GENERATE_KERNEL,
 )
+from workflow import PhaseController
 
 
 def _activation_target(command: str) -> str | None:
@@ -99,8 +100,7 @@ def _handle_activation(new_task_dir: str):
         _print_resume_context(new_task_dir)
         emit_status(get_guidance(new_task_dir))
     elif has_progress:
-        phase = compute_resume_phase(new_task_dir)
-        write_phase(new_task_dir, phase)
+        phase = PhaseController(new_task_dir).on_activation_resume()
         emit_status(f"[AR] Resuming from progress. Phase -> {phase}.")
         _print_resume_context(new_task_dir)
         emit_status(get_guidance(new_task_dir))
@@ -117,14 +117,15 @@ def _fresh_start(task_dir: str):
     ref_path = os.path.join(task_dir, "reference.py")
     kernel_path = os.path.join(task_dir, "kernel.py")
 
+    pc = PhaseController(task_dir)
     if is_placeholder_file(ref_path):
-        write_phase(task_dir, GENERATE_REF)
+        pc.on_activation_no_ref()
         emit_status(f"[AR] Fresh start (no reference). Phase -> GENERATE_REF. {get_guidance(task_dir)}")
         return
 
     ok, err = validate_reference(task_dir)
     if not ok:
-        write_phase(task_dir, GENERATE_REF)
+        pc.on_activation_invalid_ref()
         emit_status(
             f"[AR] reference.py present but invalid — Phase -> GENERATE_REF.\n"
             f"     {err}"
@@ -132,20 +133,20 @@ def _fresh_start(task_dir: str):
         return
 
     if is_placeholder_file(kernel_path):
-        write_phase(task_dir, GENERATE_KERNEL)
+        pc.on_activation_no_kernel()
         emit_status(f"[AR] Fresh start (no kernel). Phase -> GENERATE_KERNEL. {get_guidance(task_dir)}")
         return
 
     ok, err = validate_kernel(task_dir)
     if not ok:
-        write_phase(task_dir, GENERATE_KERNEL)
+        pc.on_activation_invalid_kernel()
         emit_status(
             f"[AR] kernel.py present but invalid — Phase -> GENERATE_KERNEL.\n"
             f"     {err}"
         )
         return
 
-    write_phase(task_dir, BASELINE)
+    pc.on_activation_ready()
     emit_status(f"[AR] Fresh start. Phase -> BASELINE. {get_guidance(task_dir)}")
 
 
@@ -187,29 +188,26 @@ def main():
     invoked = parse_invoked_ar_script(command)
 
     if invoked == "baseline.py" and phase == BASELINE:
+        # PhaseController.on_baseline_settled inspects progress.json (seed_
+        # metric / baseline_correctness) and picks PLAN vs GENERATE_KERNEL.
+        # Demoting to GENERATE_KERNEL on failure keeps kernel.py editable
+        # (BASELINE's _EDIT_RULES forbid it) so the loop doesn't deadlock.
         progress = load_progress(task_dir)
         if not progress:
             emit_status("[AR] Baseline failed (no progress.json). Retry.")
-        elif (progress.get("seed_metric") is None
-              or progress.get("baseline_correctness") is False):
-            # Demote to GENERATE_KERNEL so Edit on kernel.py is permitted
-            # again — BASELINE's _EDIT_RULES forbid it. The previous
-            # cap-at-3 branch left phase pinned at BASELINE, which
-            # deadlocked the task (kernel.py uneditable, baseline.py the
-            # only allowed command, and re-running it just kept failing).
-            # Always demoting back to GENERATE_KERNEL avoids that trap.
-            reason = ("seed kernel produced no timing"
-                      if progress.get("seed_metric") is None
-                      else "seed kernel failed correctness check")
-            write_phase(task_dir, GENERATE_KERNEL)
-            emit_status(
-                f"[AR] Baseline failed: {reason}. "
-                f"Phase -> GENERATE_KERNEL so kernel.py becomes editable. "
-                f"Fix the kernel, then re-run baseline.py."
-            )
         else:
-            write_phase(task_dir, PLAN)
-            emit_status(f"[AR] Baseline complete. Phase -> PLAN. {get_guidance(task_dir)}")
+            new_phase = PhaseController(task_dir).on_baseline_settled()
+            if new_phase == GENERATE_KERNEL:
+                reason = ("seed kernel produced no timing"
+                          if progress.seed_metric is None
+                          else "seed kernel failed correctness check")
+                emit_status(
+                    f"[AR] Baseline failed: {reason}. "
+                    f"Phase -> GENERATE_KERNEL so kernel.py becomes editable. "
+                    f"Fix the kernel, then re-run baseline.py."
+                )
+            else:
+                emit_status(f"[AR] Baseline complete. Phase -> PLAN. {get_guidance(task_dir)}")
 
     elif invoked == "pipeline.py":
         # pipeline.py writes .phase itself; just project state + notify.
@@ -241,7 +239,7 @@ def main():
         ok, err = validate_plan(task_dir)
         if ok:
             _progress_update_for_plan(task_dir, phase)
-            write_phase(task_dir, EDIT)
+            PhaseController(task_dir).on_plan_validated()
             if phase == EDIT:
                 # Recovery completed: discard the orphan kd_json. The new
                 # plan_version starts fresh; the round whose decision was

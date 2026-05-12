@@ -9,7 +9,9 @@ What lives in this module:
   - Canonical file basenames inside `.ar_state/` (PHASE_FILE, etc.).
   - Path builders (`state_path`, `plan_path`, `progress_path`, …).
   - Phase I/O (`read_phase`, `write_phase`).
-  - Progress I/O (`load_progress`, `save_progress`, `update_progress`).
+  - Progress I/O (`load_progress` -> Progress, `save_progress`,
+    `update_progress`). Progress is a typed dataclass (see models.py)
+    so writers construct full objects and the field set is validated.
   - History append (`append_history`).
   - Active-task pointer (`get_task_dir`, `set_task_dir`).
   - Heartbeat touch.
@@ -23,7 +25,9 @@ of the dependency stack avoids the cycle.
 import json
 import os
 import sys
-from typing import Optional
+from typing import Optional, Union
+
+from .models import Progress
 
 
 # ---------------------------------------------------------------------------
@@ -209,43 +213,52 @@ def write_phase(task_dir: str, phase: str):
 # Progress + history I/O
 # ---------------------------------------------------------------------------
 
-def load_progress(task_dir: str) -> Optional[dict]:
-    """Read .ar_state/progress.json, or None if absent/corrupt.
+def load_progress(task_dir: str) -> Optional[Progress]:
+    """Read .ar_state/progress.json into a typed Progress, or None if
+    absent/corrupt. Single canonical reader.
 
-    Single canonical reader — no other module should re-implement this.
+    Existing read sites use `progress.get("X", default)`; Progress.get
+    mirrors dict.get so they keep working without any rewrite. New code
+    should prefer attribute access (`progress.eval_rounds`).
     """
     path = progress_path(task_dir)
     if not os.path.exists(path):
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except Exception:
         return None
+    if not isinstance(data, dict):
+        return None
+    return Progress.from_dict(data)
 
 
-def save_progress(task_dir: str, progress: dict, *, stamp: bool = True):
-    """Write progress dict to .ar_state/progress.json atomically.
-    Optionally stamps last_updated. Single canonical writer.
+def save_progress(task_dir: str, progress: Union[Progress, dict],
+                  *, stamp: bool = True):
+    """Write progress to .ar_state/progress.json atomically. Accepts
+    Progress or a plain dict (the dict path stays for batch/manifest.py
+    which has its own schema and predates the dataclass).
 
-    Atomicity matters: a non-atomic truncate-then-write would let a
-    concurrent reader (e.g. ``compute_next_phase`` reading via
-    ``load_progress``) catch an empty / partial file, which
-    ``load_progress`` swallows as ``None`` (parse error) and
-    ``compute_next_phase`` then treats as ``FINISH`` (budget exhausted).
-    The probability per round is tiny but compounds with round count —
-    long runs were occasionally short-circuited to FINISH well before
-    ``max_rounds``. Writing to a sibling ``.tmp`` and ``os.replace``-ing
-    into place gives readers an all-or-nothing view.
+    Atomicity: tmp + os.replace. Earlier non-atomic rewrites occasionally
+    let `load_progress` see an empty file mid-write and `compute_next_
+    phase` then short-circuit to FINISH well before max_rounds.
     """
     from datetime import datetime, timezone
     path = progress_path(task_dir)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    if stamp:
-        progress["last_updated"] = datetime.now(timezone.utc).isoformat()
+    if isinstance(progress, Progress):
+        if stamp:
+            progress = progress.apply(
+                last_updated=datetime.now(timezone.utc).isoformat())
+        payload = progress.to_dict()
+    else:
+        payload = dict(progress)
+        if stamp:
+            payload["last_updated"] = datetime.now(timezone.utc).isoformat()
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(progress, f, indent=2)
+        json.dump(payload, f, indent=2)
     os.replace(tmp_path, path)
 
 
@@ -258,20 +271,24 @@ def append_history(task_dir: str, record: dict):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def update_progress(task_dir: str, **fields) -> Optional[dict]:
-    """Load progress, apply **fields, save. Returns the new dict.
+def update_progress(task_dir: str, **fields) -> Optional[Progress]:
+    """Load Progress, .apply(**fields), save. Returns the new Progress.
+
+    Field-name validation is delegated to Progress.apply, so a typo here
+    becomes TypeError instead of a silently-dropped attribute (which is
+    what `progress["typo"] = ...` produced in the dict-era code).
 
     Silently no-ops if progress.json does not exist.
     """
     progress = load_progress(task_dir)
     if progress is None:
         return None
-    progress.update(fields)
+    new_progress = progress.apply(**fields)
     try:
-        save_progress(task_dir, progress, stamp=False)
+        save_progress(task_dir, new_progress, stamp=False)
     except Exception:
         return None
-    return progress
+    return new_progress
 
 
 # ---------------------------------------------------------------------------
