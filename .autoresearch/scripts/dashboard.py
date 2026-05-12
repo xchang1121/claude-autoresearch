@@ -96,10 +96,20 @@ RESET = "\033[0m"
 
 
 def _read_raw(path):
-    """Read file bypassing OS-level cache."""
+    # Read everything until EOF — single os.read() returns at most one chunk
+    # and short-reads on regular files (multi-shape history.jsonl trivially
+    # passes 256 KB after ~25 rounds with 60 cases, at which point the
+    # dashboard would silently drop the tail and look frozen on the most
+    # recent rounds).
     fd = os.open(path, os.O_RDONLY)
     try:
-        return os.read(fd, 1024 * 256).decode("utf-8", errors="replace")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
     finally:
         os.close(fd)
 
@@ -129,14 +139,8 @@ def load_jsonl(path):
 def load_plan(path):
     if not os.path.exists(path):
         return "(no plan yet)", None
-    # Bypass any OS-level read cache by reopening with no buffering
     mtime = os.path.getmtime(path)
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        raw = os.read(fd, 1024 * 64)
-    finally:
-        os.close(fd)
-    return raw.decode("utf-8", errors="replace"), mtime
+    return _read_raw(path), mtime
 
 
 def bar(fraction, width=30):
