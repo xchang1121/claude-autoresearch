@@ -33,21 +33,30 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import manifest as mf
-# Reach up one level so we can import the shared correctness module the
-# eval-package verify script also uses. Single source of truth for the
-# allclose comparison — verify.py and autoresearch's eval can't drift.
+# Reach up one level so we can import the shared correctness +
+# input_groups modules the eval-package verify script also uses. Single
+# source of truth for the allclose comparison — verify.py and
+# autoresearch's eval can't drift.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from correctness import compare_outputs  # noqa: E402
+from correctness import compare_outputs_per_case  # noqa: E402
+from input_groups import resolve as _resolve_groups  # noqa: E402
 
 VERIFY_RESULTS = "verify_results.json"
 TIER1_TIMEOUT = 30
-TIER2_TIMEOUT = 300
+# Cold JIT compile across many cases on triton-ascend can take several
+# minutes for kernels with constexpr-driven specialisations. Bump the
+# Tier-2 cap so multi-shape verifies aren't killed mid-loop.
+TIER2_TIMEOUT = 600
 # Defaults match autoresearch's loader fallback (loader.py:49-50). They are
 # only used when neither the CLI flag nor the manifest provides a value.
 DEFAULT_ATOL = 1e-2
 DEFAULT_RTOL = 1e-2
 
-REF_REQUIRED = ("Model", "get_inputs", "get_init_inputs")
+# Reference must export Model + get_init_inputs + one of (get_inputs,
+# get_input_groups). The "input provider" is checked separately (per
+# input_groups.resolve duck-type) since either symbol satisfies it.
+REF_REQUIRED = ("Model", "get_init_inputs")
+REF_INPUT_PROVIDERS = ("get_inputs", "get_input_groups")
 KERNEL_REQUIRED = ("ModelNew",)
 
 
@@ -91,6 +100,11 @@ def _tier1_inspect(path: Path, required: tuple[str, ...]) -> dict:
         return out
 
     missing = [name for name in required if not hasattr(mod, name)]
+    # Reference also needs an input provider: either get_inputs() or
+    # get_input_groups(). Treat absence of both as missing.
+    if required is REF_REQUIRED and not any(
+            hasattr(mod, n) for n in REF_INPUT_PROVIDERS):
+        missing.append(" or ".join(REF_INPUT_PROVIDERS))
     if missing:
         out["exports"] = "FAIL"
         out["missing"] = missing
@@ -133,27 +147,28 @@ def _tier2_run(ref_path: Path, kernel_path: Path,
 
     try:
         init_args = ref_mod.get_init_inputs()
-        inputs = ref_mod.get_inputs()
+        cases = _resolve_groups(ref_mod)
     except Exception as e:
         out["status"] = "ERROR"
-        out["msg"] = f"get_inputs/get_init_inputs: {type(e).__name__}: {e}"
+        out["msg"] = f"get_inputs/get_input_groups: {type(e).__name__}: {e}"
         return out
 
+    # Place models + inputs on NPU when available — kernels allocate output
+    # buffers via torch.empty_like(x), so a CPU input means a CPU output
+    # buffer the Triton kernel can't write to (max_rel ~= 1e12 garbage).
+    # Matches package_builder._gen_verify_script's _to_device dance.
+    npu_mod = getattr(torch, "npu", None)
+    if npu_mod is not None and getattr(npu_mod, "is_available", lambda: False)():
+        device = torch.device("npu:0")
+    else:
+        device = torch.device("cpu")
+
     try:
-        ref = ref_mod.Model(*init_args)
-        new = kernel_mod.ModelNew(*init_args)
+        ref = ref_mod.Model(*init_args).to(device).eval()
+        new = kernel_mod.ModelNew(*init_args).to(device).eval()
     except Exception as e:
         out["status"] = "ERROR"
         out["msg"] = f"construct: {type(e).__name__}: {e}"
-        return out
-
-    try:
-        with torch.no_grad():
-            out_ref = ref(*inputs)
-            out_new = new(*inputs)
-    except Exception as e:
-        out["status"] = "ERROR"
-        out["msg"] = f"forward: {type(e).__name__}: {e}"
         return out
 
     def _to_list(x):
@@ -161,19 +176,34 @@ def _tier2_run(ref_path: Path, kernel_path: Path,
             return list(x)
         return [x]
 
-    ref_outs = _to_list(out_ref)
-    new_outs = _to_list(out_new)
+    def _to_device(seq):
+        return [t.to(device) if hasattr(t, "to") else t for t in seq]
 
-    cmp = compare_outputs(ref_outs, new_outs, atol, rtol)
+    out_ref_per_case: list = []
+    out_new_per_case: list = []
+    try:
+        with torch.no_grad():
+            for case in cases:
+                inp = _to_device(list(case))
+                out_ref_per_case.append(_to_list(ref(*inp)))
+                out_new_per_case.append(_to_list(new(*inp)))
+    except Exception as e:
+        out["status"] = "ERROR"
+        out["msg"] = f"forward: {type(e).__name__}: {e}"
+        return out
+
+    cmp = compare_outputs_per_case(out_ref_per_case, out_new_per_case,
+                                   atol, rtol)
     out["max_abs_diff"] = cmp["max_abs_diff"]
+    out["num_cases"] = len(cases)
+    out["per_case"] = cmp["per_case"]
     if cmp["correctness"]:
         out["status"] = "PASS"
-        out["msg"] = "OK"
+        out["msg"] = f"OK (n={len(cases)})"
     else:
         out["status"] = "FAIL"
         # Surface the first failing diagnostic — the full list goes into the
-        # JSON output for verify_results.json. Fall back to a generic note
-        # if compare_outputs returned no diagnostics (shouldn't happen).
+        # JSON output for verify_results.json.
         bad = next((d for d in cmp["diagnostics"] if "OK" not in d), None)
         out["msg"] = bad or "correctness mismatch (no diagnostics)"
         out["diagnostics"] = cmp["diagnostics"]

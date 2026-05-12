@@ -406,6 +406,24 @@ def render_report(task_dir: str) -> str:
         lines.append(f"| **最优加速比 (vs {ref_label})** | **{speedup_str}** |")
     lines.append("")
 
+    # Multi-shape: list the tested shapes once at the top so readers know
+    # what coverage the metric numbers represent. Single-shape tasks skip
+    # the section entirely. Pulled from the first history record whose
+    # metrics carry per_shape_descs (the SEED round, populated by
+    # eval_client._assemble_eval_result).
+    case_descs: list = []
+    for rec in history:
+        d = (rec.get("metrics", {}) or {}).get("per_shape_descs")
+        if isinstance(d, list) and d:
+            case_descs = d
+            break
+    if len(case_descs) > 1:
+        lines.append(f"## 测试形状 ({len(case_descs)})")
+        lines.append("")
+        for i, d in enumerate(case_descs):
+            lines.append(f"{i}. {d}")
+        lines.append("")
+
     if svg:
         lines.extend(["## Optimization Curve", "", svg, ""])
 
