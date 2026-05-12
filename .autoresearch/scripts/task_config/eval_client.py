@@ -513,10 +513,31 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
         # reference.py only) and profile_generation.py (the seed/kernel,
         # needs kernel.py correct). A broken kernel still lets us measure the
         # ref baseline, which is the user-facing anchor for speedup.
+        #
+        # profile_settings is REQUIRED for the worker to route correctly:
+        #   - triton_ascend / triton_cuda / pypto: script-direct path
+        #     (worker just runs the scripts and reads back the
+        #     *_profile_result.json each script wrote itself).
+        #   - ascend / cuda backends (no recognised dsl): msprof / nsys
+        #     path (worker wraps the scripts in a profiler and analyses
+        #     op_summary).
+        # Without dsl set, the worker falls back to the msprof path even
+        # for triton_ascend kernels — and msprof's op-count analyser can't
+        # match the script's own profiler_npu warmup/run counts, so
+        # base_time silently comes back as None.
+        # warmup_times/run_times match _gen_profile_script defaults so
+        # the msprof analyser path (when used) has the right expectation.
+        profile_settings = {
+            "dsl": config.dsl or "",
+            "backend": config.backend or "",
+            "warmup_times": 10,
+            "run_times": 100,
+        }
         print(f"[remote_eval] Running profile...", file=sys.stderr)
         try:
             profile_resp = _worker_profile(
                 worker_url, package, task_id, config.name, eff_timeout,
+                profile_settings=profile_settings,
             )
         except Exception as e:
             return EvalResult(

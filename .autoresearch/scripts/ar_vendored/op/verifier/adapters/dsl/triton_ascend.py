@@ -148,7 +148,7 @@ except ImportError:
             result = impl_model(*{inputs})
             return result
         
-        if backend == "ascend" and patch_imported:
+        if {backend!r} == "ascend" and patch_imported:
             # 使用 triton_ascend 专用的 L2 cache 清除方式
             # 通过 AR_l2cache_clear kernel 清除，可在 profiler 中精确过滤
             execution_time_us = profiler_npu(

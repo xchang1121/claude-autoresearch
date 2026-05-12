@@ -288,10 +288,20 @@ def _gen_profile_script(config: TaskConfig, device_id: int = 0,
     # Adapter's benchmark_impl returns a code string indented 8-space for
     # upstream's kernel_verifier (which calls it inside a `for case` loop).
     # Dedent to column 0, then re-indent at 4-space for our function body.
+    #
+    # mode='base' force-routes through the adapter's `if backend=="ascend"`
+    # else-branch (triton.testing.do_bench) by passing backend="". The
+    # if-branch uses profiler_npu with dsl="triton_ascend" + a triton L2-
+    # cache-clear kernel; running that against the PyTorch Model corrupts
+    # NPU state and crashes the next aclnnArange with aivec error. The
+    # else-branch (do_bench) works for both Triton kernels and PyTorch.
+    # mode='generation' keeps the original backend so kernel timing uses
+    # profiler_npu (more accurate, filters L2-cache-clear ops).
+    benchmark_backend = "" if mode == "base" else (config.backend or "")
     raw = adapter.benchmark_impl(
         impl_func_name="TargetModel", inputs="inputs",
         warmup=warmup, runs=repeats,
-        backend=config.backend or "", op_name=config.name,
+        backend=benchmark_backend, op_name=config.name,
         case_idx=0, device_id=device_id,
     )
     if raw and raw.strip():
