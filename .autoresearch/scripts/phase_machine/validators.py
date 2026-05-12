@@ -91,30 +91,40 @@ def is_placeholder_file(path: str) -> bool:
 # ---------------------------------------------------------------------------
 
 # Subprocess template for running reference.py end-to-end on CPU. We only
-# care that import + Model(*get_init_inputs())(*get_inputs()) survives;
+# care that import + Model(*get_init_inputs())(*case_inputs) survives;
 # outputs are discarded (the worker captures them on first verify).
+# input_groups.resolve duck-types between get_input_groups (multi-shape)
+# and get_inputs (legacy single-shape); we only run case-0 here — the
+# validator is about importability + a single survival run, not full eval.
 _REF_RUNCHECK_SCRIPT = r'''
 import json, sys, traceback
 sys.path.insert(0, {task_dir!r})
+sys.path.insert(0, {scripts_dir!r})
 try:
     import torch
-    from {ref_mod} import Model, get_inputs, get_init_inputs
+    import {ref_mod} as _ref
+    from {ref_mod} import Model, get_init_inputs
+    from input_groups import resolve as _resolve_groups
 except Exception as e:
     traceback.print_exc()
     print(json.dumps({{"ok": False, "stage": "import", "error": str(e)}}))
     sys.exit(1)
 try:
     init_inputs = get_init_inputs()
+    groups = _resolve_groups(_ref)
+    if not groups:
+        print(json.dumps({{"ok": False, "stage": "input",
+                           "error": "input groups list is empty"}}))
+        sys.exit(1)
     model = Model(*init_inputs).cpu().eval()
-    inputs = get_inputs()
-    inputs = [x.cpu() if hasattr(x, "cpu") else x for x in inputs]
+    inputs = [x.cpu() if hasattr(x, "cpu") else x for x in groups[0]]
     with torch.no_grad():
         outs = model(*inputs)
     if outs is None:
         print(json.dumps({{"ok": False, "stage": "forward",
                            "error": "Model.forward() returned None"}}))
         sys.exit(1)
-    print(json.dumps({{"ok": True}}))
+    print(json.dumps({{"ok": True, "num_cases": len(groups)}}))
 except Exception as e:
     traceback.print_exc()
     print(json.dumps({{"ok": False, "stage": "run", "error": str(e)}}))
@@ -158,7 +168,10 @@ def validate_reference(task_dir: str) -> tuple:
         return False, f"AST check failed: {e}"
 
     # Stage 2: subprocess import + forward.
-    code = _REF_RUNCHECK_SCRIPT.format(task_dir=task_dir, ref_mod="reference")
+    _scripts_dir_abs = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = _REF_RUNCHECK_SCRIPT.format(task_dir=task_dir,
+                                       scripts_dir=_scripts_dir_abs,
+                                       ref_mod="reference")
     env = {
         **os.environ,
         "CUDA_VISIBLE_DEVICES": "",
