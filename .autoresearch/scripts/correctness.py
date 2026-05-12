@@ -97,3 +97,106 @@ def compare_outputs(out_ref: list, out_new: list,
         "max_abs_diff": max_abs_overall,
         "atol": atol, "rtol": rtol,
     }
+
+
+def compare_outputs_per_case(out_ref_per_case: list,
+                             out_new_per_case: list,
+                             atol: float, rtol: float) -> dict:
+    """Multi-shape allclose-style check: hard-gate on every case.
+
+    Inputs are List[List[Tensor]] - one outer entry per shape case, each
+    inner list is the model's outputs for that case (already moved to CPU
+    by the caller). Returns:
+
+      {"correctness": bool,                 # AND of every case
+       "per_case": [
+           {"idx": int, "correctness": bool, "diagnostics": [...],
+            "max_abs_diff": float | None}, ...
+       ],
+       "max_abs_diff": float | None,        # max over all cases
+       "diagnostics": [str, ...],           # flat aggregate, prefixed [case i]
+       "failed_indices": list[int],
+       "worst_idx": int | None,
+       "worst_max_abs_diff": float | None,
+       "atol": float, "rtol": float}
+
+    Both single- and multi-shape callers go through this wrapper - the
+    generated verify script (worker subprocess) and the batch Tier-2 verify
+    call it unconditionally, with single-shape inputs collapsed to
+    `List[List[Tensor]]` of length 1.
+
+    On multi-case failure, appends one CORRECTNESS_SUMMARY line to the
+    aggregate diagnostics that failure_extractor.multi_shape_correctness_fail
+    parses. The single-case path skips this summary (the per-case "outI"
+    diagnostics already convey the failure).
+    """
+    if len(out_ref_per_case) != len(out_new_per_case):
+        return {
+            "correctness": False,
+            "per_case": [],
+            "diagnostics": [
+                f"case count: ref={len(out_ref_per_case)} "
+                f"new={len(out_new_per_case)}"
+            ],
+            "max_abs_diff": None,
+            "failed_indices": [],
+            "worst_idx": None,
+            "worst_max_abs_diff": None,
+            "atol": atol, "rtol": rtol,
+        }
+
+    per_case = []
+    flat_diag: list[str] = []
+    all_pass = True
+    max_abs_overall: float | None = None
+
+    for i, (out_ref, out_new) in enumerate(zip(out_ref_per_case,
+                                               out_new_per_case)):
+        sub = compare_outputs(list(out_ref), list(out_new), atol, rtol)
+        per_case.append({
+            "idx": i,
+            "correctness": sub["correctness"],
+            "diagnostics": sub["diagnostics"],
+            "max_abs_diff": sub["max_abs_diff"],
+        })
+        if not sub["correctness"]:
+            all_pass = False
+        for d in sub["diagnostics"]:
+            flat_diag.append(f"[case {i}] {d}")
+        m = sub["max_abs_diff"]
+        if m is not None and (max_abs_overall is None or m > max_abs_overall):
+            max_abs_overall = m
+
+    failed_indices = [pc["idx"] for pc in per_case if not pc["correctness"]]
+    worst_idx: int | None = None
+    worst_max: float | None = None
+    if not all_pass:
+        candidates = [pc for pc in per_case
+                      if not pc["correctness"]
+                      and isinstance(pc.get("max_abs_diff"), (int, float))]
+        if candidates:
+            best = max(candidates, key=lambda x: x["max_abs_diff"])
+            worst_idx = best["idx"]
+            worst_max = best["max_abs_diff"]
+        # Only surface CORRECTNESS_SUMMARY when multi-case — the
+        # failure_extractor pattern lives here so DIAGNOSE can pick up
+        # which shape(s) broke. For single-case ops the per-case "outI"
+        # lines already say everything.
+        if len(per_case) > 1:
+            flat_diag.append(
+                f"[verify] CORRECTNESS_SUMMARY: failed={len(failed_indices)}/"
+                f"{len(per_case)} failed_idx={failed_indices} "
+                f"worst_case={worst_idx} max_abs="
+                f"{(f'{worst_max:.3e}' if worst_max is not None else 'None')}"
+            )
+
+    return {
+        "correctness": all_pass,
+        "per_case": per_case,
+        "diagnostics": flat_diag,
+        "max_abs_diff": max_abs_overall,
+        "failed_indices": failed_indices,
+        "worst_idx": worst_idx,
+        "worst_max_abs_diff": worst_max,
+        "atol": atol, "rtol": rtol,
+    }

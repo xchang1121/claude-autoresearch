@@ -134,73 +134,115 @@ except Exception as e:
                       "error": f"import failed: cannot import name 'ModelNew' from '{kernel_file}' ({{e}})"}}))
     sys.exit(1)
 
-try:
-    # Inputs are regenerated here via get_inputs() — deterministic seed, so
-    # cache keyed only on reference.py content is sufficient.
-    from {ref_file} import get_inputs, get_init_inputs
-    init_inputs = get_init_inputs()
-    ref_inputs_cpu = get_inputs()
+def _to_cpu_list(out):
+    if isinstance(out, torch.Tensor):
+        return [out.detach().cpu()]
+    if isinstance(out, (list, tuple)):
+        return [o.detach().cpu() if hasattr(o, "detach") else o for o in out]
+    return [out]
 
-    # --- Obtain reference outputs (cache-or-compute, worker-side only) ---
+try:
+    # input_groups.resolve duck-types between get_input_groups() (multi-shape)
+    # and get_inputs() (legacy single-shape) and always returns List[List].
+    # Single-shape ops collapse to a 1-element list.
+    import {ref_file} as _ref_mod
+    from {ref_file} import get_init_inputs
+    from input_groups import resolve as _resolve_groups, describe_case as _describe_case
+    init_inputs = get_init_inputs()
+    cases_cpu = _resolve_groups(_ref_mod)
+    num_cases = len(cases_cpu)
+    if num_cases == 0:
+        raise RuntimeError("reference module returned 0 input cases")
+
+    # --- Obtain reference outputs per case (cache-or-compute, worker-side only) ---
+    out_ref_per_case = None
     if WORKER_REF_PT and os.path.isfile(WORKER_REF_PT):
         ref_data = torch.load(WORKER_REF_PT, map_location="cpu", weights_only=False)
-        out_ref = ref_data["outputs"]
-        ref_source = "cached-worker"
-    else:
+        cached_per_case = ref_data.get("outputs_per_case")
+        cached_legacy = ref_data.get("outputs")
+        if cached_per_case is not None and len(cached_per_case) == num_cases:
+            out_ref_per_case = cached_per_case
+            ref_source = "cached-worker"
+        elif cached_legacy is not None and num_cases == 1:
+            # Pre-multi-shape cache from an earlier run on the same ref sha.
+            # Wrap the single-shape payload into the new per-case shape.
+            out_ref_per_case = [cached_legacy]
+            ref_source = "cached-worker-legacy"
+
+    if out_ref_per_case is None:
         from {ref_file} import Model
         model_ref = Model(*init_inputs).to(device).eval()
-        ref_inputs_dev = [x.to(device) if hasattr(x, "to") else x for x in ref_inputs_cpu]
+        out_ref_per_case = []
         with torch.no_grad():
-            out_ref_raw = model_ref(*ref_inputs_dev)
-        if isinstance(out_ref_raw, torch.Tensor):
-            out_ref = [out_ref_raw.detach().cpu()]
-        elif isinstance(out_ref_raw, (list, tuple)):
-            out_ref = [o.detach().cpu() for o in out_ref_raw]
-        else:
-            out_ref = [out_ref_raw]
+            for case in cases_cpu:
+                ref_inputs_dev = [x.to(device) if hasattr(x, "to") else x
+                                  for x in case]
+                out_ref_raw = model_ref(*ref_inputs_dev)
+                out_ref_per_case.append(_to_cpu_list(out_ref_raw))
+                del ref_inputs_dev, out_ref_raw
         if WORKER_REF_PT:
             try:
                 os.makedirs(os.path.dirname(WORKER_REF_PT), exist_ok=True)
-                torch.save({{"outputs": out_ref}}, WORKER_REF_PT)
+                torch.save({{"outputs_per_case": out_ref_per_case}}, WORKER_REF_PT)
             except Exception as _e:
                 print(f"[verify] WARNING: ref cache write failed ({{WORKER_REF_PT}}): {{_e}}",
                       file=sys.stderr)
         ref_source = "computed-worker"
         # Free the ref model before ModelNew allocates — BatchNorm-scale
         # tensors on HBM don't fit both at once.
-        del model_ref, out_ref_raw, ref_inputs_dev
+        del model_ref
         if device_type == "npu":
             torch.npu.empty_cache()
         elif device_type == "cuda":
             torch.cuda.empty_cache()
 
-    # --- Run kernel on device with the same deterministic inputs ---
+    # --- Run kernel on device for every case ---
     model_new = ModelNew(*init_inputs).to(device).eval()
-    inputs = [x.to(device) if hasattr(x, "to") else x for x in ref_inputs_cpu]
-
+    out_new_per_case = []
     with torch.no_grad():
-        out_new = model_new(*inputs)
-
-    if isinstance(out_new, torch.Tensor):
-        out_new = [out_new]
-    elif not isinstance(out_new, (list, tuple)):
-        out_new = [out_new]
+        for case in cases_cpu:
+            inputs_dev = [x.to(device) if hasattr(x, "to") else x for x in case]
+            out_new_raw = model_new(*inputs_dev)
+            out_new_per_case.append(_to_cpu_list(out_new_raw))
+            del inputs_dev, out_new_raw
 
     # --- Compare (delegated to shared correctness module) ---
-    # `correctness.py` is bundled into the tarball at root by
-    # _build_package; both this generated script and the batch verifier
-    # call into the same `compare_outputs` so semantics can't drift.
-    from correctness import compare_outputs
-    cmp_result = compare_outputs(list(out_ref), list(out_new), ATOL, RTOL)
+    # `correctness.py` is bundled into the tarball at root by _build_package;
+    # both this generated script and the batch verifier call into the same
+    # compare_outputs_per_case so single- and multi-shape semantics can't
+    # drift.
+    from correctness import compare_outputs_per_case
+    cmp_result = compare_outputs_per_case(
+        out_ref_per_case, out_new_per_case, ATOL, RTOL)
 
     for d in cmp_result["diagnostics"]:
         print(d, file=sys.stderr)
+
+    # Surface FAILED_SHAPES line (failure_extractor.multi_shape_failed_shapes
+    # parses this) so DIAGNOSE can name the offending case(s) directly.
+    if not cmp_result["correctness"] and num_cases > 1:
+        failed = cmp_result.get("failed_indices") or []
+        if failed:
+            shape_strs = []
+            for i in failed[:10]:
+                if 0 <= i < num_cases:
+                    shape_strs.append(
+                        f"case {{i}}={{_describe_case(cases_cpu[i], model_new)}}")
+            if shape_strs:
+                suffix = " ..." if len(failed) > 10 else ""
+                print("[verify] FAILED_SHAPES: " + "; ".join(shape_strs) + suffix,
+                      file=sys.stderr)
 
     print(json.dumps({{
         "correctness": cmp_result["correctness"],
         "ref_source": ref_source,
         "atol": cmp_result["atol"], "rtol": cmp_result["rtol"],
         "diagnostics": cmp_result["diagnostics"],
+        "num_cases": num_cases,
+        "per_case": cmp_result.get("per_case", []),
+        "failed_indices": cmp_result.get("failed_indices", []),
+        "worst_idx": cmp_result.get("worst_idx"),
+        "worst_max_abs_diff": cmp_result.get("worst_max_abs_diff"),
     }}))
     sys.exit(0 if cmp_result["correctness"] else 1)
 
@@ -243,11 +285,13 @@ def _gen_profile_script(config: TaskConfig, device_id: int = 0,
     ref_file = config.ref_file.replace(".py", "")
 
     if mode == "base":
-        target_import = (f"from {ref_file} import Model as TargetModel, "
-                         f"get_inputs, get_init_inputs")
+        target_import = (f"from {ref_file} import Model as TargetModel\n"
+                         f"from {ref_file} import get_init_inputs\n"
+                         f"import {ref_file} as _ref_mod")
     else:
         target_import = (f"from {kernel_file} import ModelNew as TargetModel\n"
-                         f"from {ref_file} import get_inputs, get_init_inputs")
+                         f"from {ref_file} import get_init_inputs\n"
+                         f"import {ref_file} as _ref_mod")
 
     adapter = _get_dsl_adapter(config.dsl)
     dsl_imports = adapter.get_import_statements(config.framework or "torch")
@@ -283,8 +327,15 @@ def _gen_profile_script(config: TaskConfig, device_id: int = 0,
 
     return f'''\
 #!/usr/bin/env python3
-"""Auto-generated {mode} profile script (dsl={config.dsl}, benchmark={benchmark_source})."""
-import os, sys, json, time
+"""Auto-generated {mode} profile script (dsl={config.dsl}, benchmark={benchmark_source}).
+
+Multi-shape aware: iterates input_groups.resolve(ref_module) and times each
+case independently. Single-shape refs collapse to a 1-element loop. The
+top-level avg_time_us is the arithmetic mean of finite per-case timings;
+crashed cases are recorded as inf in `per_shape` but don't poison the
+aggregate.
+"""
+import os, sys, json, math, time, traceback
 
 # ar_vendored is bundled at tarball root (same dir as this script).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -310,18 +361,15 @@ else:
 {dsl_setup}
 
 {target_import}
+from input_groups import resolve as _resolve_groups, describe_case as _describe_case
 
 init_inputs = get_init_inputs()
-impl_model = TargetModel(*init_inputs)
-if hasattr(impl_model, "to"):
-    impl_model = impl_model.to(device)
-if hasattr(impl_model, "eval"):
-    impl_model.eval()
+cases_cpu = _resolve_groups(_ref_mod)
+num_cases = len(cases_cpu)
+if num_cases == 0:
+    raise RuntimeError("reference module returned 0 input cases")
 
-inputs = get_inputs()
-inputs = [x.to(device) if hasattr(x, "to") else x for x in inputs]
-
-def _run_adapter_benchmark():
+def _run_adapter_benchmark(impl_model, inputs):
     # Variables the adapter code assigns:
     #   execution_time_us / execution_time_ms / method
     execution_time_us = None
@@ -334,39 +382,79 @@ def _run_adapter_benchmark():
         execution_time_ms = execution_time_us / 1000
     return execution_time_us, execution_time_ms, method
 
-try:
-    avg_us, execution_time_ms, method = _run_adapter_benchmark()
-    if avg_us is None or avg_us <= 0 or avg_us == float("inf"):
-        raise RuntimeError(f"adapter benchmark returned invalid avg_us={{avg_us!r}}")
-except Exception as e:
-    import traceback
-    print(f"[profile {mode}] adapter benchmark failed: {{e}}; falling back to cpu timer",
-          file=sys.stderr)
-    traceback.print_exc()
-    for _ in range({warmup}):
-        with torch.no_grad():
-            impl_model(*inputs)
+
+def _bench_one_case(impl_model, inputs):
+    """Per-case timing: try adapter benchmark first, fall back to cpu timer
+    on any exception so a single misbehaving case doesn't abort the whole
+    profile pass."""
+    try:
+        avg_us, ms, method = _run_adapter_benchmark(impl_model, inputs)
+        if avg_us is None or avg_us <= 0 or avg_us == float("inf"):
+            raise RuntimeError(f"adapter benchmark returned invalid avg_us={{avg_us!r}}")
+        return avg_us, ms, method
+    except Exception as e:
+        print(f"[profile {mode}] adapter benchmark failed: {{e}}; falling back to cpu timer",
+              file=sys.stderr)
+        traceback.print_exc()
+        for _ in range({warmup}):
+            with torch.no_grad():
+                impl_model(*inputs)
+        if device_type == "npu":
+            torch.npu.synchronize()
+        elif device_type == "cuda":
+            torch.cuda.synchronize()
+        times = []
+        for _ in range({repeats}):
+            if device_type == "npu":
+                torch.npu.synchronize()
+            elif device_type == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                impl_model(*inputs)
+            if device_type == "npu":
+                torch.npu.synchronize()
+            elif device_type == "cuda":
+                torch.cuda.synchronize()
+            times.append((time.perf_counter() - t0) * 1e6)
+        avg_us = sum(times) / len(times)
+        return avg_us, avg_us / 1000, "cpu_timer_fallback"
+
+
+per_shape = []
+for idx, case in enumerate(cases_cpu):
+    impl_model = TargetModel(*init_inputs)
+    if hasattr(impl_model, "to"):
+        impl_model = impl_model.to(device)
+    if hasattr(impl_model, "eval"):
+        impl_model.eval()
+    inputs = [x.to(device) if hasattr(x, "to") else x for x in case]
+    try:
+        avg_us, _ms, method = _bench_one_case(impl_model, inputs)
+    except Exception as e:
+        print(f"[profile {mode}] case {{idx}} timing failed: {{e}}",
+              file=sys.stderr)
+        traceback.print_exc()
+        avg_us, method = float("inf"), "crashed"
+    per_shape.append({{
+        "idx": idx,
+        "case_desc": _describe_case(case, impl_model),
+        "avg_time_us": avg_us,
+        "method": method,
+    }})
+    del impl_model, inputs
     if device_type == "npu":
-        torch.npu.synchronize()
+        torch.npu.empty_cache()
     elif device_type == "cuda":
-        torch.cuda.synchronize()
-    times = []
-    for _ in range({repeats}):
-        if device_type == "npu":
-            torch.npu.synchronize()
-        elif device_type == "cuda":
-            torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        with torch.no_grad():
-            impl_model(*inputs)
-        if device_type == "npu":
-            torch.npu.synchronize()
-        elif device_type == "cuda":
-            torch.cuda.synchronize()
-        times.append((time.perf_counter() - t0) * 1e6)
-    avg_us = sum(times) / len(times)
-    execution_time_ms = avg_us / 1000
-    method = "cpu_timer_fallback"
+        torch.cuda.empty_cache()
+
+# Aggregate over finite per-case timings only - crashed cases are inf so
+# the simple mean would otherwise be infected.
+_finite = [s["avg_time_us"] for s in per_shape
+           if isinstance(s["avg_time_us"], (int, float))
+           and math.isfinite(s["avg_time_us"])]
+avg_us = (sum(_finite) / len(_finite)) if _finite else float("inf")
+execution_time_ms = (avg_us / 1000) if math.isfinite(avg_us) else None
 
 result_data = {{
     "avg_time_us": avg_us,
@@ -374,7 +462,8 @@ result_data = {{
     "execution_time_ms": execution_time_ms,
     "warmup_times": {warmup},
     "run_times": {repeats},
-    "method": method,
+    "num_cases": num_cases,
+    "per_shape": per_shape,
 }}
 result_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "{mode}_profile_result.json")
@@ -460,14 +549,16 @@ def _build_package(task_dir: str, config: TaskConfig, device_id: int = 0) -> byt
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
 
-        # Shared correctness module — imported by the generated verify
-        # script via `from correctness import compare_outputs`. Bundled at
-        # tarball root so the worker subprocess can resolve it from the
-        # same sys.path entry verify_{op}.py inserts.
+        # Shared lib modules — imported by the generated verify / profile
+        # scripts from the tarball root. Both worker subprocesses resolve
+        # them from the same sys.path entry the generated scripts insert.
+        #   correctness.py  — compare_outputs[_per_case]
+        #   input_groups.py — resolve() / describe_case() / num_cases()
         script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        correctness_src = os.path.join(script_dir, "correctness.py")
-        if os.path.isfile(correctness_src):
-            tar.add(correctness_src, arcname="correctness.py")
+        for lib_name in ("correctness.py", "input_groups.py"):
+            lib_src = os.path.join(script_dir, lib_name)
+            if os.path.isfile(lib_src):
+                tar.add(lib_src, arcname=lib_name)
 
         _add_script(f"verify_{op_name}.py",
                      _gen_verify_script(config, device_id,
