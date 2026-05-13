@@ -99,6 +99,7 @@ matches your direction; cite SKILL ids in plan rationales.
    wrote it. The subagent path is preferred because the prompt and
    read-only-by-default tool isolation produce a more reliable diagnosis,
    not because the host can prove the subagent wrote the file.
+
 11. **Stop is only legal at phase FINISH.** `hook_stop_save.py` blocks
     early Stop in every other phase; the block message embeds
     `get_guidance(task_dir)` so the agent sees the next action.
