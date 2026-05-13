@@ -4,44 +4,22 @@ An iterative optimization framework powered by Claude Code: plan → edit →
 eval → keep/discard, looping against a measurable metric. Standalone, no
 external deps beyond Python + PyYAML.
 
-> ## ⛔ CRITICAL — DO NOT STOP EARLY
->
-> A task is **only complete at phase FINISH** (max_rounds exhausted or
-> stop-on-target-met). Stopping in any other phase abandons useful work:
-> baseline not measured, plan items not settled, DIAGNOSE artifact not
-> consumed.
->
-> The Stop hook (`hook_stop_save.py`) enforces this — it refuses to
-> stop in INIT / GENERATE_REF / GENERATE_KERNEL / BASELINE / PLAN /
-> EDIT / DIAGNOSE / REPLAN, with a phase-specific "do X instead"
-> message. **Don't try to outsmart it. Don't summarise & exit when the
-> loop says keep going. Keep iterating until the hook prints `Phase ->
-> FINISH`.** If you genuinely think the loop is stuck (same FAIL ×
-> many rounds, no actionable signals left), use the DIAGNOSE branch —
-> do not stop.
-
 ## Quick Start
 
 ```bash
-# 1. Open this project in Claude Code
-cd claude-autoresearch
-claude
-
-# 2. Drop sources into workspace/<op_name>_ref.py (and optional _kernel.py),
-#    then start a task. --dsl required; pick --devices N XOR --worker-url.
+# Drop sources into workspace/<op_name>_ref.py (and optional _kernel.py),
+# then start a task. --dsl required; pick --devices N XOR --worker-url.
 /autoresearch --ref workspace/<op_name>_ref.py --op-name <op_name> --dsl triton_cuda --devices 0
 
-# 3. Resume later
+# Resume later
 /autoresearch --resume
 
-# 4. Monitor in a separate terminal
+# Monitor in a separate terminal
 python .autoresearch/scripts/dashboard.py <task_dir> --watch
 ```
 
-`/autoresearch` is the only slash command — full operational details in
-[.claude/commands/autoresearch.md](.claude/commands/autoresearch.md).
-
-For unattended long runs, wrap in self-paced loop: `/loop /autoresearch --resume`.
+Full operational details in [.claude/commands/autoresearch.md](.claude/commands/autoresearch.md).
+For unattended long runs: `/loop /autoresearch --resume`.
 
 ## Remote Worker
 
@@ -57,20 +35,11 @@ worker:
 
 ## Skills Library
 
-`skills/` holds optimization knowledge organized by DSL/backend
-(`skills/triton-ascend/`, `skills/triton-cuda/`, `skills/cuda-c/`, ...) plus
-cross-cutting workflow guides (`skills/designer/`, `skills/kernel-workflow/`,
-...). During PLAN, `Glob("skills/<dsl>/**/*.md")` and Read SKILL.md files
-whose frontmatter matches your direction; cite SKILL ids in plan rationales.
+`skills/` holds optimization knowledge organized by DSL/backend. During PLAN,
+`Glob("skills/<dsl>/**/*.md")` and Read SKILL.md files whose frontmatter
+matches your direction; cite SKILL ids in plan rationales.
 
 ## Invariants (hook-driven flow)
-
-Hooks emit `[AR Phase: ...]` messages on stderr after every state-changing
-event. Follow the latest one. Don't try to fetch guidance manually —
-`phase_machine` is a Python package used by hooks, not a CLI;
-`hook_guard_bash` rejects direct invocation.
-
-The following invariants are non-negotiable:
 
 1. **`.ar_state/plan.md` is the source of truth.** Only `create_plan.py` /
    `settle.py` / `pipeline.py` write it. Never hand-edit. TodoWrite is a
@@ -78,11 +47,12 @@ The following invariants are non-negotiable:
 2. **Plan IDs are globally monotonic.** `p1, p2, ...` from
    `progress.json.next_pid`. Never reuse, never skip.
 3. **Every `pN` either settles (KEEP / DISCARD / FAIL in `history.jsonl`)
-   or is dropped at a REPLAN/DIAGNOSE boundary.** `create_plan.py` does
-   not synthesize DISCARD rows for superseded items — they're silently
-   dropped; the pid counter still advances.
-4. **Phase transitions are hook-controlled.** Never write
-   `.ar_state/.phase` manually. Wait for the hook's guidance.
+   or is silently dropped at a REPLAN/DIAGNOSE boundary** — pid counter
+   still advances, no synthetic DISCARD row written.
+4. **Phase transitions are hook-controlled.** Never write `.ar_state/.phase`
+   manually. Listen to the `[AR Phase: ...]` messages hooks emit on
+   stderr; don't poke `phase_machine` directly (it's a Python package
+   used by hooks, not a CLI — `hook_guard_bash` rejects direct invocation).
 5. **Editable files are scoped by `task.yaml.editable_files`.** Editing
    anything else is rejected by `hook_guard_edit.py`.
 6. **After a session break, resume with `/autoresearch --resume`.** Do
@@ -122,9 +92,7 @@ The following invariants are non-negotiable:
 
    While the artifact is invalid AND attempts < cap, Bash is locked to
    read-only / lifecycle ops (no AR scripts beyond `create_plan.py`,
-   which is itself gated on artifact validity). Stop is blocked the
-   entire time DIAGNOSE is active — only `create_plan.py` advancing
-   phase to EDIT releases the lock.
+   which is itself gated on artifact validity).
 
    Provenance note: hook payloads do NOT distinguish main agent from
    subagent, so the host validates the artifact's CONTENT only — not who
@@ -132,12 +100,10 @@ The following invariants are non-negotiable:
    read-only-by-default tool isolation produce a more reliable diagnosis,
    not because the host can prove the subagent wrote the file.
 11. **Stop is only legal at phase FINISH.** `hook_stop_save.py` blocks
-    Stop in INIT / GENERATE_REF / GENERATE_KERNEL / BASELINE / PLAN /
-    EDIT / DIAGNOSE / REPLAN with a phase-specific message naming the
-    next action. Don't try to terminate early because the work "feels
-    done" — `max_rounds` and the auto-DIAGNOSE-on-3-consecutive-fails
-    loop are the budget. If the kernel is stuck, route through DIAGNOSE
-    (invariant #10), not Stop.
+    early Stop in every other phase; the block message embeds
+    `get_guidance(task_dir)` so the agent sees the next action.
+    `max_rounds` + auto-DIAGNOSE-on-3-fails are the budget. If stuck,
+    go through DIAGNOSE (#10), not Stop.
 
 ## Dependencies
 
