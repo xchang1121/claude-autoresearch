@@ -4,6 +4,22 @@ An iterative optimization framework powered by Claude Code: plan → edit →
 eval → keep/discard, looping against a measurable metric. Standalone, no
 external deps beyond Python + PyYAML.
 
+> ## ⛔ CRITICAL — DO NOT STOP EARLY
+>
+> A task is **only complete at phase FINISH** (max_rounds exhausted or
+> stop-on-target-met). Stopping in any other phase abandons useful work:
+> baseline not measured, plan items not settled, DIAGNOSE artifact not
+> consumed.
+>
+> The Stop hook (`hook_stop_save.py`) enforces this — it refuses to
+> stop in INIT / GENERATE_REF / GENERATE_KERNEL / BASELINE / PLAN /
+> EDIT / DIAGNOSE / REPLAN, with a phase-specific "do X instead"
+> message. **Don't try to outsmart it. Don't summarise & exit when the
+> loop says keep going. Keep iterating until the hook prints `Phase ->
+> FINISH`.** If you genuinely think the loop is stuck (same FAIL ×
+> many rounds, no actionable signals left), use the DIAGNOSE branch —
+> do not stop.
+
 ## Quick Start
 
 ```bash
@@ -115,6 +131,13 @@ The following invariants are non-negotiable:
    wrote it. The subagent path is preferred because the prompt and
    read-only-by-default tool isolation produce a more reliable diagnosis,
    not because the host can prove the subagent wrote the file.
+11. **Stop is only legal at phase FINISH.** `hook_stop_save.py` blocks
+    Stop in INIT / GENERATE_REF / GENERATE_KERNEL / BASELINE / PLAN /
+    EDIT / DIAGNOSE / REPLAN with a phase-specific message naming the
+    next action. Don't try to terminate early because the work "feels
+    done" — `max_rounds` and the auto-DIAGNOSE-on-3-consecutive-fails
+    loop are the budget. If the kernel is stuck, route through DIAGNOSE
+    (invariant #10), not Stop.
 
 ## Dependencies
 
