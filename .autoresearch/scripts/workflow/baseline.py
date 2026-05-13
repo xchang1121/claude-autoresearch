@@ -6,11 +6,8 @@ re-invoking the CLI shell. The shell `_baseline_init.py` stays as a
 thin wrapper so existing `python _baseline_init.py <td> <eval_json>`
 call sites keep working.
 
-Exit codes returned by `run_baseline_init`:
-    0  baseline OK (correctness + seed_metric valid; phase -> PLAN)
-    2  seed produced no valid primary metric
-    3  baseline correctness=False
-    1  task.yaml not found / unparseable
+Exit codes: see `_EXIT_FOR` below. Phase transition is owned by
+PhaseController.on_baseline_settled (dispatches on `baseline_outcome`).
 """
 from __future__ import annotations
 
@@ -24,9 +21,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from phase_machine import (  # noqa: E402
     Progress, append_history, load_progress, save_progress,
 )
-from task_config import load_task_config  # noqa: E402
+from task_config import EvalOutcome, load_task_config  # noqa: E402
 
 from .transition import PhaseController
+
+
+# Outcome → exit code. on_baseline_settled reads `baseline_outcome` from
+# progress and dispatches phase independently — exit codes are kept for
+# scaffold.py's "rc != 0 → surface error" check.
+_EXIT_FOR = {
+    EvalOutcome.OK: 0,
+    EvalOutcome.KERNEL_VERIFY_FAIL: 3,
+    EvalOutcome.KERNEL_PROFILE_CRASH: 3,
+    EvalOutcome.FRAMEWORK_ERROR: 4,
+}
+
+
+def _read_outcome(eval_data: dict) -> EvalOutcome:
+    """Resolve outcome from eval_data, with legacy fallback when the
+    `outcome` field isn't set (older wire format / external test producer
+    pre-refactor)."""
+    s = eval_data.get("outcome")
+    if s is None:
+        s = (EvalOutcome.OK.value if eval_data.get("correctness")
+             else EvalOutcome.KERNEL_VERIFY_FAIL.value)
+    try:
+        return EvalOutcome(s)
+    except ValueError:
+        return EvalOutcome.FRAMEWORK_ERROR
 
 
 def _valid(v) -> bool:
@@ -54,7 +76,8 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         return 1
 
     eval_data = json.loads(eval_json)
-    correctness = eval_data.get("correctness", False)
+    outcome = _read_outcome(eval_data)
+    correctness = outcome == EvalOutcome.OK
     metrics = eval_data.get("metrics", {})
     seed_val = metrics.get(config.primary_metric) if _valid(
         metrics.get(config.primary_metric)) else None
@@ -115,6 +138,7 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         baseline_commit=baseline_commit_recorded,
         baseline_metric=baseline_val,
         baseline_source=baseline_source,
+        baseline_outcome=outcome.value,
         baseline_correctness=correctness,
         seed_metric=seed_val,
         consecutive_failures=0,
@@ -136,33 +160,21 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         "description": "seed kernel initial eval",
         "decision": "SEED",
         "metrics": metrics,
+        "outcome": outcome.value,
         "correctness": correctness,
         "commit": baseline_commit,
     })
 
-    if not correctness:
-        print(
-            f"[baseline] ERROR: baseline eval failed correctness check.\n"
-            f"[baseline] seed {config.primary_metric}={seed_val} but output "
-            f"did not match reference. Phase stays at BASELINE; "
-            f"hook_post_bash will demote to GENERATE_KERNEL for a fix.",
-            file=sys.stderr,
-        )
-        return 3
+    if outcome != EvalOutcome.OK:
+        print(f"[baseline] {outcome.value}: {eval_data.get('error') or '(no detail)'}",
+              file=sys.stderr)
+        return _EXIT_FOR[outcome]
 
     if seed_val is None:
-        print(
-            f"[baseline] ERROR: seed kernel produced no valid "
-            f"{config.primary_metric}.\n"
-            f"[baseline] Worker ran profile_{config.name}_generation.py but "
-            f"no timing came back (result JSON missing, inf, or 0). Likely "
-            f"causes: Triton compile error surfaced only during profiling, "
-            f"kernel runs once under verify but OOMs/hangs under repeated "
-            f"invocation, generation_profile_result.json not written.\n"
-            f"[baseline] Check worker logs, fix kernel.py, rerun baseline. "
-            f"progress.json kept for diagnostics.",
-            file=sys.stderr,
-        )
+        # Degenerate: outcome=OK but no primary metric (rare).
+        print(f"[baseline] ERROR: outcome=OK but no valid "
+              f"{config.primary_metric}; treating as kernel-no-timing.",
+              file=sys.stderr)
         return 2
 
     PhaseController(task_dir).on_baseline_init_success()

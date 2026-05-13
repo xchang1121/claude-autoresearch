@@ -150,6 +150,27 @@ def _fresh_start(task_dir: str):
     emit_status(f"[AR] Fresh start. Phase -> BASELINE. {get_guidance(task_dir)}")
 
 
+_BASELINE_DEMOTE_REASON = {
+    "kernel_verify_fail": "kernel output != reference",
+    "kernel_profile_crash": "kernel crashed at runtime during profile",
+}
+
+
+def _baseline_message(outcome, new_phase, progress, guidance):
+    if outcome == "framework_error":
+        return ("[AR] Baseline FRAMEWORK_ERROR: eval produced no per-shape "
+                "data. Seed kernel NOT evaluated — do NOT edit kernel.py. "
+                "Re-run baseline.py after fixing framework (eval.timeout, "
+                "device/worker availability, eval stderr).")
+    if new_phase == GENERATE_KERNEL:
+        reason = _BASELINE_DEMOTE_REASON.get(outcome) or (
+            "seed kernel produced no timing" if progress.seed_metric is None
+            else "seed kernel failed correctness check")
+        return (f"[AR] Baseline failed: {reason}. Phase -> GENERATE_KERNEL. "
+                f"Fix the kernel, then re-run baseline.py.")
+    return f"[AR] Baseline complete. Phase -> PLAN. {guidance}"
+
+
 def _progress_update_for_plan(task_dir: str, phase: str):
     """Set status=active after a valid new plan. `plan_version` is owned and
     bumped by create_plan.py — this hook must NOT re-bump it (caused double
@@ -188,26 +209,14 @@ def main():
     invoked = parse_invoked_ar_script(command)
 
     if invoked == "baseline.py" and phase == BASELINE:
-        # PhaseController.on_baseline_settled inspects progress.json (seed_
-        # metric / baseline_correctness) and picks PLAN vs GENERATE_KERNEL.
-        # Demoting to GENERATE_KERNEL on failure keeps kernel.py editable
-        # (BASELINE's _EDIT_RULES forbid it) so the loop doesn't deadlock.
         progress = load_progress(task_dir)
         if not progress:
             emit_status("[AR] Baseline failed (no progress.json). Retry.")
         else:
             new_phase = PhaseController(task_dir).on_baseline_settled()
-            if new_phase == GENERATE_KERNEL:
-                reason = ("seed kernel produced no timing"
-                          if progress.seed_metric is None
-                          else "seed kernel failed correctness check")
-                emit_status(
-                    f"[AR] Baseline failed: {reason}. "
-                    f"Phase -> GENERATE_KERNEL so kernel.py becomes editable. "
-                    f"Fix the kernel, then re-run baseline.py."
-                )
-            else:
-                emit_status(f"[AR] Baseline complete. Phase -> PLAN. {get_guidance(task_dir)}")
+            outcome = getattr(progress, "baseline_outcome", None)
+            emit_status(_baseline_message(outcome, new_phase, progress,
+                                          get_guidance(task_dir)))
 
     elif invoked == "pipeline.py":
         # pipeline.py writes .phase itself; just project state + notify.

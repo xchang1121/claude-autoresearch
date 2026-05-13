@@ -62,16 +62,21 @@ class PhaseController:
 
     # ---- Baseline -------------------------------------------------------
     def on_baseline_settled(self) -> str:
-        """End of `baseline.py` invocation. Decides PLAN vs GENERATE_KERNEL
-        from the freshly-written progress.json (so this captures a partial
-        result from _baseline_init that exited 0 too)."""
+        """Dispatch on baseline_outcome. Legacy progress (no outcome) maps
+        via the old (seed_metric, baseline_correctness) rule."""
         progress = load_progress(self.task_dir)
         if progress is None:
-            # No progress.json → don't move; baseline.py crashed early.
             return read_phase(self.task_dir)
-        if progress.seed_metric is None or not progress.baseline_correctness:
-            return self._write(GENERATE_KERNEL)
-        return self._write(PLAN)
+        outcome = getattr(progress, "baseline_outcome", None) or (
+            "ok" if (progress.baseline_correctness
+                     and progress.seed_metric is not None)
+            else "kernel_verify_fail"
+        )
+        if outcome == "ok":
+            return self._write(PLAN)
+        if outcome == "framework_error":
+            return read_phase(self.task_dir)
+        return self._write(GENERATE_KERNEL)
 
     def on_baseline_init_success(self) -> str:
         return self._write(PLAN)

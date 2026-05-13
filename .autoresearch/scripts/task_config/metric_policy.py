@@ -6,6 +6,9 @@ local subprocess) writes into; downstream consumers
 (keep_or_discard, baseline_init, dashboard) read from it.
 
 What lives here:
+  - `EvalOutcome`          — classification enum, single source of truth for
+                             what happened (OK / kernel verify fail / kernel
+                             profile crash / framework error).
   - `EvalResult`           — the result dataclass.
   - `is_improvement`       — current-vs-best comparison with relative-%
                              threshold and direction (`lower_is_better`).
@@ -22,16 +25,30 @@ import from here without dragging in YAML / urllib / tarfile.
 """
 import operator as _op
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
+
+
+class EvalOutcome(str, Enum):
+    """Single source of truth for what just happened in eval. The boundary
+    between KERNEL_* and FRAMEWORK_ERROR is "did we get any per-shape
+    data" — without it the kernel wasn't meaningfully exercised."""
+    OK = "ok"
+    KERNEL_VERIFY_FAIL = "kernel_verify_fail"      # output != ref
+    KERNEL_PROFILE_CRASH = "kernel_profile_crash"  # verify ok, profile crashed
+    FRAMEWORK_ERROR = "framework_error"            # no per-shape data at all
 
 
 @dataclass
 class EvalResult:
-    """Evaluation result."""
-    correctness: bool
+    outcome: EvalOutcome = EvalOutcome.FRAMEWORK_ERROR
     metrics: dict = field(default_factory=dict)
     error: Optional[str] = None
     raw_output: str = ""
+
+    @property
+    def correctness(self) -> bool:
+        return self.outcome == EvalOutcome.OK
 
 
 # ---------------------------------------------------------------------------
@@ -99,11 +116,12 @@ def is_improvement(
 
 def format_result_summary(result: EvalResult) -> str:
     """Human-readable one-line summary."""
-    if not result.correctness:
+    if result.outcome != EvalOutcome.OK:
+        prefix = result.outcome.value.upper()
         if result.error:
-            return f"FAILED: {result.error}"
-        return f"CORRECTNESS FAILED (metrics: {result.metrics})"
-    parts = ["correctness: PASS"]
+            return f"{prefix}: {result.error}"
+        return f"{prefix} (metrics: {result.metrics})"
+    parts = ["outcome: OK"]
     for key, val in result.metrics.items():
         if isinstance(val, float):
             parts.append(f"{key}: {val:.4f}")

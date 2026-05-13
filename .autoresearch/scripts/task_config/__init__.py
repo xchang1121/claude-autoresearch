@@ -34,7 +34,7 @@ from .loader import (
     TaskConfig, load_task_config,
 )
 from .metric_policy import (
-    EvalResult, check_constraints, is_improvement, format_result_summary,
+    EvalOutcome, EvalResult, check_constraints, is_improvement, format_result_summary,
     # Operator table — internal but referenced by some debug scripts that
     # introspect supported constraint operators.
     _CONSTRAINT_OPS,

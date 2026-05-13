@@ -40,7 +40,8 @@ class Progress:
     baseline_metric: Optional[float] = None
     baseline_commit: Optional[str] = None
     baseline_source: Optional[str] = None      # "ref" | "seed_fallback"
-    baseline_correctness: bool = False
+    baseline_outcome: Optional[str] = None     # task_config.EvalOutcome value
+    baseline_correctness: bool = False         # legacy view: outcome == "ok"
     seed_metric: Optional[float] = None
 
     # Plan

@@ -266,6 +266,15 @@ def main():
     metrics = eval_json.get("metrics", {})
     print(f"[PIPELINE] Eval: correctness={correctness}, metrics={metrics}", flush=True)
 
+    # framework_error: eval framework failed before kernel was exercised.
+    # Roll back and skip the round — recording a FAIL here would mislead
+    # later DIAGNOSE / KEEP / DISCARD.
+    if eval_json.get("outcome") == "framework_error":
+        auto_rollback(task_dir)
+        print(f"[PIPELINE] FRAMEWORK_ERROR: {eval_json.get('error', 'no data')}. "
+              f"Rolled back, not recording round.", flush=True)
+        sys.exit(0)
+
     # Surface structured failure signals (UB overflow, aivec trap, OOM, ...)
     # extracted from the worker's raw log. Without this, Claude sees only a
     # generic "verify failed" string and has nothing to act on. Fall back

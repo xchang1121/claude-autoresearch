@@ -35,7 +35,7 @@ from typing import Optional
 from urllib.request import Request, urlopen
 
 from .loader import TaskConfig
-from .metric_policy import EvalResult
+from .metric_policy import EvalOutcome, EvalResult
 from .package_builder import _build_package
 
 
@@ -324,7 +324,17 @@ def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
         [i for i, t in enumerate(per_gen) if not _finite(t)]
         if per_gen is not None else []
     )
-    correctness = verify_ok and not crashed_shapes
+
+    # Outcome — see EvalOutcome docstring for definitions.
+    if per_gen is None and not verify_ok:
+        outcome = EvalOutcome.FRAMEWORK_ERROR
+    elif not verify_ok:
+        outcome = EvalOutcome.KERNEL_VERIFY_FAIL
+    elif crashed_shapes:
+        outcome = EvalOutcome.KERNEL_PROFILE_CRASH
+    else:
+        outcome = EvalOutcome.OK
+    correctness = outcome == EvalOutcome.OK
 
     metrics: dict = {}
 
@@ -415,17 +425,21 @@ def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
             if isinstance(worst_max, (int, float)):
                 metrics["correctness_worst_max_abs"] = worst_max
 
-    if correctness:
+    if outcome == EvalOutcome.OK:
         error = None
-    elif crashed_shapes and verify_ok:
-        error = (f"profile crashed on {len(crashed_shapes)} of "
+    elif outcome == EvalOutcome.KERNEL_PROFILE_CRASH:
+        error = (f"kernel crashed during profile on {len(crashed_shapes)} of "
                  f"{len(per_gen)} shapes")
     else:
-        error = "verify failed (kernel broken); ref profile may still be present"
+        error = {
+            EvalOutcome.FRAMEWORK_ERROR:
+                "eval framework produced no per-shape data (timeout / crash / OOM)",
+            EvalOutcome.KERNEL_VERIFY_FAIL: "kernel output != reference",
+        }[outcome]
 
     profile_log = profile_resp.get("log", "")
     return EvalResult(
-        correctness=correctness,
+        outcome=outcome,
         metrics=metrics,
         error=error,
         raw_output=(verify_log + "\n" + profile_log)[-4096:],
@@ -455,7 +469,7 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
     """
     urls = worker_urls or config.worker_urls
     if not urls:
-        return EvalResult(correctness=False, error="no worker_urls configured")
+        return EvalResult(outcome=EvalOutcome.FRAMEWORK_ERROR, error="no worker_urls configured")
 
     urls = [_normalize_worker_url(u) for u in urls]
 
@@ -505,7 +519,7 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
     except Exception as e:
         if acquired_id is not None:
             _worker_release_device(worker_url, task_id, acquired_id)
-        return EvalResult(correctness=False, error=f"failed to build package: {e}")
+        return EvalResult(outcome=EvalOutcome.FRAMEWORK_ERROR, error=f"failed to build package: {e}")
 
     try:
         # Step 1: Verify (correctness check)
@@ -515,7 +529,7 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
                 worker_url, package, task_id, config.name, eff_timeout,
             )
         except Exception as e:
-            return EvalResult(correctness=False, error=f"verify request failed: {e}")
+            return EvalResult(outcome=EvalOutcome.FRAMEWORK_ERROR, error=f"verify request failed: {e}")
 
         # Step 2: Profile — ALWAYS run it, even if verify failed. The profile
         # endpoint runs both profile_base.py (PyTorch reference, uses
@@ -549,8 +563,10 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
                 profile_settings=profile_settings,
             )
         except Exception as e:
+            # verify succeeded but profile transport failed — kernel ran but
+            # we have no per-shape data, framework-side issue.
             return EvalResult(
-                correctness=verify_resp.get("success", False),
+                outcome=EvalOutcome.FRAMEWORK_ERROR,
                 metrics={},
                 error=f"verify={verify_resp.get('success', False)}; "
                       f"profile request failed: {e}",
@@ -614,7 +630,7 @@ def run_local_eval(task_dir: str, config: TaskConfig,
     try:
         package = _build_package(task_dir, config, device_id=dev)
     except Exception as e:
-        return EvalResult(correctness=False, error=f"failed to build package: {e}")
+        return EvalResult(outcome=EvalOutcome.FRAMEWORK_ERROR, error=f"failed to build package: {e}")
 
     # Per-shape eval_timeout scaling: probe the ref once and scale the
     # subprocess budget so multi-shape verify isn't killed mid-loop.
@@ -671,7 +687,7 @@ def run_eval(task_dir: str, config: TaskConfig,
         return run_local_eval(task_dir, config, device_id=device_id)
 
     return EvalResult(
-        correctness=False,
+        outcome=EvalOutcome.FRAMEWORK_ERROR,
         error=(
             f"no execution backend available for backend={backend_key!r}: "
             f"{why}. Either pass --worker-url to use a remote worker, or "

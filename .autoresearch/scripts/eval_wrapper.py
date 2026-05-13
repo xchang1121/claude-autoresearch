@@ -36,6 +36,7 @@ def main():
     config = load_task_config(task_dir)
     if config is None:
         print(json.dumps({
+            "outcome": "framework_error",
             "correctness": False,
             "metrics": {},
             "error": f"task.yaml not found in {task_dir}",
@@ -67,7 +68,8 @@ def main():
     print(f"[eval] {format_result_summary(result)}", file=sys.stderr)
 
     output = {
-        "correctness": result.correctness,
+        "outcome": result.outcome.value,           # authoritative classification
+        "correctness": result.correctness,         # kept for legacy readers
         "metrics": result.metrics,
         "error": result.error,
     }
