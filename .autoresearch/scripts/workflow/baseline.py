@@ -88,6 +88,22 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
     ref_val = metrics.get("ref_latency_us") if _valid(
         metrics.get("ref_latency_us")) else None
 
+    # A wrong-output seed must NOT anchor best_metric: keep_or_discard
+    # compares each KEEP candidate against best_metric, so a fast-but-
+    # broken seed would force the first CORRECT rewrite to also be
+    # faster or get DISCARDed — silently rejecting the fix. seed_metric
+    # is also nulled because it represents "the verified seed timing",
+    # which doesn't exist when correctness failed. baseline_metric stays
+    # ref-anchored when ref_val is available (worker times ref
+    # independently of kernel correctness), so the speedup display is
+    # still meaningful in the next round.
+    if not correctness and seed_val is not None:
+        print(f"[baseline] dropping wrong-output seed timing "
+              f"(latency_us={seed_val:.1f}) — kernel failed correctness "
+              f"so its measurement cannot anchor best_metric.",
+              file=sys.stderr)
+        seed_val = None
+
     # Sticky baseline: pin first ref capture so SEED retries don't drift
     # the speedup anchor. Earlier versions overwrote baseline_metric on
     # every re-run, which made the "1.27x vs ref" message compare round-N
@@ -116,12 +132,13 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         print("[baseline] WARNING: ref_latency_us missing - baseline falls "
               "back to seed metric", file=sys.stderr)
 
-    # initial_best stays None when seed didn't profile.
-    # keep_or_discard's `if best is None: KEEP` then accepts the first
-    # real kernel timing without comparing against a fake anchor. The
-    # earlier fallback `seed_val if seed_val is not None else ref_val`
-    # compared kernels against the PyTorch ref instead of seed, producing
-    # the "fake 1.00x" baseline bug.
+    # initial_best stays None when seed didn't profile OR failed
+    # correctness (seed_val was nulled above). keep_or_discard's
+    # `if best is None: KEEP` then accepts the first real kernel timing
+    # without comparing against a fake anchor. The earlier fallback
+    # `seed_val if seed_val is not None else ref_val` compared kernels
+    # against the PyTorch ref instead of seed, producing the "fake 1.00x"
+    # baseline bug.
     initial_best = seed_val
     baseline_commit = _git_short_head(task_dir)
     baseline_commit_recorded = existing_baseline_commit or baseline_commit
