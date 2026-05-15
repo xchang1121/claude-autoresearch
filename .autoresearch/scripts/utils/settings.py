@@ -12,8 +12,9 @@ from typing import Dict, Optional
 
 import yaml
 
+# __file__ now lives in scripts/utils/; climb two levels to reach .autoresearch/.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_AUTORESEARCH_DIR = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
+_AUTORESEARCH_DIR = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
 _CONFIG_PATH = os.path.join(_AUTORESEARCH_DIR, "config.yaml")
 _CODE_CHECKER_PATH = os.path.join(_AUTORESEARCH_DIR, "code_checker.yaml")
 

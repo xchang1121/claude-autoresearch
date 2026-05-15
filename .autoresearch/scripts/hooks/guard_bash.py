@@ -20,8 +20,8 @@ contract:
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
-from hook_utils import read_hook_input, block_decision, block_with_guidance
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hooks.utils import read_hook_input, block_decision, block_with_guidance
 from phase_machine import (
     DIAGNOSE, DIAGNOSE_ATTEMPTS_CAP, EDIT, REPLAN, read_phase,
     get_task_dir, touch_heartbeat, check_bash, parse_script_names,
@@ -29,7 +29,7 @@ from phase_machine import (
     is_single_foreground_ar_invocation,
     DIAGNOSE_NEED_DIAGNOSIS,
 )
-from settings import hallucinated_scripts
+from utils.settings import hallucinated_scripts
 
 # Real CLI scripts under .autoresearch/scripts/. Anything not listed
 # here (and not in _LIBRARY_NOT_CLI / hallucinated_scripts aliases) is
@@ -55,7 +55,9 @@ _LIBRARY_NOT_CLI = {
     "task_config.py": "task_config.py is a library, not a CLI.",
     "settings.py": "settings.py is a library, not a CLI.",
     "hw_detect.py": "hw_detect.py is a library, not a CLI.",
-    "hook_utils.py": "hook_utils.py is a library, not a CLI.",
+    "hook_utils.py": ("hook_utils.py was renamed to hooks/utils.py and is "
+                      "a library, not a CLI."),
+    "utils.py": "hooks/utils.py is a library, not a CLI.",
     "failure_extractor.py": "failure_extractor.py is a library, not a CLI.",
     "code_checker.py": (
         "code_checker.py is a library used by quick_check.py, not a CLI. "
@@ -63,8 +65,8 @@ _LIBRARY_NOT_CLI = {
     ),
     "_baseline_init.py": (
         "_baseline_init.py is a subprocess child of baseline.py, not a "
-        "CLI. Run `python .autoresearch/scripts/baseline.py <task_dir>` "
-        "instead — it invokes _baseline_init.py for you."
+        "CLI. Run `python .autoresearch/scripts/engine/baseline.py "
+        "<task_dir>` instead — it invokes _baseline_init.py for you."
     ),
 }
 

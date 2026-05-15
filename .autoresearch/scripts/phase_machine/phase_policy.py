@@ -52,6 +52,12 @@ from .validators import get_active_item, has_pending_items
 # absolute prefixes (`python /repo/.autoresearch/scripts/X.py`,
 # `python C:/repo/.autoresearch/scripts/X.py` after backslash
 # normalization).
+#
+# Optional `(?:engine/)?` after `.autoresearch/scripts/` accepts both
+# the post-restructure layout (engine/ holds blessed CLIs like
+# pipeline.py / baseline.py / create_plan.py / parse_args.py) and the
+# top-level lifecycle scripts (dashboard.py, scaffold.py, resume.py)
+# that stay at scripts/ root.
 # Common Python flags allowed by both `py` and `python*` (don't affect
 # script execution semantics; just runtime tweaks).
 _COMMON_PY_FLAGS = (
@@ -74,6 +80,7 @@ _CANONICAL_AR_RE = re.compile(
     r'python(?:\d+(?:\.\d+)?)?(?:\s+(?:' + _COMMON_PY_FLAGS + r'))*'
     r')'
     r'\s+(?:\S*?/)?\.autoresearch/scripts/'      # script (with optional path prefix)
+    r'(?:engine/)?'                              # optional engine/ subdir
     r'([A-Za-z_]\w*\.py)\b'                      #   group 1 = basename
     r'(?:\s+(?:'                                 # script args
     # Quoted strings: backtick and `$(` are forbidden (caught by the
@@ -309,9 +316,16 @@ def parse_invoked_ar_script(command: str) -> Optional[str]:
 
 def parse_script_names(command: str) -> List[Tuple[str, str]]:
     """Return [(path, basename)] for the AR script in `command`, or [].
-    Used by hook_guard_bash's hallucinated-name pre-check."""
+    Used by hook_guard_bash's hallucinated-name pre-check.
+
+    Path is the canonical engine/-rooted form for blessed CLIs and the
+    flat scripts/ form for top-level lifecycle scripts. Consumers only
+    care about the basename today; the path is informational."""
     invoked = parse_canonical_ar(command)
-    return [(f".autoresearch/scripts/{invoked}", invoked)] if invoked else []
+    if not invoked:
+        return []
+    sub = "" if invoked in _LIFECYCLE_SCRIPTS else "engine/"
+    return [(f".autoresearch/scripts/{sub}{invoked}", invoked)]
 
 
 def is_single_foreground_ar_invocation(command: str, *, script: str) -> tuple:
@@ -332,7 +346,7 @@ def is_single_foreground_ar_invocation(command: str, *, script: str) -> tuple:
 # someone tried `python .autoresearch/scripts/<x>.py task` directly.
 # An earlier version did substring-banning on the raw command, but
 # that falsely blocked harmless mentions like `echo quick_check.py`
-# or `git diff -- .autoresearch/scripts/settle.py` (READONLY shapes
+# or `git diff -- .autoresearch/scripts/engine/settle.py` (READONLY shapes
 # that mention the name in args, not invocations).
 _SUBPROCESS_ONLY_AR_SCRIPTS = {
     "eval_wrapper.py":    "subprocess-only (invoked by pipeline.py)",
@@ -388,7 +402,11 @@ _EDIT_RULES = {
 
 _CANONICAL_FORM_REJECTION = (
     "AR scripts must be invoked directly: "
-    "`python .autoresearch/scripts/<name>.py <task_dir> [args...]`. "
+    "`python .autoresearch/scripts/engine/<name>.py <task_dir> [args...]` "
+    "for blessed CLIs (pipeline, baseline, create_plan, eval_wrapper, "
+    "quick_check, keep_or_discard, settle, parse_args), or "
+    "`python .autoresearch/scripts/<name>.py` for top-level scripts "
+    "(scaffold, resume, dashboard). "
     "Allowed alongside: env-var assignments, real Python flags "
     "(`-O`, `-u`, `-X dev`, ...), and FD redirection (`> log`, `2>&1`). "
     "Not supported: short-circuit flags (`--version`, `-c`, `-m`), "
@@ -513,7 +531,7 @@ def check_edit(phase: str, rel_path: str, editable_files,
                 f"plan.md is machine-generated — never hand-edit it. Write "
                 f"your <items>...</items> XML to .ar_state/{PLAN_ITEMS_FILE} "
                 f"with the Write tool, then run "
-                f"`python .autoresearch/scripts/create_plan.py \"<task_dir>\"`."
+                f"`python .autoresearch/scripts/engine/create_plan.py \"<task_dir>\"`."
             )
         return False, (
             f"{rel_path!r} is machine-maintained state. Only "

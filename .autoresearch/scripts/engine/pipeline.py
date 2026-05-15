@@ -3,7 +3,7 @@
 Post-edit pipeline — runs ALL mechanical steps after Claude Code edits code.
 
 Claude Code does the LLM work (plan, edit, diagnose). Then calls this:
-    python .autoresearch/scripts/pipeline.py <task_dir>
+    python .autoresearch/scripts/engine/pipeline.py <task_dir>
 
 This script does:
     1. quick_check → fail? rollback, report
@@ -20,17 +20,18 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS_ROOT = os.path.dirname(SCRIPT_DIR)
+sys.path.insert(0, SCRIPTS_ROOT)
+sys.path.insert(0, SCRIPT_DIR)
 from task_config import load_task_config
-from failure_extractor import format_for_stdout
+from utils.failure_extractor import format_for_stdout
 from phase_machine import (
     get_active_item,
     get_guidance, auto_rollback, load_progress, edit_marker_path,
     pending_settle_path, parse_last_json_line, FINISH,
 )
 from workflow import PhaseController, record_round
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _run_settle(task_dir: str, kd_json: dict) -> tuple:

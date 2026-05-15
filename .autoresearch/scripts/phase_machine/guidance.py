@@ -145,7 +145,7 @@ def _create_plan_instruction(task_dir: str) -> str:
         f"/tmp/, do NOT pass it as a CLI arg later. The Write tool is the "
         f"only thing that touches this path.)\n"
         f"  2. Run:\n"
-        f"       python .autoresearch/scripts/create_plan.py \"{task_dir}\"\n"
+        f"       python .autoresearch/scripts/engine/create_plan.py \"{task_dir}\"\n"
         f"     (No second argument. The script reads .ar_state/{PLAN_ITEMS_FILE} "
         f"automatically. Adding `@/some/path` reintroduces the drift this "
         f"two-step form exists to prevent.)\n"
@@ -495,7 +495,7 @@ def get_guidance(task_dir: str) -> str:
 
     if phase == BASELINE:
         return (f"[AR Phase: BASELINE] Run: "
-                f"python .autoresearch/scripts/baseline.py \"{task_dir}\"{worker_flag}")
+                f"python .autoresearch/scripts/engine/baseline.py \"{task_dir}\"{worker_flag}")
 
     if phase == PLAN:
         metric_hint = ""
@@ -529,7 +529,7 @@ def get_guidance(task_dir: str) -> str:
                 f"{files_hint}\n"
                 f"CRITICAL: Implement ONLY {item_id}'s idea. Do NOT implement other plan items.\n"
                 f"The pipeline will settle {item_id} with this round's metric.\n"
-                f"Make your edit(s), then: python .autoresearch/scripts/pipeline.py \"{task_dir}\"\n"
+                f"Make your edit(s), then: python .autoresearch/scripts/engine/pipeline.py \"{task_dir}\"\n"
                 f"(TodoWrite payloads are delivered by the hook after each "
                 f"settle / create_plan — call them verbatim when emitted; "
                 f"do not synthesize TodoWrite calls from this hint.)")

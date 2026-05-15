@@ -34,8 +34,8 @@ import os
 import shlex
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
-from hw_detect import list_supported_dsls
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.hw_detect import list_supported_dsls
 
 _SUPPORTED_DSLS_DOC = "|".join(list_supported_dsls())
 

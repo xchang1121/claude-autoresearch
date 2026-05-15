@@ -52,7 +52,7 @@ import yaml
 # CLI script. The local re-export keeps callers that imported
 # `scaffold.validate_ref` working.
 # ---------------------------------------------------------------------------
-from ref_ast import validate_ref  # noqa: E402, F401  (re-export)
+from utils.ref_ast import validate_ref  # noqa: E402, F401  (re-export)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ def _git_init(task_dir: str):
     commits are eliminated.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from git_utils import commit_in_task
+    from utils.git_utils import commit_in_task
 
     subprocess.run(["git", "init"], cwd=task_dir, capture_output=True, check=True)
     ok, info = commit_in_task(task_dir, ["."], "scaffold: baseline")
@@ -213,7 +213,7 @@ def _make_arg_parser() -> argparse.ArgumentParser:
     # silently prime the LLM with a stale or abbreviated list — this used
     # to read `--devices 0` from a stale example, etc.).
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from hw_detect import list_supported_dsls
+    from utils.hw_detect import list_supported_dsls
     parser.add_argument("--dsl", default=None,
                         help=f"DSL name (one of: {', '.join(list_supported_dsls())}). "
                              f"Defaults to config.yaml:default_dsl.")
@@ -256,8 +256,8 @@ def main():
 
     # Resolve DSL (and via it, backend).
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from settings import default_dsl
-    from hw_detect import (
+    from utils.settings import default_dsl
+    from utils.hw_detect import (
         backend_for_dsl, derive_arch, fetch_worker_hardware,
     )
     from ar_vendored.op.verifier.adapters.factory import (
@@ -435,7 +435,9 @@ def main():
     if args.run_baseline and args.ref and args.kernel:
         print(f"[scaffold] Running baseline eval...", file=sys.stderr)
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        baseline_cmd = [sys.executable, os.path.join(script_dir, "baseline.py"), task_dir]
+        baseline_cmd = [sys.executable,
+                        os.path.join(script_dir, "engine", "baseline.py"),
+                        task_dir]
         if args.worker_url:
             baseline_cmd.extend(["--worker-url", args.worker_url])
         rc = subprocess.run(baseline_cmd).returncode
@@ -452,7 +454,7 @@ def main():
                           f"see [baseline]/[eval] stderr above"),
                 "hint": ("Inspect kernel.py / reference.py / worker logs, "
                          "fix, then re-run: "
-                         f"python .autoresearch/scripts/baseline.py "
+                         f"python .autoresearch/scripts/engine/baseline.py "
                          f"\"{task_dir}\""),
             }))
             sys.exit(3)

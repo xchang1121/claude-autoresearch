@@ -34,7 +34,7 @@ from urllib.request import Request, urlopen
 SCRIPTS_DIR = Path(__file__).resolve().parent   # .autoresearch/scripts/
 
 sys.path.insert(0, str(SCRIPTS_DIR))
-import hw_detect  # noqa: E402
+from utils import hw_detect  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

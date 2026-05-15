@@ -68,7 +68,7 @@ def _count_ref_cases(task_dir: str, config: TaskConfig) -> int:
         sys.path.insert(0, ref_dir)
     try:
         import importlib.util
-        from input_groups import resolve as _resolve  # type: ignore
+        from utils.input_groups import resolve as _resolve  # type: ignore
         spec = importlib.util.spec_from_file_location(
             f"_count_ref_{config.name}", ref_path)
         if spec is None or spec.loader is None:
@@ -601,11 +601,11 @@ def run_local_eval(task_dir: str, config: TaskConfig,
     user-supplied entry point. That field was never set by scaffold and is
     no longer consulted; it stays in TaskConfig only for yaml back-compat.
     """
-    # local_worker is a top-level script (one level up from this package).
+    # local_worker lives in scripts/utils/.
     _scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _scripts_dir not in sys.path:
         sys.path.insert(0, _scripts_dir)
-    from local_worker import local_verify, local_profile
+    from utils.local_worker import local_verify, local_profile
 
     if device_id is not None:
         dev = int(device_id)
@@ -679,7 +679,7 @@ def run_eval(task_dir: str, config: TaskConfig,
     _scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _scripts_dir not in sys.path:
         sys.path.insert(0, _scripts_dir)
-    from local_worker import detect_local_backend
+    from utils.local_worker import detect_local_backend
     backend_key = (config.backend or "cpu").lower()
     ok, why = detect_local_backend(backend_key)
     if ok:

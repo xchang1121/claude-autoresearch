@@ -23,8 +23,8 @@ import os
 import shlex
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
-from hook_utils import read_hook_input, emit_status, emit_todowrite_context
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hooks.utils import read_hook_input, emit_status, emit_todowrite_context
 from phase_machine import (
     read_phase, get_guidance,
     get_task_dir, set_task_dir, get_active_item, touch_heartbeat,

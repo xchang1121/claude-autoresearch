@@ -1,5 +1,5 @@
 # Static code-checker policy. Every value below is authoritative — the
-# Python module `.autoresearch/scripts/code_checker.py` has zero fallback
+# Python module `.autoresearch/scripts/utils/code_checker.py` has zero fallback
 # defaults, so every key listed here MUST be present (or the framework
 # hard-errors on startup, by design).
 #
@@ -106,7 +106,7 @@ soft_ops:
 
 # ---------------------------------------------------------------------------
 # Framework-identifier literals. These replace formerly hard-coded names in
-# `.autoresearch/scripts/code_checker.py`. The checker walks the AST looking
+# `.autoresearch/scripts/utils/code_checker.py`. The checker walks the AST looking
 # for these exact spellings; change a value only if the project convention
 # itself changes (e.g. you rename the kernel class from `ModelNew` or move
 # Triton under a vendored namespace).

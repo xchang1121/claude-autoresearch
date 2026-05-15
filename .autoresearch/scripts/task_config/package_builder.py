@@ -36,7 +36,7 @@ def _detect_device_type(config: TaskConfig) -> str:
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
-    from hw_detect import device_type_for_dsl
+    from utils.hw_detect import device_type_for_dsl
     try:
         return device_type_for_dsl(config.dsl or "")
     except Exception:
@@ -88,7 +88,7 @@ def _gen_verify_script(config: TaskConfig, device_id: int = 0) -> str:
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
-    from correctness import DEFAULT_ATOL as atol, DEFAULT_RTOL as rtol
+    from utils.correctness import DEFAULT_ATOL as atol, DEFAULT_RTOL as rtol
 
     adapter = _get_dsl_adapter(config.dsl)
     dsl_imports = adapter.get_import_statements(config.framework or "torch")
@@ -535,11 +535,17 @@ def _build_package(task_dir: str, config: TaskConfig, device_id: int = 0) -> byt
         # Shared lib modules — imported by the generated verify / profile
         # scripts from the tarball root. Both worker subprocesses resolve
         # them from the same sys.path entry the generated scripts insert.
+        # Source lives in scripts/utils/ post-restructure; bundled at the
+        # tarball root so the worker-side `from input_groups import ...`
+        # (no `utils.` prefix) keeps resolving.
         #   correctness.py  — compare_outputs[_per_case]
         #   input_groups.py — resolve() / describe_case() / num_cases()
-        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        utils_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "utils",
+        )
         for lib_name in ("correctness.py", "input_groups.py"):
-            lib_src = os.path.join(script_dir, lib_name)
+            lib_src = os.path.join(utils_dir, lib_name)
             if os.path.isfile(lib_src):
                 tar.add(lib_src, arcname=lib_name)
 

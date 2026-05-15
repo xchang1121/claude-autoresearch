@@ -4,7 +4,7 @@
 Python replacement for baseline.sh — avoids bash-on-Windows path mangling.
 
 Usage:
-    python .autoresearch/scripts/baseline.py <task_dir> [--device-id N] [--worker-url URL]
+    python .autoresearch/scripts/engine/baseline.py <task_dir> [--device-id N] [--worker-url URL]
 """
 import argparse
 import json
@@ -13,9 +13,11 @@ import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS_ROOT = os.path.dirname(SCRIPT_DIR)
+sys.path.insert(0, SCRIPTS_ROOT)
 sys.path.insert(0, SCRIPT_DIR)
 from phase_machine import parse_last_json_line
-from failure_extractor import format_for_stdout
+from utils.failure_extractor import format_for_stdout
 
 
 def main():

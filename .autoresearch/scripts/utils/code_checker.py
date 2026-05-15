@@ -33,7 +33,7 @@ from typing import Dict, List, Optional, Tuple
 # Missing/malformed keys surface as KeyError at import time.
 # `worker_only_modules` lives in config.yaml, not code_checker.yaml.
 # ---------------------------------------------------------------------------
-from settings import (
+from .settings import (
     code_checker_triton_decorators,
     code_checker_torch_call_prefixes,
     code_checker_hard_ops,

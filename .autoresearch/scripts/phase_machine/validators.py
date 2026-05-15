@@ -104,7 +104,7 @@ try:
     import torch
     import {ref_mod} as _ref
     from {ref_mod} import Model, get_init_inputs
-    from input_groups import resolve as _resolve_groups
+    from utils.input_groups import resolve as _resolve_groups
 except Exception as e:
     traceback.print_exc()
     print(json.dumps({{"ok": False, "stage": "import", "error": str(e)}}))
@@ -160,7 +160,7 @@ def validate_reference(task_dir: str) -> tuple:
         _scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if _scripts_dir not in sys.path:
             sys.path.insert(0, _scripts_dir)
-        from ref_ast import validate_ref as _validate_ref_ast
+        from utils.ref_ast import validate_ref as _validate_ref_ast
         _validate_ref_ast(ref_code, ref_path)
     except ValueError as e:
         return False, str(e)
@@ -243,7 +243,7 @@ def validate_kernel(task_dir: str) -> tuple:
                            f"write the seed kernel (must define class ModelNew)")
 
     try:
-        from quick_check import check_editable_files
+        from engine.quick_check import check_editable_files
     except Exception as e:
         return False, f"cannot import quick_check: {e}"
 

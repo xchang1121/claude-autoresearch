@@ -13,8 +13,8 @@ at every phase and directs Claude to create_plan.py.
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
-from hook_utils import read_hook_input, emit_status, norm_abs_fwd_slash, extract_target_path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hooks.utils import read_hook_input, emit_status, norm_abs_fwd_slash, extract_target_path
 from phase_machine import (
     read_phase, get_guidance, _load_config_safe,
     get_task_dir, touch_heartbeat,
@@ -22,7 +22,7 @@ from phase_machine import (
     EDIT, BASELINE, GENERATE_REF, GENERATE_KERNEL,
 )
 from workflow import PhaseController
-from git_utils import commit_in_task
+from utils.git_utils import commit_in_task
 
 
 def _same_path(a: str, b: str) -> bool:
@@ -114,7 +114,7 @@ def main():
     elif is_editable and phase == EDIT:
         emit_status(
             f"[AR] Code edited. Continue editing OR run: "
-            f"python .autoresearch/scripts/pipeline.py \"{task_dir}\""
+            f"python .autoresearch/scripts/engine/pipeline.py \"{task_dir}\""
         )
 
     sys.exit(0)

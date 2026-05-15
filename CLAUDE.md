@@ -54,7 +54,7 @@ matches your direction; cite SKILL ids in plan rationales.
    stderr; don't poke `phase_machine` directly (it's a Python package
    used by hooks, not a CLI — `hook_guard_bash` rejects direct invocation).
 5. **Editable files are scoped by `task.yaml.editable_files`.** Editing
-   anything else is rejected by `hook_guard_edit.py`.
+   anything else is rejected by `hooks/guard_edit.py`.
 6. **After a session break, resume with `/autoresearch --resume`.** Do
    not patch state files to recover.
 7. **`create_plan.py` rejects mean the plan has a real problem**
@@ -63,18 +63,23 @@ matches your direction; cite SKILL ids in plan rationales.
 8. **TodoWrite sync is mandatory.** When a hook emits `additionalContext`
    with a TodoWrite payload, call TodoWrite with it verbatim next turn.
 9. **AR scripts run as direct top-level Bash invocations only.**
-   To *invoke* an AR script the command must be a single foreground
-   call: `python .autoresearch/scripts/<name>.py <task_dir> [args...]`
-   (env-var prefixes, Python flags, and FD redirection like `> log
-   2>&1` are fine). Wrappers (`nohup`, `bash -lc`, `sh -c`, subshells,
-   `$(...)`), chains (`&&`, `||`, `;`, `|`), and backgrounding (`&`)
-   are unsupported and rejected by `hook_guard_bash`. Run multiple
-   AR scripts as separate Bash tool calls.
+   To *invoke* a blessed CLI the command must be a single foreground
+   call: `python .autoresearch/scripts/engine/<name>.py <task_dir>
+   [args...]` (pipeline, baseline, create_plan, eval_wrapper,
+   quick_check, keep_or_discard, settle, parse_args). The top-level
+   lifecycle scripts use the flat path:
+   `python .autoresearch/scripts/<name>.py` (scaffold, resume,
+   dashboard). Env-var prefixes, Python flags, and FD redirection
+   (`> log 2>&1`) are fine. Wrappers (`nohup`, `bash -lc`, `sh -c`,
+   subshells, `$(...)`), chains (`&&`, `||`, `;`, `|`), and
+   backgrounding (`&`) are unsupported and rejected by
+   `hooks/guard_bash.py`. Run multiple AR scripts as separate Bash
+   tool calls.
 
-   *Reading* AR scripts (e.g. `cat .autoresearch/scripts/X.py`,
-   `git diff -- .autoresearch/scripts/X.py`) is allowed because the
-   classifier sees those heads as read-only and the args don't
-   execute. The Read tool is still preferred — it's the idiomatic
+   *Reading* AR scripts (e.g. `cat .autoresearch/scripts/engine/pipeline.py`,
+   `git diff -- .autoresearch/scripts/engine/settle.py`) is allowed
+   because the classifier sees those heads as read-only and the args
+   don't execute. The Read tool is still preferred — it's the idiomatic
    way to inspect file contents in Claude Code.
 10. **DIAGNOSE phase ends with a new plan.** Two paths to that end:
    - **Preferred (subagent route).** Call `Task(subagent_type='ar-diagnosis')`;
@@ -100,7 +105,7 @@ matches your direction; cite SKILL ids in plan rationales.
    read-only-by-default tool isolation produce a more reliable diagnosis,
    not because the host can prove the subagent wrote the file.
 
-11. **Stop is only legal at phase FINISH.** `hook_stop_save.py` blocks
+11. **Stop is only legal at phase FINISH.** `hooks/stop_save.py` blocks
     early Stop in every other phase; the block message embeds
     `get_guidance(task_dir)` so the agent sees the next action.
     `max_rounds` + auto-DIAGNOSE-on-3-fails are the budget. If stuck,

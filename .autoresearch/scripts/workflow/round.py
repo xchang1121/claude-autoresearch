@@ -22,7 +22,7 @@ from phase_machine import (  # noqa: E402
 from task_config import (  # noqa: E402
     EvalResult, check_constraints, is_improvement, load_task_config,
 )
-from git_utils import commit_in_task  # noqa: E402
+from utils.git_utils import commit_in_task  # noqa: E402
 
 
 def record_round(task_dir: str, eval_data: dict,

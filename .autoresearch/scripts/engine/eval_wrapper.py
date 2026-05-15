@@ -5,7 +5,7 @@ Eval wrapper for Claude Code autoresearch.
 Zero external dependency — uses local task_config.py for YAML parsing and eval execution.
 
 Usage:
-    python .autoresearch/scripts/eval_wrapper.py <task_dir> [--device-id N] [--worker-url URL[,URL,...]]
+    python .autoresearch/scripts/engine/eval_wrapper.py <task_dir> [--device-id N] [--worker-url URL[,URL,...]]
                                                                               ^ comma-separated; first reachable wins
 
 Output (last line of stdout):
@@ -17,10 +17,10 @@ import json
 import os
 import sys
 
-# Import from sibling module
-sys.path.insert(0, os.path.dirname(__file__))
+# scripts/ root in sys.path — pulls in task_config, utils, etc.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from task_config import load_task_config, run_eval, format_result_summary
-from failure_extractor import extract_failure_signals
+from utils.failure_extractor import extract_failure_signals
 
 
 def main():
@@ -56,7 +56,7 @@ def main():
     else:
         # Probe the local backend up front so the log line tells the user
         # exactly why this run will / won't proceed locally.
-        from local_worker import detect_local_backend
+        from utils.local_worker import detect_local_backend
         backend_key = (config.backend or "cpu").lower()
         ok, why = detect_local_backend(backend_key)
         status = "available" if ok else "UNAVAILABLE"

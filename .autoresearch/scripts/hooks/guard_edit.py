@@ -12,9 +12,9 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
-from hook_utils import (read_hook_input, block_decision, block_with_guidance,
-                        extract_target_path)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hooks.utils import (read_hook_input, block_decision, block_with_guidance,
+                         extract_target_path)
 from phase_machine import (
     read_phase, get_task_dir, touch_heartbeat,
     edit_marker_path, check_edit, EDIT, DIAGNOSE,
@@ -93,7 +93,7 @@ def _edit_phase_git_gate(task_dir: str, editable_files):
                 f"a seed commit that didn't land or an off-flow edit. "
                 f"Run pipeline.py to settle the current diff into a round "
                 f"before editing more: "
-                f"python .autoresearch/scripts/pipeline.py \"{task_dir}\""
+                f"python .autoresearch/scripts/engine/pipeline.py \"{task_dir}\""
             )
 
     # Start-of-round marker so re-editing the same file doesn't re-fire this gate

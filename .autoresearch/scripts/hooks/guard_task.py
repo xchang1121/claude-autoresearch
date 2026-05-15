@@ -15,8 +15,8 @@ all in the current phase".
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
-from hook_utils import read_hook_input, block_decision
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hooks.utils import read_hook_input, block_decision
 from phase_machine import (
     DIAGNOSE, DIAGNOSE_ATTEMPTS_CAP, get_task_dir, read_phase,
     touch_heartbeat, diagnose_state,

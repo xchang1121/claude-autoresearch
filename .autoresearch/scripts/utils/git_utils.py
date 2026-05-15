@@ -102,7 +102,8 @@ def auto_rollback(task_dir: str):
     abandon the round).
     """
     try:
-        _scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        # __file__ is scripts/utils/git_utils.py — climb two to reach scripts/.
+        _scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if _scripts_dir not in sys.path:
             sys.path.insert(0, _scripts_dir)
         from task_config import load_task_config

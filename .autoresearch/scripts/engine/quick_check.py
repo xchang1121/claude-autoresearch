@@ -10,7 +10,7 @@ APIs in forward, stray Chinese comments leaking into code tokens) before we
 pay the cost of a full worker eval.
 
 Usage:
-    python .autoresearch/scripts/quick_check.py <task_dir>
+    python .autoresearch/scripts/engine/quick_check.py <task_dir>
 
 Output:
     stdout: 'OK' on pass, JSON error blob on fail
@@ -22,9 +22,9 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from task_config import load_task_config
-from code_checker import CodeChecker
+from utils.code_checker import CodeChecker
 
 
 def check_editable_files(task_dir: str, config) -> list:

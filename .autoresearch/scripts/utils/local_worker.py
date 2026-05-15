@@ -336,8 +336,9 @@ def _profile_via_msprof(tmp: str, op_name: str, timeout: int, env: dict,
     so the user at least gets *some* timing rather than None.
     """
     # Import lazily — pandas is pulled in transitively; don't pay that cost
-    # for users that never touch AscendC.
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # for users that never touch AscendC. ar_vendored sits in scripts/, two
+    # levels up from this file (scripts/utils/local_worker.py).
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
     try:

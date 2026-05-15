@@ -6,8 +6,8 @@ Claude provides content, this script handles format. XML is preferred over JSON
 because LLMs hallucinate fewer structural/escape errors in tag-delimited text.
 
 Usage:
-    python .autoresearch/scripts/create_plan.py <task_dir>
-    python .autoresearch/scripts/create_plan.py <task_dir> '<items_xml>'
+    python .autoresearch/scripts/engine/create_plan.py <task_dir>
+    python .autoresearch/scripts/engine/create_plan.py <task_dir> '<items_xml>'
 
 The single-arg form (no <items_xml>) is preferred — it reads from the
 canonical path `<task_dir>/.ar_state/plan_items.xml`. The recommended
@@ -58,7 +58,7 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from phase_machine import (
     load_progress, update_progress,
     progress_path, PLAN_ITEMS_FILE,

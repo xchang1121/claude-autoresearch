@@ -5,8 +5,8 @@ import os
 import sys
 from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.dirname(__file__))
-from hook_utils import read_hook_input, emit_status
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hooks.utils import read_hook_input, emit_status
 from phase_machine import (
     FINISH, get_guidance, get_task_dir,
     load_progress, read_phase, update_progress,

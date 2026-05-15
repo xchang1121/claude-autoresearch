@@ -38,10 +38,10 @@ import manifest as mf
 # source of truth for the allclose comparison — verify.py and
 # autoresearch's eval can't drift.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from correctness import (  # noqa: E402
+from utils.correctness import (  # noqa: E402
     compare_outputs_per_case, DEFAULT_ATOL, DEFAULT_RTOL,
 )
-from input_groups import resolve as _resolve_groups  # noqa: E402
+from utils.input_groups import resolve as _resolve_groups  # noqa: E402
 
 VERIFY_RESULTS = "verify_results.json"
 TIER1_TIMEOUT = 30
