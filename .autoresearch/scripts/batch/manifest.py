@@ -279,21 +279,13 @@ def find_recent_task_dir(op_name: str, since_ts: float) -> Path | None:
 
 
 def find_active_task_dir() -> Path | None:
-    """Most-recently-touched task dir (heartbeat preferred over dir mtime)."""
-    tasks_root = repo_root() / "ar_tasks"
-    if not tasks_root.is_dir():
-        return None
-    best: Path | None = None
-    best_mt = -1.0
-    for d in tasks_root.iterdir():
-        if not d.is_dir():
-            continue
-        hb = d / ".ar_state" / ".heartbeat"
-        try:
-            mt = hb.stat().st_mtime if hb.exists() else d.stat().st_mtime
-        except OSError:
-            continue
-        if mt > best_mt:
-            best_mt = mt
-            best = d
-    return best
+    """Thin Path-typed shim over phase_machine.find_active_task_dir so the
+    batch monitor uses the same active-task rule as resume / dashboard.
+    Previously this module's own heartbeat-only scan could disagree with
+    resume's pointer-first rule when batch and manual sessions mixed."""
+    _scripts_dir = str(Path(__file__).resolve().parent.parent)
+    if _scripts_dir not in sys.path:
+        sys.path.insert(0, _scripts_dir)
+    from phase_machine import find_active_task_dir as _shared
+    td = _shared()
+    return Path(td) if td else None

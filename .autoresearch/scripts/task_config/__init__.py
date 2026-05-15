@@ -21,13 +21,13 @@ Layout:
                         transport, run_eval dispatcher, result assembly.
                         Depends on loader + metric_policy + package_builder.
 
-This `__init__.py` re-exports every public name the previous flat module
-exposed, so existing importers (`from task_config import TaskConfig`,
-etc.) continue to work without modification. New code may prefer
-sub-module imports for readability:
-
-    from task_config.metric_policy import EvalResult, is_improvement
-    from task_config.eval_client    import run_eval
+This `__init__.py` re-exports only the names actually imported from
+outside the package. Submodule helpers (script-template generators,
+HTTP plumbing, metric arithmetic guards) stay private — reach into the
+submodule explicitly when you need them. Earlier this file mirrored
+the legacy flat-module API and re-exported every underscore helper "in
+case"; that hid the real coupling story and meant submodule renames
+rippled through here.
 """
 # fmt: off
 from .loader import (
@@ -35,25 +35,8 @@ from .loader import (
 )
 from .metric_policy import (
     EvalOutcome, EvalResult, check_constraints, is_improvement, format_result_summary,
-    # Operator table — internal but referenced by some debug scripts that
-    # introspect supported constraint operators.
-    _CONSTRAINT_OPS,
-)
-from .package_builder import (
-    _build_package, _gen_verify_script, _gen_profile_script,
-    _exclude_pycache,
-    _detect_device_type, _get_dsl_adapter,
 )
 from .eval_client import (
     run_eval, run_remote_eval, run_local_eval,
-    _normalize_worker_url, _worker_status, _select_worker,
-    _multipart_post,
-    _worker_acquire_device, _worker_release_device,
-    _worker_verify, _worker_profile,
-    _assemble_eval_result,
-    # Multi-shape helpers: pipeline.py uses _count_ref_cases for timeout
-    # scaling; tests reach into the others.
-    _count_ref_cases, _effective_timeout,
-    _last_json_line, _finite, _resolve_profile, _per_shape_floats,
 )
 # fmt: on

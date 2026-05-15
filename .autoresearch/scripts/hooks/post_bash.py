@@ -188,7 +188,12 @@ def main():
         if not progress:
             emit_status("[AR] Baseline failed (no progress.json). Retry.")
         else:
-            new_phase = PhaseController(task_dir).on_baseline_settled()
+            # baseline.py / workflow.run_baseline_init already advanced the
+            # phase via PhaseController.on_baseline_settled before exiting.
+            # Read it back here — do NOT re-run the transition (used to be
+            # called from both sides, which left the rule with two owners
+            # even though compute_next_phase happened to be idempotent).
+            new_phase = read_phase(task_dir)
             outcome = getattr(progress, "baseline_outcome", None)
             emit_status(_baseline_message(outcome, new_phase, progress,
                                           get_guidance(task_dir)))

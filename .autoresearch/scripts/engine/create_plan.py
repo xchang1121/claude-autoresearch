@@ -23,9 +23,12 @@ vs the actual `.ar_state/plan_items.xml` write target, etc.). With one
 hardcoded canonical path, the model can't transcribe it wrong because
 the model never types it twice.
 
-See `phase_machine._PLAN_XML_EXAMPLE` for the canonical schema (with
-inline schema-reminder comments). That constant is the single source of
-truth — keep this file's parsing rules in lockstep with it.
+See `phase_machine.guidance._PLAN_XML_EXAMPLE` for the canonical schema
+(with inline schema-reminder comments). That constant is the single
+source of truth — keep this file's parsing rules in lockstep with it.
+It is private to the `guidance` submodule and intentionally not
+re-exported from `phase_machine` itself; import from the submodule
+directly if you need to reach it.
 
 Behavior:
   Every successful run REPLACES plan.md's `## Active Items` with the new

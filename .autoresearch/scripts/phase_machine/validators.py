@@ -25,9 +25,17 @@ import sys
 from typing import NamedTuple, Optional
 
 # Sibling-module imports inside the package: state_store gives us paths,
-# phase constants, and the JSON-tail parser.
-from .state_store import (
-    plan_path, parse_last_json_line,
+# phase constants, etc. The subprocess JSON-tail parser is the shared
+# utility in utils.json_io (used to be duplicated here and in
+# task_config.eval_client).
+import os as _os
+import sys as _sys
+_scripts_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _scripts_dir not in _sys.path:
+    _sys.path.insert(0, _scripts_dir)
+from utils.json_io import parse_last_json_line  # noqa: E402
+from .state_store import (  # noqa: E402
+    plan_path,
     diagnose_artifact_path, diagnose_marker,
     load_progress, DIAGNOSE_ATTEMPTS_CAP,
 )

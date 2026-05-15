@@ -6,8 +6,12 @@ re-invoking the CLI shell. The shell `_baseline_init.py` stays as a
 thin wrapper so existing `python _baseline_init.py <td> <eval_json>`
 call sites keep working.
 
-Exit codes: see `_EXIT_FOR` below. Phase transition is owned by
-PhaseController.on_baseline_settled (dispatches on `baseline_outcome`).
+Exit codes: see `_EXIT_FOR` below. Phase transition is owned here:
+run_baseline_init calls PhaseController.on_baseline_settled before
+returning, on every code path that mutates progress.json. The Bash
+post-hook does NOT re-run the transition (used to be a second owner,
+masked by compute_next_phase's idempotence) — it just emits guidance
+based on the phase already on disk.
 """
 from __future__ import annotations
 
@@ -198,21 +202,27 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         return _EXIT_FOR[outcome]
 
     if outcome != EvalOutcome.OK:
+        # Phase transition (PLAN for kernel_* failures, untouched for
+        # framework_error / ref_fail) is owned by on_baseline_settled,
+        # which dispatches on the `baseline_outcome` we just persisted.
+        # Calling it here keeps non-hook callers (notebook re-runs,
+        # tests) on the same code path as the Bash-hook flow.
+        PhaseController(task_dir).on_baseline_settled()
         print(f"[baseline] {outcome.value}: {eval_data.get('error') or '(no detail)'}",
               file=sys.stderr)
         return _EXIT_FOR[outcome]
 
     if seed_val is None:
-        # Degenerate: outcome=OK but no primary metric (rare).
+        # Degenerate: outcome=OK but no primary metric (rare). Treat as
+        # kernel-no-timing — leave phase at BASELINE so the agent retries.
         print(f"[baseline] ERROR: outcome=OK but no valid "
               f"{config.primary_metric}; treating as kernel-no-timing.",
               file=sys.stderr)
         return 2
 
-    PhaseController(task_dir).on_baseline_init_success()
+    PhaseController(task_dir).on_baseline_settled()
     print(f"[baseline] Initialized: task={config.name}, "
           f"seed_{config.primary_metric}={seed_val}, "
           f"baseline({baseline_source})={baseline_val}, "
           f"commit={baseline_commit_recorded}", file=sys.stderr)
-    print("[baseline] Phase -> PLAN", file=sys.stderr)
     return 0

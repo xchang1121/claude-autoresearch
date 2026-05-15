@@ -29,8 +29,9 @@ from utils.failure_extractor import format_for_stdout
 from phase_machine import (
     get_active_item,
     get_guidance, auto_rollback, load_progress, edit_marker_path,
-    pending_settle_path, parse_last_json_line, FINISH,
+    pending_settle_path, FINISH,
 )
+from utils.json_io import parse_last_json_line
 from workflow import PhaseController, record_round
 
 

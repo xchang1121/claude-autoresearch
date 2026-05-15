@@ -41,7 +41,12 @@ class PhaseController:
 
     # ---- Baseline -------------------------------------------------------
     def on_baseline_settled(self) -> str:
-        """Advance phase based on baseline outcome:
+        """Single owner of the post-baseline phase transition. Called
+        from workflow.run_baseline_init at the end of its body, so both
+        the Bash-hook flow and any direct library caller (notebook
+        re-runs, tests) go through the same decision rule.
+
+        Advance phase based on baseline outcome:
           - ok / kernel_* → PLAN (seed PASS goes to optimize; seed FAIL
             goes to plan-and-rewrite)
           - framework_error → leave phase untouched (no per-shape data,
@@ -60,9 +65,6 @@ class PhaseController:
         )
         if outcome in ("framework_error", "ref_fail"):
             return read_phase(self.task_dir)
-        return self._write(PLAN)
-
-    def on_baseline_init_success(self) -> str:
         return self._write(PLAN)
 
     # ---- Plan -----------------------------------------------------------

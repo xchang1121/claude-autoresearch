@@ -23,7 +23,7 @@ from task_config import (  # noqa: E402
     EvalOutcome, EvalResult, check_constraints, is_improvement,
     load_task_config,
 )
-from utils.git_utils import commit_in_task  # noqa: E402
+from utils.git_utils import commit_in_task, current_head_short  # noqa: E402
 
 
 def record_round(task_dir: str, eval_data: dict,
@@ -132,7 +132,17 @@ def record_round(task_dir: str, eval_data: dict,
             new_failures = progress.consecutive_failures + 1
             auto_rollback(task_dir)
         else:
-            commit_hash = info if info != "noop" else None
+            # "noop" means the edit produced no git-visible diff (e.g.
+            # whitespace-only change, or a roll-back to an existing
+            # commit's bytes). The kernel we just evaluated IS what HEAD
+            # points at, so resolve commit_hash to HEAD instead of None
+            # — otherwise a noisier rerun of an existing best would
+            # advance best_metric while nulling best_commit, leaving
+            # dashboard / report unable to retrieve the winning kernel.
+            if info == "noop":
+                commit_hash = current_head_short(task_dir) or progress.best_commit
+            else:
+                commit_hash = info
             new_best_metric = metric_val
             new_best_commit = commit_hash
             new_failures = 0

@@ -10,11 +10,24 @@ Canonical invocation (from project root):
     python .autoresearch/scripts/ar_cli.py worker --status --port 9111
     python .autoresearch/scripts/ar_cli.py worker --stop   --port 9111
 
-The CLI is cross-platform (daemon mode uses start_new_session on POSIX /
-DETACHED_PROCESS on Windows). Prerequisites are the user's: activate a
-Python env where `fastapi + uvicorn + pyyaml + torch` (plus torch_npu /
-triton / pandas / msprof / nsys per DSL) are importable — ar_cli itself
-does not activate anything.
+Platform support:
+  - `worker --start` (foreground) and `worker --status` work on POSIX
+    and Windows alike.
+  - `worker --start --bg` (daemon mode) detaches on both platforms
+    (start_new_session on POSIX / DETACHED_PROCESS on Windows), but the
+    log path is hardcoded to `/tmp/ar_worker_<port>.log`, which is
+    POSIX-only — Windows callers should run foreground (`--start`
+    without `--bg`) and redirect stdout/stderr themselves.
+  - `worker --stop` is POSIX-only: it shells out to `ss`/`lsof` to find
+    the listening PID, reads `/proc/<pid>/cmdline` for the safety
+    check, and sends `SIGTERM`/`SIGKILL` via `os.kill`. On Windows the
+    detection commands are absent and the signals don't map — stop the
+    daemon by killing the PID printed by `--start --bg` (Task Manager
+    or `taskkill /PID <pid>`).
+
+Prerequisites are the user's: activate a Python env where `fastapi +
+uvicorn + pyyaml + torch` (plus torch_npu / triton / pandas / msprof /
+nsys per DSL) are importable — ar_cli itself does not activate anything.
 """
 from __future__ import annotations
 
@@ -335,7 +348,8 @@ def _add_worker_subcommand(sub: argparse._SubParsersAction) -> None:
     mx.add_argument("--start", action="store_true",
                     help="Start the worker on this machine.")
     mx.add_argument("--stop", action="store_true",
-                    help="Stop the daemon listening on --port.")
+                    help="Stop the daemon listening on --port. "
+                         "POSIX-only (uses ss/lsof + SIGTERM/SIGKILL).")
     mx.add_argument("--status", action="store_true",
                     help="Curl /api/v1/status on --host:--port.")
 
@@ -365,7 +379,9 @@ def _add_worker_subcommand(sub: argparse._SubParsersAction) -> None:
                    help="TCP port (default: 9001).")
     p.add_argument("--bg", action="store_true",
                    help="Daemon mode for --start. Detaches, logs to "
-                        "/tmp/ar_worker_<port>.log, prints PID + log path.")
+                        "/tmp/ar_worker_<port>.log, prints PID + log "
+                        "path. The log path is POSIX-only; on Windows "
+                        "run foreground (omit --bg) and redirect output.")
     p.add_argument("--force", action="store_true",
                    help="For --stop: skip the ar_vendored.worker.server "
                         "cmdline safety check.")

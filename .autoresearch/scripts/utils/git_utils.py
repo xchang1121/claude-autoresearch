@@ -30,6 +30,7 @@ are idempotent.
 import os
 import subprocess
 import sys
+from typing import Optional
 
 _GIT_USER_NAME = "autoresearch"
 _GIT_USER_EMAIL = "auto@research"
@@ -79,7 +80,19 @@ def commit_in_task(task_dir: str, paths, message: str) -> tuple:
         r = _run(["git", "commit", "-m", message], cwd=task_dir)
         if r.returncode != 0:
             blob = (r.stdout or "") + (r.stderr or "")
-            if "nothing to commit" in blob or "no changes added" in blob:
+            # "nothing to commit"            — clean tree, no diff staged
+            # "no changes added to commit"   — modifications exist but
+            #                                   none were `git add`-ed
+            # "nothing added to commit but untracked files present"
+            #                                — nothing staged AND there
+            #                                   are unrelated untracked
+            #                                   paths (e.g. .ar_state).
+            # All three mean "nothing committed but not an error" —
+            # treat as noop so KEEP doesn't get demoted to FAIL just
+            # because some sidecar file is untracked.
+            if ("nothing to commit" in blob
+                    or "no changes added" in blob
+                    or "nothing added to commit" in blob):
                 return True, "noop"
             return False, blob.strip()[-400:] or "git commit returned non-zero with no output"
 
@@ -90,6 +103,23 @@ def commit_in_task(task_dir: str, paths, message: str) -> tuple:
         return False, "git operation timed out (>10s) — check for index lock or fs contention"
     except Exception as e:
         return False, f"unexpected error: {e}"
+
+
+def current_head_short(task_dir: str) -> Optional[str]:
+    """Return the short hash of HEAD inside `task_dir`, or None if the
+    rev-parse call fails / there is no HEAD. Used by round.py when a
+    KEEP commit was a no-op (working tree already matched HEAD) — the
+    kernel we just evaluated is exactly what HEAD points at, so
+    best_commit must track HEAD instead of getting set to None.
+    """
+    try:
+        r = _run(["git", "rev-parse", "--short", "HEAD"], cwd=task_dir)
+    except subprocess.TimeoutExpired:
+        return None
+    if r.returncode != 0:
+        return None
+    h = r.stdout.strip()
+    return h or None
 
 
 def auto_rollback(task_dir: str):

@@ -454,48 +454,10 @@ def render(task_dir, history_offset=0, history_window=None):
 
 
 def _auto_detect_task_dir() -> str:
-    """Auto-detect task_dir: latest-modified ar_tasks/ dir wins.
-
-    Uses file modification times (specifically .ar_state/progress.json or .phase)
-    to pick the actively running task, not the one pointed to by stale .active_task.
-    """
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
-
-    # Find all task dirs and pick the one with most recent activity
-    tasks_dir = os.path.join(project_root, "ar_tasks")
-    if os.path.isdir(tasks_dir):
-        subdirs_with_mtime = []
-        for d in os.listdir(tasks_dir):
-            full = os.path.join(tasks_dir, d)
-            if os.path.isdir(full) and os.path.exists(os.path.join(full, "task.yaml")):
-                # Prefer progress.json or .phase mtime (indicates active work),
-                # fallback to dir mtime
-                candidates = [
-                    _pm.progress_path(full),
-                    _pm.state_path(full, ".phase"),
-                    full,
-                ]
-                latest_mtime = 0
-                for c in candidates:
-                    if os.path.exists(c):
-                        latest_mtime = max(latest_mtime, os.path.getmtime(c))
-                subdirs_with_mtime.append((full, latest_mtime))
-
-        if subdirs_with_mtime:
-            # Pick most recently modified
-            subdirs_with_mtime.sort(key=lambda x: x[1], reverse=True)
-            return subdirs_with_mtime[0][0]
-
-    # Fallback: .active_task pointer written by hook_post_bash on activation
-    active_file = os.path.join(project_root, ".autoresearch", ".active_task")
-    if os.path.exists(active_file):
-        with open(active_file, "r") as f:
-            td = f.read().strip()
-        if td and os.path.isdir(td):
-            return td
-
-    return ""
+    """Auto-detect task_dir via phase_machine.find_active_task_dir — the
+    single shared rule used by resume / dashboard / batch (was three
+    slightly different rules; see find_active_task_dir docstring)."""
+    return _pm.find_active_task_dir() or ""
 
 
 def main():

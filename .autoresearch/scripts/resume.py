@@ -14,44 +14,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase_machine import (
     ALL_PHASES, load_progress,
-    progress_path, plan_path, state_path, edit_marker_path,
-    has_pending_items,
+    plan_path, state_path, edit_marker_path,
+    has_pending_items, find_active_task_dir,
 )
-
-
-def _find_latest_task() -> str:
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
-
-    # 1. Try .active_task
-    active_file = os.path.join(project_root, ".autoresearch", ".active_task")
-    if os.path.exists(active_file):
-        with open(active_file, "r") as f:
-            td = f.read().strip()
-        if td and os.path.isdir(td):
-            return td
-        # Stale pointer (task dir was deleted) — clean it so future calls skip straight to scan
-        try:
-            os.remove(active_file)
-        except OSError:
-            pass
-
-    # 2. Latest mtime from ar_tasks/
-    tasks_dir = os.path.join(project_root, "ar_tasks")
-    if not os.path.isdir(tasks_dir):
-        return ""
-
-    candidates = []
-    for d in os.listdir(tasks_dir):
-        full = os.path.join(tasks_dir, d)
-        if os.path.isdir(full) and os.path.exists(os.path.join(full, "task.yaml")):
-            pfile = progress_path(full)
-            mtime = os.path.getmtime(pfile) if os.path.exists(pfile) else os.path.getmtime(full)
-            candidates.append((full, mtime))
-    if not candidates:
-        return ""
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    return candidates[0][0]
 
 
 def _validate(task_dir: str) -> tuple[bool, str]:
@@ -126,7 +91,7 @@ def main():
     if task_dir:
         task_dir = os.path.abspath(task_dir)
     else:
-        task_dir = _find_latest_task()
+        task_dir = find_active_task_dir() or ""
         if not task_dir:
             print("[resume] ERROR: No existing task found in ar_tasks/", file=sys.stderr)
             sys.exit(1)

@@ -5,24 +5,31 @@ Mechanical plan.md settlement — no LLM needed.
 After keep_or_discard.py runs, this script:
 1. Reads the decision (KEEP/DISCARD/FAIL) from keep_or_discard output
 2. Updates plan.md: mark active item [x] with result, advance (ACTIVE)
-3. Returns the next phase
 
 Usage:
     python settle.py <task_dir> <decision_json>
 
 Output (stdout, last line):
-    {"next_phase": "EDIT", "settled_item": "p1", "decision": "KEEP", "metric": 1294.8}
+    {"settled_item": "p1", "decision": "KEEP", "metric": 1294.8}
 
 All plan.md mutation goes through workflow.PlanStore so the parse / render
-formats can't drift across files. Phase advancement goes through
-workflow.PhaseController so the phase rule lives in one place.
+formats can't drift across files.
+
+Scope note: settle.py does NOT advance .ar_state/.phase. The phase
+transition after a settled round is owned by pipeline.py's _post_settle
+(via PhaseController.on_round_settled). When settle.py was its own
+subprocess AND advanced phase, the parent orchestrator also re-ran the
+transition — two owners writing the same state file. compute_next_phase
+happened to be idempotent so it didn't surface as a bug, but the
+ownership story stayed split. Keep the rule here: settle.py owns
+plan.md only.
 """
 import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from workflow import PhaseController, PlanStore
+from workflow import PlanStore
 
 
 def main():
@@ -61,13 +68,10 @@ def main():
         print(json.dumps({"error": str(exc)}))
         sys.exit(1)
 
-    next_phase = PhaseController(task_dir).on_round_settled()
-
     print(json.dumps({
         "settled_item": settled_item_id,
         "decision": decision,
         "metric": metric_val,
-        "next_phase": next_phase,
     }))
 
 

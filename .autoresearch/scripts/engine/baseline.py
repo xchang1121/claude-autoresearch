@@ -16,8 +16,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, SCRIPTS_ROOT)
 sys.path.insert(0, SCRIPT_DIR)
-from phase_machine import parse_last_json_line
 from utils.failure_extractor import format_for_stdout
+from utils.json_io import parse_last_json_line
 
 
 def main():

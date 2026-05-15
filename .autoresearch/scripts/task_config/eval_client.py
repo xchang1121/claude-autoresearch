@@ -38,6 +38,14 @@ from .loader import TaskConfig
 from .metric_policy import EvalOutcome, EvalResult
 from .package_builder import _build_package
 
+# Subprocess JSON-tail parser is the shared util — used to be duplicated
+# here as `_last_json_line` and in phase_machine.state_store as
+# `parse_last_json_line`.
+_scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+from utils.json_io import parse_last_json_line as _last_json_line  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Per-shape eval_timeout scaling + case-count probe
@@ -240,18 +248,6 @@ def _worker_profile(worker_url: str, package: bytes, task_id: str,
 # ---------------------------------------------------------------------------
 # Result assembly
 # ---------------------------------------------------------------------------
-
-def _last_json_line(s: str) -> Optional[dict]:
-    """Pull the final `{...}` JSON object from a multi-line log."""
-    for line in reversed((s or "").splitlines()):
-        line = line.strip()
-        if line.startswith("{") and line.endswith("}"):
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                pass
-    return None
-
 
 def _finite(v) -> bool:
     return isinstance(v, (int, float)) and 0 < v < float("inf")
