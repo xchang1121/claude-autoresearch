@@ -41,9 +41,13 @@ class PhaseController:
 
     # ---- Baseline -------------------------------------------------------
     def on_baseline_settled(self) -> str:
-        """Always advance to PLAN after baseline. Seed PASS and seed FAIL
-        both go to PLAN; framework_error leaves phase untouched (eval
-        produced no per-shape data, retry needed).
+        """Advance phase based on baseline outcome:
+          - ok / kernel_* → PLAN (seed PASS goes to optimize; seed FAIL
+            goes to plan-and-rewrite)
+          - framework_error → leave phase untouched (no per-shape data,
+            agent should retry baseline)
+          - ref_fail → leave phase untouched (reference is broken; the
+            agent cannot fix it from EDIT, user must fix --ref source)
         Legacy progress (no outcome) maps via the old
         (seed_metric, baseline_correctness) rule."""
         progress = load_progress(self.task_dir)
@@ -54,7 +58,7 @@ class PhaseController:
                      and progress.seed_metric is not None)
             else "kernel_verify_fail"
         )
-        if outcome == "framework_error":
+        if outcome in ("framework_error", "ref_fail"):
             return read_phase(self.task_dir)
         return self._write(PLAN)
 

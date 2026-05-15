@@ -64,20 +64,29 @@ def _get_dsl_adapter(dsl: Optional[str]):
 def _gen_verify_script(config: TaskConfig, device_id: int = 0) -> str:
     """Generate verify_{op_name}.py for the Worker Service.
 
-    Reference outputs are re-computed on the device every round. We used
-    to torch.save them to /tmp/ar_cache/<op>_<sha>/reference.pt and
-    torch.load on subsequent rounds; on multi-shape ops that .pt is
-    List[List[Tensor]] of length num_cases * outputs-per-case and the
-    weights_only=False reload rebuilds the entire pickle graph, which
-    on NPU workers with slow /tmp stalled for minutes — looking like
-    the worker had frozen. Re-computing the ref every round is cheaper
-    end-to-end (one forward * num_cases) and the triton JIT cache for
-    ModelNew is the actual amortisation source across rounds.
+    Reference outputs are re-computed on the device every round (no .pt
+    cache — the previous /tmp/ar_cache reload stalled multi-shape NPU
+    workers for minutes; re-computing is cheaper end-to-end and the
+    triton JIT cache amortises ModelNew across rounds).
+
+    The script is split into four phases so failures can be attributed:
+      Phase 1 — ref setup (import / get_init_inputs / cases)
+                error_source="ref", exit 2
+      Phase 2 — ref forward on device
+                error_source="ref", exit 2
+      Phase 3 — kernel import + forward on device
+                error_source="kernel", exit 1
+      Phase 4 — compare (correctness module)
+                error_source="kernel" only when comparison fails or
+                excepts; success has no error_source.
+
+    Scaffold gates on `error_source` from baseline output: "ref" failures
+    abort scaffold (user must fix the source ref file), "kernel" failures
+    drop into PLAN as a normal seed-rewrite signal.
 
     DSL adapter (ar_vendored.op.verifier.adapters) supplies DSL-specific
     imports (triton autotune patches, tilelang compile patches, etc.) via
-    `get_import_statements`. The verify body itself is uniform across DSLs:
-    instantiate ModelNew, run forward per case, allclose vs ref.
+    `get_import_statements`. The verify body itself is uniform across DSLs.
     """
     device = _detect_device_type(config)
     kernel_file = config.editable_files[0].replace(".py", "")
@@ -130,14 +139,6 @@ else:
 ATOL = {atol!r}
 RTOL = {rtol!r}
 
-try:
-    from {kernel_file} import ModelNew
-except Exception as e:
-    traceback.print_exc()
-    print(json.dumps({{"correctness": False,
-                      "error": f"import failed: cannot import name 'ModelNew' from '{kernel_file}' ({{e}})"}}))
-    sys.exit(1)
-
 def _to_cpu_list(out):
     if isinstance(out, torch.Tensor):
         return [out.detach().cpu()]
@@ -145,6 +146,11 @@ def _to_cpu_list(out):
         return [o.detach().cpu() if hasattr(o, "detach") else o for o in out]
     return [out]
 
+# === Phase 1: ref-side setup (import, get_init_inputs, cases) ===
+# Failures here all classify as error_source="ref": the reference file
+# is broken (missing symbol, import error, get_inputs() crashed). Caller
+# (scaffold / pipeline) routes ref-side failures back to the user
+# instead of dragging the agent into a futile rewrite-the-kernel loop.
 try:
     # input_groups.resolve duck-types between get_input_groups() (multi-shape)
     # and get_inputs() (legacy single-shape) and always returns List[List].
@@ -157,15 +163,19 @@ try:
     num_cases = len(cases_cpu)
     if num_cases == 0:
         raise RuntimeError("reference module returned 0 input cases")
+except Exception as e:
+    traceback.print_exc()
+    print(json.dumps({{"correctness": False, "error_source": "ref",
+                      "error": f"reference setup failed: {{e}}"}}))
+    sys.exit(2)
 
-    # --- Compute reference outputs per case ---
-    # Previously cached to /tmp/ar_cache/<op>_<sha>/reference.pt via
-    # torch.save and reloaded with torch.load(weights_only=False) on
-    # subsequent rounds. On multi-shape ops the .pt is List[List[Tensor]]
-    # of length num_cases * outputs-per-case, and the pickle graph rebuild
-    # on NPU workers stalled for minutes (looked like a hang). Re-computing
-    # every round is cheaper than the load + the triton JIT cache amortises
-    # ModelNew across rounds anyway.
+# === Phase 2: ref forward on device ===
+# Some bugs only show up on actual device (NPU-specific dtype handling,
+# op support, shape edge cases) — catching them here as error_source="ref"
+# is the whole point of the split. Without this branch, a device-only
+# ref bug looked like a kernel correctness failure and led the agent on
+# a wild goose chase rewriting kernel.py.
+try:
     model_ref = Model(*init_inputs).to(device).eval()
     out_ref_per_case = []
     with torch.no_grad():
@@ -175,7 +185,6 @@ try:
             out_ref_raw = model_ref(*ref_inputs_dev)
             out_ref_per_case.append(_to_cpu_list(out_ref_raw))
             del ref_inputs_dev, out_ref_raw
-    ref_source = "computed-worker"
     # Free the ref model before ModelNew allocates — BatchNorm-scale
     # tensors on HBM don't fit both at once.
     del model_ref
@@ -183,8 +192,29 @@ try:
         torch.npu.empty_cache()
     elif device_type == "cuda":
         torch.cuda.empty_cache()
+except Exception as e:
+    traceback.print_exc()
+    print(json.dumps({{"correctness": False, "error_source": "ref",
+                      "error": f"reference forward failed on device: {{e}}"}}))
+    sys.exit(2)
 
-    # --- Run kernel on device for every case ---
+ref_source = "computed-worker"
+
+# === Phase 3: kernel import + forward ===
+# Everything in this block classifies as error_source="kernel": import
+# failures (missing ModelNew), constructor errors, device runtime errors
+# from the actual kernel under test. Scaffold's --run-baseline still
+# accepts kernel failures (the seed is allowed to be wrong; PLAN takes
+# over to rewrite). Only ref failures are fatal at scaffold time.
+try:
+    from {kernel_file} import ModelNew
+except Exception as e:
+    traceback.print_exc()
+    print(json.dumps({{"correctness": False, "error_source": "kernel",
+                      "error": f"import failed: cannot import name 'ModelNew' from '{kernel_file}' ({{e}})"}}))
+    sys.exit(1)
+
+try:
     model_new = ModelNew(*init_inputs).to(device).eval()
     out_new_per_case = []
     with torch.no_grad():
@@ -193,12 +223,20 @@ try:
             out_new_raw = model_new(*inputs_dev)
             out_new_per_case.append(_to_cpu_list(out_new_raw))
             del inputs_dev, out_new_raw
+except Exception as e:
+    traceback.print_exc()
+    print(json.dumps({{"correctness": False, "error_source": "kernel",
+                      "error": f"kernel forward failed: {{e}}"}}))
+    sys.exit(1)
 
-    # --- Compare (delegated to shared correctness module) ---
-    # `correctness.py` is bundled into the tarball at root by _build_package;
-    # both this generated script and the batch verifier call into the same
-    # compare_outputs_per_case so single- and multi-shape semantics can't
-    # drift.
+# === Phase 4: compare (correctness module is the single source of truth) ===
+# `correctness.py` is bundled into the tarball at root by _build_package;
+# both this generated script and the batch verifier call into the same
+# compare_outputs_per_case so single- and multi-shape semantics can't
+# drift. A failed comparison is a kernel-side numerical issue
+# (error_source="kernel") — ref outputs are already established by
+# Phase 2 having succeeded.
+try:
     from correctness import compare_outputs_per_case
     cmp_result = compare_outputs_per_case(
         out_ref_per_case, out_new_per_case, ATOL, RTOL)
@@ -221,7 +259,7 @@ try:
                 print("[verify] FAILED_SHAPES: " + "; ".join(shape_strs) + suffix,
                       file=sys.stderr)
 
-    print(json.dumps({{
+    out = {{
         "correctness": cmp_result["correctness"],
         "ref_source": ref_source,
         "atol": cmp_result["atol"], "rtol": cmp_result["rtol"],
@@ -231,12 +269,15 @@ try:
         "failed_indices": cmp_result.get("failed_indices", []),
         "worst_idx": cmp_result.get("worst_idx"),
         "worst_max_abs_diff": cmp_result.get("worst_max_abs_diff"),
-    }}))
+    }}
+    if not cmp_result["correctness"]:
+        out["error_source"] = "kernel"
+    print(json.dumps(out))
     sys.exit(0 if cmp_result["correctness"] else 1)
-
 except Exception as e:
     traceback.print_exc()
-    print(json.dumps({{"correctness": False, "error": str(e)}}))
+    print(json.dumps({{"correctness": False, "error_source": "kernel",
+                      "error": f"comparison failed: {{e}}"}}))
     sys.exit(1)
 '''
 

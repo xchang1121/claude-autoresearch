@@ -4,8 +4,9 @@ Task directory scaffolder for Claude Code autoresearch.
 
 Zero external dependency. Creates a self-contained task directory with:
   - task.yaml (config)
-  - reference.py (correctness baseline; required to import + run end-to-end
-    on CPU — scaffold gates on `phase_machine.validate_reference`)
+  - reference.py (correctness baseline; AST-checked via utils.ref_ast.
+    validate_ref before scaffold copies it. Runtime correctness is
+    validated by --run-baseline whose verify script tags error_source.)
   - kernel.py (editable seed; written from the user's --kernel file)
   - .ar_state/ (progress tracking)
   - .git/ (baseline commit)
@@ -360,30 +361,16 @@ def main():
     for f in sorted(os.listdir(task_dir)):
         print(f"  {f}", file=sys.stderr)
 
-    # Runnability gate: reference.py must import AND survive one
-    # Model.forward() pass on CPU. The reference is the correctness
-    # baseline for every subsequent verify; if it doesn't run, nothing
-    # downstream is meaningful. AST symbol presence is checked earlier
-    # (see validate_ref); this catches torch import errors, bad
-    # get_inputs shapes, missing ops, etc.
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from phase_machine import validate_reference
-    ok, err = validate_reference(task_dir)
-    if not ok:
-        print(json.dumps({
-            "status": "error",
-            "task_dir": task_dir,
-            "error": f"reference.py failed runnability check: {err}",
-            "hint": ("Fix the source reference file (the one passed via "
-                     "--ref) and re-run /autoresearch. scaffold left the "
-                     "partial task_dir in place for inspection."),
-        }))
-        sys.exit(2)
-
-    # Reference outputs are no longer captured locally. Worker side caches
-    # them on the first verify round (keyed on reference.py sha) and reuses
-    # across rounds. This saves a multi-GiB upload per large-tensor op.
-
+    # Reference validation is now a single path through baseline.py: the
+    # generated verify script splits ref-side and kernel-side try/excepts
+    # and tags error_source on failure. Scaffold reads the resulting
+    # progress.json after baseline and decides:
+    #   - error_source == "ref"  → reject task (user must fix --ref)
+    #   - everything else        → status=ok, task activates normally
+    #     (kernel-side failures advance to PLAN via on_baseline_settled)
+    # AST symbol presence was already checked earlier (validate_ref on
+    # the source --ref file before copying), so import errors / missing
+    # symbols never reach this point.
     if args.run_baseline:
         print(f"[scaffold] Running baseline eval...", file=sys.stderr)
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -393,10 +380,27 @@ def main():
         if args.worker_url:
             baseline_cmd.extend(["--worker-url", args.worker_url])
         rc = subprocess.run(baseline_cmd).returncode
+        # _EXIT_FOR[REF_FAIL] = 5 (see workflow/baseline.py). Other non-zero
+        # exits are kernel-side failures: task gets activated, hook routes
+        # to PLAN.
+        if rc == 5:
+            print(json.dumps({
+                "status": "error",
+                "task_dir": task_dir,
+                "error": ("reference.py failed during baseline — see "
+                          "[baseline]/[eval] stderr above"),
+                "hint": ("The file passed via --ref is broken (import / "
+                         "forward / device-only bug). Fix the SOURCE file "
+                         "and re-run /autoresearch from scratch. The task "
+                         "directory is left in place for inspection but "
+                         "MUST NOT be activated — reference.py is treated "
+                         "as ground truth and the agent cannot fix it."),
+            }))
+            sys.exit(5)
         if rc != 0:
-            # Seed kernel failed baseline. task_dir is left in place; the
-            # hook routes to PLAN so the agent rewrites the kernel via
-            # the standard plan->edit loop.
+            # Kernel-side failure. task_dir is left in place and will be
+            # activated normally; the hook routes to PLAN so the agent
+            # rewrites the kernel via plan->edit.
             print(json.dumps({
                 "status": "error",
                 "task_dir": task_dir,

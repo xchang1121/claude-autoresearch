@@ -30,10 +30,20 @@ from typing import Optional
 
 
 class EvalOutcome(str, Enum):
-    """Single source of truth for what just happened in eval. The boundary
-    between KERNEL_* and FRAMEWORK_ERROR is "did we get any per-shape
-    data" — without it the kernel wasn't meaningfully exercised."""
+    """Single source of truth for what just happened in eval.
+
+    KERNEL_* vs REF_FAIL: the verify script splits ref setup / ref forward /
+    kernel forward into separate try/excepts and emits `error_source` in
+    its JSON tail. REF_FAIL fires when the broken side is the reference
+    (the file passed to /autoresearch via --ref) — scaffold rejects the
+    task and asks the user to fix the source file. KERNEL_* failures are
+    still recoverable through PLAN -> EDIT rewrite.
+
+    The boundary between KERNEL_* and FRAMEWORK_ERROR is "did we get any
+    per-shape data" — without it the kernel wasn't meaningfully exercised.
+    """
     OK = "ok"
+    REF_FAIL = "ref_fail"                          # reference broken (setup or forward)
     KERNEL_VERIFY_FAIL = "kernel_verify_fail"      # output != ref
     KERNEL_PROFILE_CRASH = "kernel_profile_crash"  # verify ok, profile crashed
     FRAMEWORK_ERROR = "framework_error"            # no per-shape data at all
@@ -45,6 +55,10 @@ class EvalResult:
     metrics: dict = field(default_factory=dict)
     error: Optional[str] = None
     raw_output: str = ""
+    # error_source: "ref" | "kernel" | None. Mirrors the verify script's
+    # tagged failure so scaffold and PLAN guidance can attribute blame
+    # without re-parsing tracebacks. None on success.
+    error_source: Optional[str] = None
 
     @property
     def correctness(self) -> bool:

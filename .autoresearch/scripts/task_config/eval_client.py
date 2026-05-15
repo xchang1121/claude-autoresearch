@@ -306,6 +306,9 @@ def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
     verify_log = verify_resp.get("log", "")
     verify_ok = bool(verify_resp.get("success", False))
     verify_json = _last_json_line(verify_log) or {}
+    # error_source is set by the verify script template (Phase 1/2 -> "ref",
+    # Phase 3/4 -> "kernel"). Empty when verify succeeded.
+    error_source = verify_json.get("error_source") if not verify_ok else None
 
     gen_time, gen_art = _resolve_profile(profile_resp, "gen_time",
                                          "generation_profile_result.json")
@@ -326,7 +329,12 @@ def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
     )
 
     # Outcome — see EvalOutcome docstring for definitions.
-    if per_gen is None and not verify_ok:
+    # error_source="ref" supersedes the per_gen/verify decision: a broken
+    # reference invalidates the whole eval regardless of whether the
+    # profile happened to produce data.
+    if error_source == "ref":
+        outcome = EvalOutcome.REF_FAIL
+    elif per_gen is None and not verify_ok:
         outcome = EvalOutcome.FRAMEWORK_ERROR
     elif not verify_ok:
         outcome = EvalOutcome.KERNEL_VERIFY_FAIL
@@ -427,6 +435,8 @@ def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
 
     if outcome == EvalOutcome.OK:
         error = None
+    elif outcome == EvalOutcome.REF_FAIL:
+        error = (f"reference.py failed: {verify_json.get('error') or '(no detail)'}")
     elif outcome == EvalOutcome.KERNEL_PROFILE_CRASH:
         error = (f"kernel crashed during profile on {len(crashed_shapes)} of "
                  f"{len(per_gen)} shapes")
@@ -443,6 +453,7 @@ def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
         metrics=metrics,
         error=error,
         raw_output=(verify_log + "\n" + profile_log)[-4096:],
+        error_source=error_source,
     )
 
 

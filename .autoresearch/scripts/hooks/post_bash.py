@@ -129,6 +129,13 @@ def _baseline_message(outcome, new_phase, progress, guidance):
                 "data. Seed kernel NOT evaluated — do NOT edit kernel.py. "
                 "Re-run baseline.py after fixing framework (eval.timeout, "
                 "device/worker availability, eval stderr).")
+    if outcome == "ref_fail":
+        err_src = getattr(progress, "baseline_error_source", None) or "ref"
+        return (f"[AR] Baseline REF_FAIL ({err_src}): reference.py is broken. "
+                f"Fix the source file passed via --ref and re-run "
+                f"/autoresearch from scratch. The agent CANNOT fix this from "
+                f"EDIT — reference is treated as ground truth and is not "
+                f"editable. Phase stays at BASELINE.")
     if outcome != "ok":
         reason = _BASELINE_DEMOTE_REASON.get(outcome) or (
             "seed kernel produced no timing" if progress.seed_metric is None

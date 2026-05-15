@@ -34,14 +34,14 @@ from .state_store import (
     parse_last_json_line,
 )
 from .validators import (
-    validate_reference, validate_kernel, validate_plan, validate_diagnose,
+    validate_kernel, validate_plan, validate_diagnose,
     DiagnoseState, diagnose_state,
     DIAGNOSE_NEED_DIAGNOSIS, DIAGNOSE_READY, DIAGNOSE_MANUAL_FALLBACK,
     get_plan_items, parse_plan_text, has_pending_items, get_active_item,
     is_settled_table_header,
     # Internal — re-exported so debug / extension scripts that previously
     # reached into phase_machine can still find them at the old name.
-    _PLAN_ITEM_RE, _PLAN_TAG_RE, _REF_RUNCHECK_SCRIPT,
+    _PLAN_ITEM_RE, _PLAN_TAG_RE,
 )
 from .phase_policy import (
     # Layer 1: classifier (pure function, command shape only)

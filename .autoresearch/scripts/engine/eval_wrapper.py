@@ -72,6 +72,10 @@ def main():
         "correctness": result.correctness,         # kept for legacy readers
         "metrics": result.metrics,
         "error": result.error,
+        # error_source ("ref" | "kernel" | None): forwarded so baseline.py
+        # / scaffold can attribute blame without re-parsing the raw log.
+        # Scaffold uses error_source="ref" to refuse activating the task.
+        "error_source": result.error_source,
     }
     # Attach structured failure signals only when something went wrong — on
     # success the raw log is noisy and adds no value to downstream consumers.

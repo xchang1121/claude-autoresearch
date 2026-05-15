@@ -28,9 +28,12 @@ from .transition import PhaseController
 
 # Outcome → exit code. on_baseline_settled reads `baseline_outcome` from
 # progress and dispatches phase independently — exit codes are kept for
-# scaffold.py's "rc != 0 → surface error" check.
+# scaffold.py's "rc != 0 → surface error" check. REF_FAIL gets its own
+# exit code (5) so scaffold can distinguish "reference broken; user must
+# fix --ref source" from "kernel broken; PLAN will rewrite".
 _EXIT_FOR = {
     EvalOutcome.OK: 0,
+    EvalOutcome.REF_FAIL: 5,
     EvalOutcome.KERNEL_VERIFY_FAIL: 3,
     EvalOutcome.KERNEL_PROFILE_CRASH: 3,
     EvalOutcome.FRAMEWORK_ERROR: 4,
@@ -78,6 +81,7 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
     eval_data = json.loads(eval_json)
     outcome = _read_outcome(eval_data)
     correctness = outcome == EvalOutcome.OK
+    error_source = eval_data.get("error_source")  # "ref" | "kernel" | None
     metrics = eval_data.get("metrics", {})
     seed_val = metrics.get(config.primary_metric) if _valid(
         metrics.get(config.primary_metric)) else None
@@ -140,6 +144,7 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         baseline_source=baseline_source,
         baseline_outcome=outcome.value,
         baseline_correctness=correctness,
+        baseline_error_source=error_source,
         seed_metric=seed_val,
         consecutive_failures=0,
         plan_version=0,
@@ -164,6 +169,16 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         "correctness": correctness,
         "commit": baseline_commit,
     })
+
+    if outcome == EvalOutcome.REF_FAIL:
+        # Reference is broken — the whole task is invalid. Scaffold reads
+        # this exit code (5) and surfaces "fix --ref source" to the user
+        # without activating the task. Don't advance phase here either.
+        print(f"[baseline] REF_FAIL: {eval_data.get('error') or '(no detail)'}",
+              file=sys.stderr)
+        print(f"[baseline] reference.py is broken — fix the source file "
+              f"passed via --ref and re-run /autoresearch.", file=sys.stderr)
+        return _EXIT_FOR[outcome]
 
     if outcome != EvalOutcome.OK:
         print(f"[baseline] {outcome.value}: {eval_data.get('error') or '(no detail)'}",

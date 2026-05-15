@@ -1,14 +1,18 @@
-"""Reference / kernel / plan validators + plan.md parser.
+"""Kernel / plan validators + plan.md parser.
 
 Validators (each: "is this artifact OK enough to advance the phase?"):
 
-  - validate_reference: AST symbols + CPU import-and-run check on
-    reference.py.
   - validate_kernel: CodeChecker pipeline (syntax, py_compile, imports,
     stray Chinese, DSL, autotune restore_value).
   - validate_plan: structural check on plan.md (≥3 items, rationale length,
     exactly one ACTIVE).
   - validate_diagnose: marker + sections on diagnose_v<N>.md.
+
+Reference runnability is no longer validated here. The AST symbol check
+lives in [utils/ref_ast.py](../utils/ref_ast.py) and is called once by
+scaffold up front; reference runtime behaviour is validated by
+scaffold's `--run-baseline` (which runs the same verify script as a
+normal round and tags `error_source="ref"` on failure).
 
 Plan.md parsing (`parse_plan_text`, `get_plan_items`, `has_pending_items`,
 `get_active_item`, `is_settled_table_header`) is the single source of
@@ -17,13 +21,11 @@ create_plan.py all consume it from here.
 """
 import os
 import re
-import subprocess
 import sys
 from typing import NamedTuple, Optional
 
 # Sibling-module imports inside the package: state_store gives us paths,
-# phase constants, and the JSON-tail parser used to interpret the
-# subprocess output of validate_reference.
+# phase constants, and the JSON-tail parser.
 from .state_store import (
     plan_path, parse_last_json_line,
     diagnose_artifact_path, diagnose_marker,
@@ -32,123 +34,7 @@ from .state_store import (
 
 
 # ---------------------------------------------------------------------------
-# Reference runnability check
-# ---------------------------------------------------------------------------
-
-# Subprocess template for running reference.py end-to-end on CPU. We only
-# care that import + Model(*get_init_inputs())(*case_inputs) survives;
-# outputs are discarded (the worker captures them on first verify).
-# input_groups.resolve duck-types between get_input_groups (multi-shape)
-# and get_inputs (legacy single-shape); we only run case-0 here — the
-# validator is about importability + a single survival run, not full eval.
-_REF_RUNCHECK_SCRIPT = r'''
-import json, sys, traceback
-sys.path.insert(0, {task_dir!r})
-sys.path.insert(0, {scripts_dir!r})
-try:
-    import torch
-    import {ref_mod} as _ref
-    from {ref_mod} import Model, get_init_inputs
-    from utils.input_groups import resolve as _resolve_groups
-except Exception as e:
-    traceback.print_exc()
-    print(json.dumps({{"ok": False, "stage": "import", "error": str(e)}}))
-    sys.exit(1)
-try:
-    init_inputs = get_init_inputs()
-    groups = _resolve_groups(_ref)
-    if not groups:
-        print(json.dumps({{"ok": False, "stage": "input",
-                           "error": "input groups list is empty"}}))
-        sys.exit(1)
-    model = Model(*init_inputs).cpu().eval()
-    inputs = [x.cpu() if hasattr(x, "cpu") else x for x in groups[0]]
-    with torch.no_grad():
-        outs = model(*inputs)
-    if outs is None:
-        print(json.dumps({{"ok": False, "stage": "forward",
-                           "error": "Model.forward() returned None"}}))
-        sys.exit(1)
-    print(json.dumps({{"ok": True, "num_cases": len(groups)}}))
-except Exception as e:
-    traceback.print_exc()
-    print(json.dumps({{"ok": False, "stage": "run", "error": str(e)}}))
-    sys.exit(1)
-'''
-
-
-def validate_reference(task_dir: str) -> tuple:
-    """Two-stage runnability check on <task_dir>/reference.py.
-
-    Stage 1: AST symbol presence — delegates to scaffold.validate_ref so the
-             rule lives in exactly one place.
-    Stage 2: Subprocess that imports the module and runs Model.forward() on
-             CPU. CUDA / Ascend devices are masked off; KMP_DUPLICATE_LIB_OK
-             is set for Windows libiomp5 double-load.
-
-    Never raises. Returns (True, "") on success, (False, reason) otherwise.
-    """
-    ref_path = os.path.join(task_dir, "reference.py")
-    if not os.path.exists(ref_path):
-        return False, "reference.py does not exist"
-
-    try:
-        with open(ref_path, "r", encoding="utf-8") as f:
-            ref_code = f.read()
-    except OSError as e:
-        return False, f"cannot read reference.py: {e}"
-
-    # Stage 1: AST symbols. ref_ast.py is a pure-stdlib lib module that
-    # both this validator and scaffold.py consume — phase_machine no
-    # longer reaches into the scaffold CLI script.
-    try:
-        _scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if _scripts_dir not in sys.path:
-            sys.path.insert(0, _scripts_dir)
-        from utils.ref_ast import validate_ref as _validate_ref_ast
-        _validate_ref_ast(ref_code, ref_path)
-    except ValueError as e:
-        return False, str(e)
-    except Exception as e:
-        return False, f"AST check failed: {e}"
-
-    # Stage 2: subprocess import + forward.
-    _scripts_dir_abs = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    code = _REF_RUNCHECK_SCRIPT.format(task_dir=task_dir,
-                                       scripts_dir=_scripts_dir_abs,
-                                       ref_mod="reference")
-    env = {
-        **os.environ,
-        "CUDA_VISIBLE_DEVICES": "",
-        "ASCEND_RT_VISIBLE_DEVICES": "",
-        "KMP_DUPLICATE_LIB_OK": "TRUE",
-    }
-    try:
-        r = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True, text=True, env=env, cwd=task_dir, timeout=60,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "reference.py runnability check timed out (>60s)"
-    except Exception as e:
-        return False, f"subprocess launch failed: {e}"
-
-    if r.returncode == 0:
-        return True, ""
-
-    # Parse the child's last JSON line for a clean error message; fall back to
-    # the raw stderr tail if the child crashed before printing JSON.
-    info = parse_last_json_line(r.stdout)
-    if info and not info.get("ok", False):
-        stage = info.get("stage", "?")
-        err = info.get("error", "(no detail)")
-        return False, f"reference.py failed at {stage}: {err}"
-    tail = (r.stderr or "")[-400:].strip()
-    return False, f"reference.py runnability check failed: {tail or '(no stderr)'}"
-
-
-# ---------------------------------------------------------------------------
-# Kernel static check (placeholder + CodeChecker pipeline)
+# Kernel static check (CodeChecker pipeline)
 # ---------------------------------------------------------------------------
 
 def validate_kernel(task_dir: str) -> tuple:
