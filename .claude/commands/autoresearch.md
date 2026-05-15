@@ -11,38 +11,29 @@ follow the latest `[AR Phase: ...]` message and never stop between phases.
 - **`--resume`** or **`--resume <task_dir>`** — continue the most recent task
   (or the specified one).
 - **Task dir** — resume that specific task: `ar_tasks/my_task_123456_abc`.
-- **Init flags** — new task from an existing reference file:
+- **Init flags** — new task from a ref + seed kernel:
   ```
-  --ref <file> --op-name <name>
+  --ref <file> --kernel <file> --op-name <name>
   --dsl ascendc|cpp|cuda_c|pypto|swft|tilelang_cuda|tilelang_npuir|torch|triton_ascend|triton_cuda
   [--framework torch|mindspore|numpy]
   (--devices <N[,M,...]> | --worker-url <host:port>)
-  [--kernel <file>] [--max-rounds <N>] [--eval-timeout <sec>]
+  [--max-rounds <N>] [--eval-timeout <sec>]
   [--no-code-checker]
-  [--correctness-atol <float>] [--correctness-rtol <float>]
   ```
-  Hardware spec is exactly one of `--devices` (local) or `--worker-url`
-  (remote). `--backend` and `--arch` are auto-derived from `--dsl` +
-  hardware probe; never typed by the user.
+  Both `--ref` and `--kernel` are required. Hardware spec is exactly one of
+  `--devices` (local) or `--worker-url` (remote). `--backend` and `--arch`
+  are auto-derived from `--dsl` + hardware probe; never typed by the user.
 
   Convention: source files live in `workspace/<op_name>_ref.py` and
   `workspace/<op_name>_kernel.py`.
 
-- **Desc mode** — new task from a natural-language description:
-  ```
-  --desc "fused ReLU + LayerNorm, (32,1024), fp16" --dsl triton_cuda --worker-url ...
-  ```
-
 `--output-dir` defaults to `ar_tasks`.
 
-### Four launch modes
+### Launch flow
 
-| mode | flags | initial phase |
-|------|-------|---------------|
-| 1 | `--ref X.py --kernel Y.py` (both source files ready) | `PLAN` (baseline runs first) |
-| 2 | `--ref X.py` (reference only, agent authors kernel) | `GENERATE_KERNEL` |
-| 3 | `--desc "..."` (prose only) | `GENERATE_REF` → `GENERATE_KERNEL` |
-| 4 | `--desc "..." --kernel Y.py` (prose + seed) | `GENERATE_REF` |
+| flags | initial phase |
+|-------|---------------|
+| `--ref X.py --kernel Y.py` | `BASELINE` runs first; on PASS → `PLAN`; on FAIL → also `PLAN` (first plan items rewrite the seed) |
 
 ## Step 1 — Parse `$ARGUMENTS`
 
@@ -72,9 +63,10 @@ missing, dispatch via `mode: "ask"`.
 - **`resume`** / **`scaffold`** — run `command` verbatim. Last line of
   stdout is the resolved task_dir. Non-zero exit → stop and report.
 
-For mode 1 (both `--ref` and `--kernel`), scaffold's `--run-baseline`
-runs the seed and writes `.phase = PLAN` on success — the next activation
-drops straight into PLAN. Modes 2-4 start in GENERATE_REF / GENERATE_KERNEL.
+Scaffold's `--run-baseline` runs the seed and writes `.phase = PLAN`
+on success — the next activation drops straight into PLAN. If the seed
+fails, `.phase` is also set to PLAN and the first plan items rewrite
+the kernel.
 
 ## Step 3 — Activate
 
@@ -88,8 +80,6 @@ The activation hook prints `[AR Phase: ...]` guidance on stderr. Follow it.
 
 Follow the phase guidance. Never stop between phases.
 
-- **GENERATE_REF / GENERATE_KERNEL** — Write `reference.py` / `kernel.py`
-  with the Edit tool.
 - **BASELINE** — `python .autoresearch/scripts/engine/baseline.py "$AR_TASK_DIR"`
   (append `--worker-url` if configured). Skipped automatically if scaffold
   already ran it.

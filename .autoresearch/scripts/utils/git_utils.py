@@ -46,7 +46,7 @@ def ensure_git_identity(task_dir: str) -> None:
 
     Idempotent: writing identity that's already there is a no-op. Doing
     this in every commit path closes the "user.name=undefined on a fresh
-    box" failure mode that hit Mode-2 GENERATE_KERNEL commits.
+    box" failure mode that hit seed commits on fresh CI workers.
     """
     _run(["git", "config", "user.name", _GIT_USER_NAME], cwd=task_dir)
     _run(["git", "config", "user.email", _GIT_USER_EMAIL], cwd=task_dir)

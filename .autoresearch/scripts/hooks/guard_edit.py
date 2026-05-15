@@ -60,10 +60,9 @@ def _edit_phase_git_gate(task_dir: str, editable_files):
 
     Note on the message wording: "uncommitted changes from previous round"
     used to be the only diagnosis here, but the same gate also fires when
-    GENERATE_REF / GENERATE_KERNEL had a seed commit failure (now caught
-    earlier — phase holds at GENERATE_*) or when something off-flow edited
-    an editable file. Keep the message neutral so the LLM doesn't latch
-    onto "previous round" as the only possible cause.
+    something off-flow edited an editable file. Keep the message neutral
+    so the LLM doesn't latch onto "previous round" as the only possible
+    cause.
     """
     try:
         repo_root = subprocess.run(

@@ -68,8 +68,8 @@ def main():
         sys.exit(1)
 
     # Pretty-print structured failure signals (UB overflow, aivec trap, OOM,
-    # correctness mismatch, ...) — mirrors pipeline.py so the GENERATE_KERNEL
-    # → BASELINE flow surfaces the same actionable summary the EDIT loop does.
+    # correctness mismatch, ...) — mirrors pipeline.py so the seed-failure
+    # → PLAN flow surfaces the same actionable summary the EDIT loop does.
     if not eval_data.get("correctness", False) or eval_data.get("error"):
         if eval_data.get("error"):
             print(f"[baseline] Error: {eval_data['error']}", flush=True)

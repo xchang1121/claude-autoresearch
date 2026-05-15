@@ -6,30 +6,22 @@ Zero external dependency. Creates a self-contained task directory with:
   - task.yaml (config)
   - reference.py (correctness baseline; required to import + run end-to-end
     on CPU — scaffold gates on `phase_machine.validate_reference`)
-  - kernel.py (editable; --kernel writes the user file directly, otherwise
-    the canonical KERNEL_PLACEHOLDER from phase_machine — the placeholder
-    routes the task to GENERATE_KERNEL on first activation)
+  - kernel.py (editable seed; written from the user's --kernel file)
   - .ar_state/ (progress tracking)
   - .git/ (baseline commit)
 
 Usage:
     # NOTE: --devices values below are placeholders; pass the actual free
-    # device id at invocation time. Earlier versions of these examples all
-    # used `--devices 0`, which biased the LLM driving /autoresearch into
-    # silently rewriting the user's --devices to 0 on hook-blocked retries.
-    # parse_args.py is now the single source of truth for flag values.
+    # device id at invocation time.
 
     # Local eval (arch auto-derived via npu-smi):
-    python .autoresearch/scripts/scaffold.py --ref reference.py --op-name my_op --dsl triton_ascend --devices <DEV>
-
-    # With initial kernel:
-    python .autoresearch/scripts/scaffold.py --ref reference.py --kernel kernel.py --op-name my_op --dsl triton_cuda --devices <DEV>
+    python .autoresearch/scripts/scaffold.py --ref reference.py --kernel kernel.py --op-name my_op --dsl triton_ascend --devices <DEV>
 
     # Remote worker (arch fetched from /api/v1/status):
-    python .autoresearch/scripts/scaffold.py --ref reference.py --op-name my_op --dsl triton_ascend --worker-url 127.0.0.1:9111
+    python .autoresearch/scripts/scaffold.py --ref reference.py --kernel kernel.py --op-name my_op --dsl triton_ascend --worker-url 127.0.0.1:9111
 
     # Custom output directory:
-    python .autoresearch/scripts/scaffold.py --ref reference.py --op-name my_op --dsl triton_cuda --devices <DEV> --output-dir /tmp/tasks
+    python .autoresearch/scripts/scaffold.py --ref reference.py --kernel kernel.py --op-name my_op --dsl triton_cuda --devices <DEV> --output-dir /tmp/tasks
 
 Output (last line of stdout):
     {"task_dir": "/absolute/path/to/task_dir", "status": "ok"}
@@ -62,7 +54,7 @@ from utils.ref_ast import validate_ref  # noqa: E402, F401  (re-export)
 def scaffold_task_dir(
     *,
     ref_code: str,
-    kernel_code: str | None = None,
+    kernel_code: str,
     op_name: str,
     desc: str = "",
     dsl: str = "",
@@ -77,11 +69,7 @@ def scaffold_task_dir(
     editable_filename: str = "kernel.py",
     code_checker_enabled: bool = True,
 ) -> str:
-    """Create task directory with all files. Returns absolute path.
-
-    Mirrors task_scaffolder.scaffold_task_dir
-    but with zero external dependency.
-    """
+    """Create task directory with all files. Returns absolute path."""
     # Determine base directory
     if output_dir:
         base_dir = output_dir
@@ -92,19 +80,9 @@ def scaffold_task_dir(
     task_dir = os.path.join(base_dir, dir_name)
     os.makedirs(task_dir)
 
-    # Write reference.py
+    # Write reference.py and the seed kernel.py from the user's files.
     _write(task_dir, "reference.py", ref_code)
-
-    # Write editable file (kernel.py). With no initial kernel, write the
-    # canonical TODO placeholder from phase_machine — phase_machine.is_
-    # placeholder_file uses the matching predicate, so the routing logic
-    # in hooks/scaffold/validators stays in lockstep with this template.
-    if kernel_code is not None:
-        _write(task_dir, editable_filename, kernel_code)
-    else:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from phase_machine import KERNEL_PLACEHOLDER
-        _write(task_dir, editable_filename, KERNEL_PLACEHOLDER)
+    _write(task_dir, editable_filename, kernel_code)
 
     # Generate task.yaml
     task_yaml = {
@@ -136,7 +114,7 @@ def scaffold_task_dir(
 
     # Only emit the code_checker block when disabled — default-true tasks
     # stay clean. quick_check.py and phase_machine.validate_kernel honor
-    # this field; placeholder rejection still fires either way.
+    # this field.
     if not code_checker_enabled:
         task_yaml["code_checker"] = {"enabled": False}
 
@@ -169,9 +147,7 @@ def _git_init(task_dir: str):
     """Initialize git repo and create baseline commit.
 
     The actual commit goes through git_utils.commit_in_task — same code
-    path hook_post_edit uses for seed commits, so reliability differences
-    between Mode-1 (scaffold-time) and Mode-2 (GENERATE_KERNEL-time)
-    commits are eliminated.
+    path hooks use for round commits, so reliability is consistent.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from utils.git_utils import commit_in_task
@@ -196,22 +172,17 @@ def _make_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Scaffold a task directory for Claude Code autoresearch",
     )
-    ref_group = parser.add_mutually_exclusive_group(required=True)
-    ref_group.add_argument("--ref", default=None,
-                           help="Path to reference.py (Model/get_inputs format)")
-    ref_group.add_argument("--desc", default=None,
-                           help="Natural language description → LLM generates reference")
-    parser.add_argument("--kernel", default=None,
-                        help="Path to initial kernel file (optional, skips generation)")
+    parser.add_argument("--ref", required=True,
+                        help="Path to reference.py (Model/get_inputs format)")
+    parser.add_argument("--kernel", required=True,
+                        help="Path to seed kernel file")
     parser.add_argument("--op-name", default=None,
-                        help="Operator name (auto-derived from --desc if omitted)")
+                        help="Operator name (required)")
     # DSL = primary pivot. backend is a pure function of DSL; arch is
     # derived from hardware (local: npu-smi on --devices; remote: worker
     # /api/v1/status). Neither needs to be user-facing.
     # Pull the canonical DSL list from hw_detect at construction time so
-    # the help string can't drift from _DSL_BACKEND (and so we don't
-    # silently prime the LLM with a stale or abbreviated list — this used
-    # to read `--devices 0` from a stale example, etc.).
+    # the help string can't drift from _DSL_BACKEND.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from utils.hw_detect import list_supported_dsls
     parser.add_argument("--dsl", default=None,
@@ -237,11 +208,8 @@ def _make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-code-checker", action="store_true",
                         help=("Disable the static CodeChecker pipeline "
                               "(syntax / imports / DSL / autotune compliance) "
-                              "for this task. quick_check + validate_kernel "
-                              "still reject the scaffold TODO placeholder; "
-                              "everything else passes through. Useful when "
-                              "the DSL rules are too strict for the chosen "
-                              "kernel style. Writes "
+                              "for this task. Useful when the DSL rules are "
+                              "too strict for the chosen kernel style. Writes "
                               "`code_checker: {enabled: false}` into "
                               "task.yaml; flip the field to re-enable later."))
     # --correctness-atol / --correctness-rtol used to live here. atol/rtol
@@ -344,42 +312,29 @@ def main():
                                    "(local eval) or --worker-url (remote)."}))
         sys.exit(1)
 
-    # Derive op-name if not provided
     if not args.op_name:
-        if args.desc:
-            import re as _re
-            words = _re.findall(r"[a-zA-Z]+", args.desc)[:4]
-            args.op_name = "_".join(w.lower() for w in words) or "custom_op"
-        else:
-            args.op_name = "custom_op"
+        print(json.dumps({"status": "error",
+                          "error": "--op-name is required"}))
+        sys.exit(1)
 
-    if args.ref:
-        if not os.path.isfile(args.ref):
-            print(json.dumps({"status": "error", "error": f"Reference file not found: {args.ref}"}))
-            sys.exit(1)
-        with open(args.ref, "r", encoding="utf-8") as f:
-            ref_code = f.read()
-        try:
-            validate_ref(ref_code, args.ref)
-        except ValueError as e:
-            print(json.dumps({"status": "error", "error": str(e)}))
-            sys.exit(1)
-    else:
-        # --desc mode: scaffold without reference. Claude Code fills it later.
-        # Source the placeholder from phase_machine so is_placeholder_file's
-        # prefix predicate stays in lockstep with what we actually write.
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from phase_machine import REFERENCE_PLACEHOLDER_PREFIX
-        ref_code = f"{REFERENCE_PLACEHOLDER_PREFIX}\n# {args.desc}\n"
+    if not os.path.isfile(args.ref):
+        print(json.dumps({"status": "error",
+                          "error": f"Reference file not found: {args.ref}"}))
+        sys.exit(1)
+    with open(args.ref, "r", encoding="utf-8") as f:
+        ref_code = f.read()
+    try:
+        validate_ref(ref_code, args.ref)
+    except ValueError as e:
+        print(json.dumps({"status": "error", "error": str(e)}))
+        sys.exit(1)
 
-    # Read initial kernel (optional)
-    kernel_code = None
-    if args.kernel:
-        if not os.path.isfile(args.kernel):
-            print(json.dumps({"status": "error", "error": f"Kernel file not found: {args.kernel}"}))
-            sys.exit(1)
-        with open(args.kernel, "r", encoding="utf-8") as f:
-            kernel_code = f.read()
+    if not os.path.isfile(args.kernel):
+        print(json.dumps({"status": "error",
+                          "error": f"Kernel file not found: {args.kernel}"}))
+        sys.exit(1)
+    with open(args.kernel, "r", encoding="utf-8") as f:
+        kernel_code = f.read()
 
     # worker_urls / devices_list were resolved above.
     print(f"[scaffold] Creating task directory for {args.op_name}...", file=sys.stderr)
@@ -388,7 +343,6 @@ def main():
         ref_code=ref_code,
         kernel_code=kernel_code,
         op_name=args.op_name,
-        desc=args.desc or "",
         dsl=args.dsl,
         framework=args.framework,
         backend=args.backend,
@@ -406,33 +360,31 @@ def main():
     for f in sorted(os.listdir(task_dir)):
         print(f"  {f}", file=sys.stderr)
 
-    # Runnability gate: any mode that supplied a real --ref must produce a
-    # reference.py that imports AND survives one Model.forward() pass on CPU.
-    # The reference is the correctness baseline for every subsequent verify;
-    # if it doesn't run, nothing downstream is meaningful. AST symbol presence
-    # is checked earlier (see validate_ref); this catches torch import errors,
-    # bad get_inputs shapes, missing ops, etc. Skipped in --desc mode where
-    # reference.py is still a TODO stub.
-    if args.ref:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from phase_machine import validate_reference
-        ok, err = validate_reference(task_dir)
-        if not ok:
-            print(json.dumps({
-                "status": "error",
-                "task_dir": task_dir,
-                "error": f"reference.py failed runnability check: {err}",
-                "hint": ("Fix the source reference file (the one passed via "
-                         "--ref) and re-run /autoresearch. scaffold left the "
-                         "partial task_dir in place for inspection."),
-            }))
-            sys.exit(2)
+    # Runnability gate: reference.py must import AND survive one
+    # Model.forward() pass on CPU. The reference is the correctness
+    # baseline for every subsequent verify; if it doesn't run, nothing
+    # downstream is meaningful. AST symbol presence is checked earlier
+    # (see validate_ref); this catches torch import errors, bad
+    # get_inputs shapes, missing ops, etc.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from phase_machine import validate_reference
+    ok, err = validate_reference(task_dir)
+    if not ok:
+        print(json.dumps({
+            "status": "error",
+            "task_dir": task_dir,
+            "error": f"reference.py failed runnability check: {err}",
+            "hint": ("Fix the source reference file (the one passed via "
+                     "--ref) and re-run /autoresearch. scaffold left the "
+                     "partial task_dir in place for inspection."),
+        }))
+        sys.exit(2)
 
     # Reference outputs are no longer captured locally. Worker side caches
     # them on the first verify round (keyed on reference.py sha) and reuses
     # across rounds. This saves a multi-GiB upload per large-tensor op.
 
-    if args.run_baseline and args.ref and args.kernel:
+    if args.run_baseline:
         print(f"[scaffold] Running baseline eval...", file=sys.stderr)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         baseline_cmd = [sys.executable,
@@ -442,29 +394,19 @@ def main():
             baseline_cmd.extend(["--worker-url", args.worker_url])
         rc = subprocess.run(baseline_cmd).returncode
         if rc != 0:
-            # /autoresearch reads the JSON from scaffold stdout and proceeds
-            # straight to `export AR_TASK_DIR=...`; if baseline failed but we
-            # still printed status=ok, the slash command would resume as if
-            # the task were in PLAN. Surface the failure so the caller stops
-            # and surfaces it to the user instead.
+            # Seed kernel failed baseline. task_dir is left in place; the
+            # hook routes to PLAN so the agent rewrites the kernel via
+            # the standard plan->edit loop.
             print(json.dumps({
                 "status": "error",
                 "task_dir": task_dir,
                 "error": (f"baseline eval failed (exit {rc}); "
                           f"see [baseline]/[eval] stderr above"),
-                "hint": ("Inspect kernel.py / reference.py / worker logs, "
-                         "fix, then re-run: "
-                         f"python .autoresearch/scripts/engine/baseline.py "
-                         f"\"{task_dir}\""),
+                "hint": ("Seed kernel failed baseline. Activate the task "
+                         "(export AR_TASK_DIR=...) and proceed via the "
+                         "standard plan->edit loop."),
             }))
             sys.exit(3)
-    elif args.run_baseline:
-        print(f"[scaffold] --run-baseline skipped: kernel.py not provided. "
-              f"GENERATE_KERNEL phase will produce it; baseline runs after that.\n"
-              f"[scaffold] Tip: baseline.py uses a local execution backend "
-              f"automatically when torch / torch_npu for the selected backend "
-              f"is installed — no --worker-url needed in that case.",
-              file=sys.stderr)
 
     # Output
     print(json.dumps({"task_dir": task_dir, "status": "ok"}))

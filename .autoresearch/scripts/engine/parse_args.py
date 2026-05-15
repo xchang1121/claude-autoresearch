@@ -16,7 +16,7 @@ between the user and the LLM closes that drift.
 
 Modes:
   resume     — `--resume [task_dir]` or a bare existing task path
-  scaffold   — init flags (--ref/--desc + --op-name + --dsl + devices/worker)
+  scaffold   — init flags (--ref + --kernel + --op-name + --dsl + devices/worker)
   ask        — empty args, or scaffold flags incomplete
 
 Output (single JSON line on stdout):
@@ -54,12 +54,8 @@ def _build_scaffold_command(args) -> str:
     or whitespace quirks in the user's typed string.
     """
     parts = ["python", ".autoresearch/scripts/scaffold.py"]
-    if args.ref:
-        parts += ["--ref", shlex.quote(args.ref)]
-    if args.desc:
-        parts += ["--desc", shlex.quote(args.desc)]
-    if args.kernel:
-        parts += ["--kernel", shlex.quote(args.kernel)]
+    parts += ["--ref", shlex.quote(args.ref)]
+    parts += ["--kernel", shlex.quote(args.kernel)]
     if args.op_name:
         parts += ["--op-name", shlex.quote(args.op_name)]
     if args.dsl:
@@ -91,7 +87,8 @@ def main():
             "command": None,
             "values": {},
             "missing": [
-                "--ref <file> or --desc \"...\"",
+                "--ref <file>",
+                "--kernel <file>",
                 "--op-name <name>",
                 f"--dsl <{_SUPPORTED_DSLS_DOC}>",
                 "--devices <N> or --worker-url <host:port>",
@@ -162,12 +159,11 @@ def main():
             "missing": [f"argparse rejected the args: {e.msg}"],
         })
 
-    # Workflow-level required fields. argparse already enforces --ref XOR
-    # --desc; the rest we check here so the LLM gets a single error list.
+    # Workflow-level required fields. argparse already enforces --ref and
+    # --kernel as required positionals; the rest we check here so the LLM
+    # gets a single error list.
     missing = []
-    if not args.op_name and not args.desc:
-        # op_name is auto-derivable from --desc inside scaffold but not
-        # from --ref alone — explicitly require it whenever --ref is used.
+    if not args.op_name:
         missing.append("--op-name <name>")
     if not args.dsl:
         # scaffold has a default_dsl fallback from config.yaml, but at
@@ -183,7 +179,6 @@ def main():
 
     values = {
         "ref": args.ref,
-        "desc": args.desc,
         "kernel": args.kernel,
         "op_name": args.op_name,
         "dsl": args.dsl,

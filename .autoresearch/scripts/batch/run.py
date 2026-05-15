@@ -7,7 +7,7 @@ batch.log, updates batch_progress.json after every op.
 
 Usage:
     python .autoresearch/scripts/batch/run.py <batch_dir> \\
-        --mode {ref-kernel,ref} [--dsl triton_ascend] \\
+        [--dsl triton_ascend] \\
         [--devices N | --worker-url host:port] \\
         [--max-rounds 30] [--eval-timeout 120] [--timeout-min 180] \\
         [--only op1,op2] [--limit N] [--retry-errored] [--cooldown-sec 5]
@@ -39,7 +39,7 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 
 PROMPT_TEMPLATE = """\
-/autoresearch --ref {ref}{kernel_arg} --op-name {op} --dsl {dsl} {hw} --max-rounds {rounds} --eval-timeout {timeout}
+/autoresearch --ref {ref} --kernel {kernel} --op-name {op} --dsl {dsl} {hw} --max-rounds {rounds} --eval-timeout {timeout}
 
 CRITICAL rules — read carefully, this session is non-interactive:
 
@@ -52,7 +52,14 @@ CRITICAL rules — read carefully, this session is non-interactive:
    chain — every PostToolUse gate keys off that file. THIS IS THE
    SINGLE MOST IMPORTANT STEP.
 
-2. {mode_block}
+2. The kernel.py we passed via --kernel is a verified seed. Scaffold's
+   --run-baseline runs it; on PASS .ar_state/.phase is set to PLAN
+   immediately. Your job is PERFORMANCE OPTIMIZATION via
+   PLAN -> EDIT -> VERIFY for the configured max-rounds: propose
+   targeted incremental edits to ModelNew (block sizes, memory layout,
+   vectorization, fewer DRAM round-trips) and let pipeline.py measure
+   the speedup. If baseline fails on the seed, the hook routes to PLAN
+   and the first plan items must fix/rewrite the seed kernel.
 
 3. In EDIT phase use the Edit tool (or Write for full rewrites).
    PostToolUse validates kernel.py and auto-advances on pass.
@@ -70,26 +77,6 @@ CRITICAL rules — read carefully, this session is non-interactive:
    the hooks have nothing more to ask of you, the session ends
    naturally on your last tool call.
 """
-
-MODE_BLOCK = {
-    "ref-kernel": (
-        "The kernel.py we passed via --kernel is a verified seed. "
-        "Scaffold's --run-baseline runs it; on PASS .ar_state/.phase is "
-        "set to PLAN immediately, skipping GENERATE_KERNEL. Your job is "
-        "PERFORMANCE OPTIMIZATION via PLAN -> EDIT -> VERIFY for the "
-        "configured max-rounds: propose targeted incremental edits to "
-        "ModelNew (block sizes, memory layout, vectorization, fewer DRAM "
-        "round-trips) and let pipeline.py measure the speedup. If "
-        "baseline unexpectedly fails, the hook demotes to "
-        "GENERATE_KERNEL; recover with the smallest diff against the "
-        "seed that fixes the regression."
-    ),
-    "ref": (
-        "Only the reference is supplied. Scaffold runs GENERATE_KERNEL "
-        "first; produce a working kernel.py that passes baseline, then "
-        "optimize via PLAN -> EDIT -> VERIFY for the remaining rounds."
-    ),
-}
 
 def health_check_worker(worker_url: str) -> None:
     """Probe http://<host>:<port>/api/v1/status. Raises SystemExit on failure."""
@@ -186,24 +173,21 @@ def recover_stale_running(progress: dict) -> int:
     return n
 
 
-def build_prompt(case: dict, mode: str, dsl: str, hw_arg: str,
+def build_prompt(case: dict, dsl: str, hw_arg: str,
                  max_rounds: int, eval_timeout: int) -> str:
     """Quote every value-bearing flag with shlex.quote so paths with
     spaces (e.g. batch dir under `C:\\Users\\Foo Bar\\...`, or
     `--output-dir "my tasks"`) reach /autoresearch as one argv each.
     `hw_arg` is constructed by the caller from already-validated CLI
     flags — pass through unchanged."""
-    kernel_arg = (f" --kernel {shlex.quote(case['kernel'])}"
-                  if case.get("kernel") else "")
     return PROMPT_TEMPLATE.format(
         ref=shlex.quote(case["ref"]),
-        kernel_arg=kernel_arg,
+        kernel=shlex.quote(case["kernel"]),
         op=shlex.quote(case["op_name"]),
         dsl=shlex.quote(dsl),
         hw=hw_arg,
         rounds=max_rounds,
         timeout=eval_timeout,
-        mode_block=MODE_BLOCK[mode],
     )
 
 
@@ -231,10 +215,10 @@ def env_with_no_proxy() -> dict[str, str]:
 
 
 def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
-            mode: str, dsl: str, hw_arg: str, log_fp) -> int:
+            dsl: str, hw_arg: str, log_fp) -> int:
     op = case["op_name"]
     repo_root = mf.repo_root()
-    prompt = build_prompt(case, mode, dsl, hw_arg,
+    prompt = build_prompt(case, dsl, hw_arg,
                           args.max_rounds, args.eval_timeout)
     cmd = build_claude_cmd(args, prompt)
 
@@ -471,8 +455,6 @@ def print_summary(batch_dir: Path, total_elapsed: float,
 def main() -> int:
     ap = argparse.ArgumentParser(description="Batch driver for /autoresearch.")
     ap.add_argument("batch_dir", help="dir containing manifest.yaml/json")
-    ap.add_argument("--mode", choices=mf.VALID_MODES,
-                    help="ref-kernel or ref (overrides manifest.mode)")
     ap.add_argument("--dsl", default="",
                     help="DSL passed to /autoresearch (overrides manifest.dsl)")
     ap.add_argument("--devices", default="",
@@ -511,11 +493,9 @@ def main() -> int:
     except mf.ManifestError as e:
         sys.exit(f"failed to load {manifest_path}: {e}")
 
-    mode = args.mode or manifest_data.get("mode")
-    if not mode:
-        sys.exit("--mode is required (also accepted as `mode:` in manifest)")
-    if mode not in mf.VALID_MODES:
-        sys.exit(f"--mode must be one of {mf.VALID_MODES}, got {mode!r}")
+    # ref-kernel is the only supported mode now. Ignore stale manifest.mode
+    # values for backward compatibility instead of erroring out.
+    mode = "ref-kernel"
 
     dsl = args.dsl or manifest_data.get("dsl") or ""
     if not dsl:
@@ -583,7 +563,7 @@ def main() -> int:
                       f"elapsed_total={(time.time()-total_started)/60:.1f}min")
 
                 try:
-                    rc = run_one(batch_dir, case, args, mode, dsl, hw_arg, log_fp)
+                    rc = run_one(batch_dir, case, args, dsl, hw_arg, log_fp)
                 except KeyboardInterrupt:
                     print("\n[batch] Ctrl-C — current op recorded, stopping.")
                     rc_final = 130

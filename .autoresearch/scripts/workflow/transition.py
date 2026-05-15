@@ -1,11 +1,11 @@
 """PhaseController — single owner of .ar_state/.phase writes.
 
-Before this module, write_phase was called from 12 sites across
+Before this module, write_phase was called from many sites across
 hook_post_bash, hook_post_edit, pipeline.py, and _baseline_init.
 Each site embedded its own decision logic (read progress, inspect
 files, branch on subagent state, ...). When phase rules drifted in one
-place they didn't drift in the others, which is how
-GENERATE_KERNEL-vs-BASELINE retry behaviour got tangled.
+place they didn't drift in the others, which is how baseline-vs-retry
+behaviour got tangled.
 
 PhaseController takes EVENTS as input (what just happened) and is the
 only thing that decides the target phase + writes it. Callers no longer
@@ -21,7 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from phase_machine import (  # noqa: E402
-    BASELINE, EDIT, FINISH, GENERATE_KERNEL, GENERATE_REF, PLAN,
+    BASELINE, EDIT, FINISH, PLAN,
     compute_next_phase, compute_resume_phase, load_progress, read_phase,
     write_phase,
 )
@@ -36,34 +36,16 @@ class PhaseController:
         phase = compute_resume_phase(self.task_dir)
         return self._write(phase)
 
-    def on_activation_no_ref(self) -> str:
-        return self._write(GENERATE_REF)
-
-    def on_activation_invalid_ref(self) -> str:
-        return self._write(GENERATE_REF)
-
-    def on_activation_no_kernel(self) -> str:
-        return self._write(GENERATE_KERNEL)
-
-    def on_activation_invalid_kernel(self) -> str:
-        return self._write(GENERATE_KERNEL)
-
     def on_activation_ready(self) -> str:
         return self._write(BASELINE)
 
-    # ---- Seed (post-Edit on reference.py / kernel.py) -------------------
-    def on_seed_validated(self, next_phase: str) -> str:
-        # next_phase chosen by caller (BASELINE after kernel seed,
-        # GENERATE_KERNEL after ref seed if kernel still placeholder, ...).
-        # Rule's encoded outside for now because the seed-validation flow in
-        # hook_post_edit has its own sequencing; folding it here would
-        # require moving the file-presence inspection too.
-        return self._write(next_phase)
-
     # ---- Baseline -------------------------------------------------------
     def on_baseline_settled(self) -> str:
-        """Dispatch on baseline_outcome. Legacy progress (no outcome) maps
-        via the old (seed_metric, baseline_correctness) rule."""
+        """Always advance to PLAN after baseline. Seed PASS and seed FAIL
+        both go to PLAN; framework_error leaves phase untouched (eval
+        produced no per-shape data, retry needed).
+        Legacy progress (no outcome) maps via the old
+        (seed_metric, baseline_correctness) rule."""
         progress = load_progress(self.task_dir)
         if progress is None:
             return read_phase(self.task_dir)
@@ -72,11 +54,9 @@ class PhaseController:
                      and progress.seed_metric is not None)
             else "kernel_verify_fail"
         )
-        if outcome == "ok":
-            return self._write(PLAN)
         if outcome == "framework_error":
             return read_phase(self.task_dir)
-        return self._write(GENERATE_KERNEL)
+        return self._write(PLAN)
 
     def on_baseline_init_success(self) -> str:
         return self._write(PLAN)

@@ -14,7 +14,7 @@ import sys
 from typing import Optional
 
 from .state_store import (
-    INIT, GENERATE_REF, GENERATE_KERNEL, BASELINE, PLAN, EDIT,
+    INIT, BASELINE, PLAN, EDIT,
     DIAGNOSE, REPLAN, FINISH,
     PLAN_ITEMS_FILE, DIAGNOSE_ATTEMPTS_CAP,
     diagnose_artifact_path, diagnose_marker,
@@ -281,10 +281,8 @@ def _multi_shape_plan_note(progress: Optional[dict],
 
 def _last_failure_metrics(task_dir: str) -> Optional[dict]:
     """Return the metrics dict of the most recent FAIL/SEED record in
-    history.jsonl whose `correctness` is False. Used by GENERATE_KERNEL
-    retry guidance (the seed kernel's BASELINE just failed correctness;
-    the round-0 SEED record carries the per-shape detail). Returns None
-    when no failed record exists or history is missing.
+    history.jsonl whose `correctness` is False. Returns None when no
+    failed record exists or history is missing.
     """
     hpath = history_path(task_dir)
     if not os.path.exists(hpath):
@@ -313,8 +311,8 @@ def _last_failure_metrics(task_dir: str) -> Optional[dict]:
 def _failed_shapes_block(metrics: Optional[dict],
                          progress: Optional[dict],
                          *, max_listed: int = 5) -> str:
-    """Render the per-shape failure detail used in DIAGNOSE / GENERATE_KERNEL
-    retry. Pulls from the metrics block of a single FAIL history record
+    """Render the per-shape failure detail used in DIAGNOSE / PLAN guidance.
+    Pulls from the metrics block of a single FAIL history record
     (eval_client populates these from the verify subprocess's verify_json):
       - correctness_failed_cases: list of failing case indices
       - correctness_total_cases:  total case count at FAIL time
@@ -402,97 +400,6 @@ def get_guidance(task_dir: str) -> str:
     if phase == INIT:
         return f"[AR Phase: INIT] Run: export AR_TASK_DIR=\"{task_dir}\""
 
-    if phase == GENERATE_REF:
-        description = config.description if config else "(no description)"
-        return (f"[AR Phase: GENERATE_REF] Write reference.py for: {description}\n"
-                f"Write to: {task_dir}/reference.py\n"
-                f"Must contain: class Model(nn.Module) with forward(), "
-                f"get_init_inputs(), and one of get_inputs() (single-shape) "
-                f"or get_input_groups() (multi-shape, returns List[List]).\n"
-                f"This is the BASELINE implementation — no optimization, just correct.")
-
-    if phase == GENERATE_KERNEL:
-        # Retry detection: progress.json only exists once _baseline_init.py
-        # has run, and hook_post_bash only demotes back to GENERATE_KERNEL
-        # when seed_metric is None (compile/profile failed) or
-        # baseline_correctness is False (numerical mismatch). On the first
-        # entry progress is None, so this is a clean signal.
-        is_retry = bool(progress) and (
-            progress.get("seed_metric") is None
-            or progress.get("baseline_correctness") is False
-        )
-        if is_retry:
-            retry_reason = (
-                "seed kernel produced no timing (compile/profile failed)"
-                if progress.get("seed_metric") is None
-                else "seed kernel ran but failed correctness vs reference"
-            )
-            header = f"[AR Phase: GENERATE_KERNEL — retry, prior seed failed: {retry_reason}]"
-            verb = "Generate a corrected"
-        else:
-            header = "[AR Phase: GENERATE_KERNEL]"
-            verb = "Generate an initial"
-
-        description = config.description if config else "(no description)"
-        target_file = editable[0] if editable else "kernel.py"
-        editable_line = (
-            f"Editable files: {', '.join(editable)}\n" if editable else ""
-        )
-        constraints_part = ""
-        if config and getattr(config, "constraints", None):
-            # constraints is {metric: (op_str, threshold)} — render compactly
-            constraint_strs = [
-                f"{m}{op}{thr}" for m, (op, thr) in config.constraints.items()
-            ]
-            constraints_part = f" | constraints: {', '.join(constraint_strs)}"
-
-        retry_block = ""
-        if is_retry:
-            retry_block = (
-                "\nThis is a retry. baseline.py just printed structured failure "
-                "signals above (UB overflow / aivec trap / OOM / correctness "
-                f"mismatch / ...). Read that output, then read the current "
-                f"{task_dir}/{target_file} to see what failed. Use the skills "
-                "Glob above to find a SKILL.md whose description matches the "
-                "failure kind before rewriting. Do NOT rewrite from scratch "
-                "unless the failure is structural — incremental fixes converge "
-                "faster.\n"
-            )
-
-        # Failed-shape detail: only on retry, only when BASELINE failed
-        # because some shapes mismatched (not when seed_metric is None,
-        # i.e. compile/profile failed — that has no per-shape signal).
-        # Read the round-0 SEED record from history; eval_client surfaces
-        # correctness_failed_cases etc. into its metrics dict.
-        failed_shapes_section = ""
-        if is_retry and progress.get("baseline_correctness") is False:
-            fail_metrics = _last_failure_metrics(task_dir)
-            block = _failed_shapes_block(fail_metrics, progress)
-            if block:
-                failed_shapes_section = (
-                    f"\n\nThe BASELINE correctness failure had per-shape "
-                    f"detail (from the round-0 SEED record):\n{block}\n"
-                    f"Fix the kernel for those shape(s) specifically; "
-                    f"common pitfalls: block size hardcoded for a different "
-                    f"shape, dtype dispatch missing, broadcast assumed but "
-                    f"not present.\n"
-                )
-
-        return (
-            f"{header} {verb} kernel from reference.\n"
-            f"Task: {description}\n"
-            f"DSL: {dsl} | primary metric: {primary_metric}{constraints_part}\n"
-            f"{editable_line}"
-            f"\n"
-            f"Read {task_dir}/reference.py, then write to {task_dir}/{target_file}.\n"
-            f"Must contain: class ModelNew (can inherit from Model)."
-            f"{_skills_hint(dsl)}\n"
-            f"{retry_block}"
-            f"{failed_shapes_section}"
-            f"\n"
-            f"Start simple — the autoresearch loop will iterate from here."
-        )
-
     if phase == BASELINE:
         return (f"[AR Phase: BASELINE] Run: "
                 f"python .autoresearch/scripts/engine/baseline.py \"{task_dir}\"{worker_flag}")
@@ -512,8 +419,43 @@ def get_guidance(task_dir: str) -> str:
         plan_note = _multi_shape_plan_note(progress, task_dir=task_dir)
         plan_note_section = f"\n\n{plan_note}" if plan_note else ""
 
+        # Seed-failure recovery: when the seed kernel failed BASELINE
+        # (no timing, or wrong output), the first PLAN must focus on
+        # fixing/rewriting the seed kernel — surface the per-shape
+        # failure detail and steer the agent toward that goal.
+        seed_failed_section = ""
+        target_file = editable[0] if editable else "kernel.py"
+        if progress and (progress.get("seed_metric") is None
+                         or progress.get("baseline_correctness") is False):
+            seed_reason = (
+                "seed kernel produced no timing (compile/profile failed)"
+                if progress.get("seed_metric") is None
+                else "seed kernel ran but failed correctness vs reference"
+            )
+            failed_shapes_block = ""
+            if progress.get("baseline_correctness") is False:
+                fail_metrics = _last_failure_metrics(task_dir)
+                block = _failed_shapes_block(fail_metrics, progress)
+                if block:
+                    failed_shapes_block = (
+                        f"\nThe BASELINE correctness failure had per-shape "
+                        f"detail (round-0 SEED record):\n{block}\n"
+                    )
+            seed_failed_section = (
+                f"\n\nSEED FAILED: {seed_reason}.\n"
+                f"Plan items must focus on FIXING / REWRITING "
+                f"{target_file} so the next round passes baseline.\n"
+                f"Read {task_dir}/{target_file} to see what failed; "
+                f"baseline.py printed structured failure signals "
+                f"(UB overflow / aivec trap / OOM / correctness mismatch) "
+                f"above — use those as primary evidence. Each plan item "
+                f"is a structural change attempt; incremental fixes "
+                f"converge faster than rewrites from scratch."
+                f"{failed_shapes_block}"
+            )
+
         return (f"[AR Phase: PLAN] "
-                f"Read task.yaml, editable files ({editable}), and reference.py.{_skills_hint(dsl)}{metric_hint}{plan_note_section}\n"
+                f"Read task.yaml, editable files ({editable}), and reference.py.{_skills_hint(dsl)}{metric_hint}{plan_note_section}{seed_failed_section}\n"
                 f"\n"
                 f"{_create_plan_instruction(task_dir)}"
                 f"\n"

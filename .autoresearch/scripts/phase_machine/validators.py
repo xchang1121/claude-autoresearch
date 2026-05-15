@@ -2,12 +2,10 @@
 
 Validators (each: "is this artifact OK enough to advance the phase?"):
 
-  - is_placeholder_file: does kernel.py / reference.py still contain the
-    scaffold-time placeholder text? (placeholder constants live here too.)
   - validate_reference: AST symbols + CPU import-and-run check on
     reference.py.
-  - validate_kernel: placeholder fast-path + CodeChecker pipeline (syntax,
-    py_compile, imports, stray Chinese, DSL, autotune restore_value).
+  - validate_kernel: CodeChecker pipeline (syntax, py_compile, imports,
+    stray Chinese, DSL, autotune restore_value).
   - validate_plan: structural check on plan.md (≥3 items, rationale length,
     exactly one ACTIVE).
   - validate_diagnose: marker + sections on diagnose_v<N>.md.
@@ -31,59 +29,6 @@ from .state_store import (
     diagnose_artifact_path, diagnose_marker,
     load_progress, DIAGNOSE_ATTEMPTS_CAP,
 )
-
-
-# ---------------------------------------------------------------------------
-# Placeholder detection
-# ---------------------------------------------------------------------------
-
-# Scaffold writes this when --kernel is omitted, so the placeholder is
-# distinguishable from a real seed kernel. The matching predicate
-# (`is_placeholder_file()` below) keeps the rule in lockstep.
-KERNEL_PLACEHOLDER = (
-    "# TODO: GENERATE_KERNEL phase will fill this in.\n"
-    "# Read reference.py and write an initial seed kernel.\n"
-    "# Must define class ModelNew (may inherit from Model).\n"
-)
-
-# In --desc mode, scaffold writes reference.py as a parametric stub:
-#   "# TODO: Claude Code will generate reference from description:\n# <desc>\n"
-# We can't exact-match it (the description is per-task), so the predicate
-# uses this prefix instead.
-REFERENCE_PLACEHOLDER_PREFIX = (
-    "# TODO: Claude Code will generate reference from description:"
-)
-
-
-def is_placeholder_file(path: str) -> bool:
-    """True iff `path` is missing OR matches one of the scaffold placeholders.
-
-    Single source of truth used by hook_post_edit, hook_post_bash._fresh_start,
-    and validate_kernel. Update this rule and the placeholder templates
-    (`KERNEL_PLACEHOLDER`, `REFERENCE_PLACEHOLDER_PREFIX`) together.
-
-    Earlier versions used a "contains 'TODO' AND length < 200" heuristic,
-    which false-positived a legitimate short seed kernel that happened to
-    carry a TODO comment (e.g. `# TODO: tune block size later`) and trapped
-    GENERATE_KERNEL forever. We now match against the canonical templates:
-      - kernel.py: byte-for-byte match against KERNEL_PLACEHOLDER (fixed text)
-      - reference.py: prefix match against REFERENCE_PLACEHOLDER_PREFIX
-        (parametric — description text is appended per task)
-    Anything Claude has actually written deviates and is no longer a stub.
-    """
-    if not os.path.exists(path):
-        return True
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except OSError:
-        return True
-    stripped = content.strip()
-    if stripped == KERNEL_PLACEHOLDER.strip():
-        return True
-    if stripped.startswith(REFERENCE_PLACEHOLDER_PREFIX):
-        return True
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -209,10 +154,9 @@ def validate_reference(task_dir: str) -> tuple:
 def validate_kernel(task_dir: str) -> tuple:
     """Static check on every editable file (typically kernel.py).
 
-    Rejects the TODO placeholder up front, then delegates to
-    quick_check.check_editable_files (the public lib API — same call the
-    quick_check CLI makes). The CodeChecker pipeline runs syntax →
-    compile → imports → stray-text → DSL → autotune.
+    Delegates to quick_check.check_editable_files (the public lib API —
+    same call the quick_check CLI makes). The CodeChecker pipeline runs
+    syntax → compile → imports → stray-text → DSL → autotune.
 
     Never raises. Returns (True, "") on success, (False, reason) otherwise.
     """
@@ -230,17 +174,10 @@ def validate_kernel(task_dir: str) -> tuple:
     if config is None:
         return False, "task.yaml not found or invalid"
 
-    # Placeholder fast-path: if any editable file is still the scaffold TODO,
-    # the kernel hasn't been generated yet. Subprocess CodeChecker would
-    # technically pass on a comment-only file, but the intent is to hold the
-    # phase at GENERATE_KERNEL until real code lands.
     for fname in config.editable_files:
         fpath = os.path.join(task_dir, fname)
         if not os.path.exists(fpath):
             return False, f"editable file missing: {fname}"
-        if is_placeholder_file(fpath):
-            return False, (f"{fname} is still the scaffold TODO placeholder — "
-                           f"write the seed kernel (must define class ModelNew)")
 
     try:
         from engine.quick_check import check_editable_files

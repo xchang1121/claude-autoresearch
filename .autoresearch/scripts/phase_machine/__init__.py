@@ -14,7 +14,7 @@ that still import it from phase_machine.
 from .models import Progress
 from .state_store import (
     # Phase constants
-    INIT, GENERATE_REF, GENERATE_KERNEL, BASELINE, PLAN, EDIT,
+    INIT, BASELINE, PLAN, EDIT,
     DIAGNOSE, REPLAN, FINISH, ALL_PHASES,
     # File constants
     PHASE_FILE, PROGRESS_FILE, HISTORY_FILE, PLAN_FILE, PLAN_ITEMS_FILE,
@@ -34,8 +34,6 @@ from .state_store import (
     parse_last_json_line,
 )
 from .validators import (
-    KERNEL_PLACEHOLDER, REFERENCE_PLACEHOLDER_PREFIX,
-    is_placeholder_file,
     validate_reference, validate_kernel, validate_plan, validate_diagnose,
     DiagnoseState, diagnose_state,
     DIAGNOSE_NEED_DIAGNOSIS, DIAGNOSE_READY, DIAGNOSE_MANUAL_FALLBACK,

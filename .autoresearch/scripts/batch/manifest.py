@@ -21,7 +21,7 @@ from typing import Any
 
 PROGRESS_FILENAME = "batch_progress.json"
 LOG_FILENAME = "batch.log"
-VALID_MODES = ("ref-kernel", "ref")
+VALID_MODES = ("ref-kernel",)
 VALID_STATUSES = ("pending", "running", "done", "error", "skip")
 
 
@@ -73,8 +73,8 @@ def resolve_cases(batch_dir: Path, manifest: dict, mode: str) -> list[dict]:
     """Apply the <op_name>_{ref,kernel}.py naming convention and return resolved
     case dicts. Pre-flight check that every referenced file exists.
 
-    Returns a list of dicts with keys: op_name, ref (abs path), kernel (abs path
-    or None).
+    Returns a list of dicts with keys: op_name, ref (abs path), kernel
+    (abs path).
     """
     if mode not in VALID_MODES:
         raise ManifestError(f"mode must be one of {VALID_MODES}, got {mode!r}")
@@ -90,14 +90,12 @@ def resolve_cases(batch_dir: Path, manifest: dict, mode: str) -> list[dict]:
     if not ref_dir.is_dir():
         raise ManifestError(f"ref_dir not found: {ref_dir}")
 
-    kernel_dir = None
-    if mode == "ref-kernel":
-        kernel_dir_raw = manifest.get("kernel_dir")
-        if not kernel_dir_raw:
-            raise ManifestError("kernel_dir required when mode=ref-kernel")
-        kernel_dir = (batch_dir / kernel_dir_raw).resolve()
-        if not kernel_dir.is_dir():
-            raise ManifestError(f"kernel_dir not found: {kernel_dir}")
+    kernel_dir_raw = manifest.get("kernel_dir")
+    if not kernel_dir_raw:
+        raise ManifestError("kernel_dir is required")
+    kernel_dir = (batch_dir / kernel_dir_raw).resolve()
+    if not kernel_dir.is_dir():
+        raise ManifestError(f"kernel_dir not found: {kernel_dir}")
 
     cases: list[dict] = []
     seen: set[str] = set()
@@ -117,18 +115,16 @@ def resolve_cases(batch_dir: Path, manifest: dict, mode: str) -> list[dict]:
         if not ref_path.is_file():
             raise ManifestError(f"{ref_path.relative_to(batch_dir)} not found")
 
-        kernel_path: Path | None = None
-        if kernel_dir is not None:
-            kernel_path = kernel_dir / f"{op_name}_kernel.py"
-            if not kernel_path.is_file():
-                raise ManifestError(
-                    f"{kernel_path.relative_to(batch_dir)} not found"
-                )
+        kernel_path = kernel_dir / f"{op_name}_kernel.py"
+        if not kernel_path.is_file():
+            raise ManifestError(
+                f"{kernel_path.relative_to(batch_dir)} not found"
+            )
 
         cases.append({
             "op_name": op_name,
             "ref": str(ref_path),
-            "kernel": str(kernel_path) if kernel_path else None,
+            "kernel": str(kernel_path),
         })
 
     return cases

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from .state_store import (
-    INIT, GENERATE_REF, GENERATE_KERNEL, BASELINE, PLAN, EDIT,
+    INIT, BASELINE, PLAN, EDIT,
     DIAGNOSE, REPLAN, FINISH,
     PLAN_FILE, PLAN_ITEMS_FILE,
     load_progress, plan_path,
@@ -362,15 +362,13 @@ _SUBPROCESS_ONLY_AR_SCRIPTS = {
 # EDIT-recovery (create_plan.py while .pending_settle.json exists) is
 # layered on top by hook_guard_bash; this table reflects the normal path.
 _AR_ALLOWED_BY_PHASE = {
-    INIT:            frozenset(),
-    GENERATE_REF:    frozenset(),
-    GENERATE_KERNEL: frozenset(),
-    BASELINE:        frozenset({"baseline.py"}),
-    DIAGNOSE:        frozenset({"create_plan.py"}),
-    PLAN:            frozenset({"create_plan.py"}),
-    REPLAN:          frozenset({"create_plan.py"}),
-    EDIT:            frozenset({"pipeline.py"}),
-    FINISH:          frozenset(),
+    INIT:     frozenset(),
+    BASELINE: frozenset({"baseline.py"}),
+    DIAGNOSE: frozenset({"create_plan.py"}),
+    PLAN:     frozenset({"create_plan.py"}),
+    REPLAN:   frozenset({"create_plan.py"}),
+    EDIT:     frozenset({"pipeline.py"}),
+    FINISH:   frozenset(),
 }
 
 # Per-phase: do we accept OTHER (ad-hoc shell, anything not classified
@@ -378,25 +376,21 @@ _AR_ALLOWED_BY_PHASE = {
 # accept. AR-mention-but-not-canonical is rejected in EVERY phase
 # (handled in check_bash, not via this table).
 _OTHER_ALLOWED_BY_PHASE = {
-    INIT:            False,
-    GENERATE_REF:    False,
-    GENERATE_KERNEL: False,
-    BASELINE:        False,
-    DIAGNOSE:        False,
-    PLAN:            True,
-    REPLAN:          True,
-    EDIT:            True,
-    FINISH:          True,
+    INIT:     False,
+    BASELINE: False,
+    DIAGNOSE: False,
+    PLAN:     True,
+    REPLAN:   True,
+    EDIT:     True,
+    FINISH:   True,
 }
 
 # Edit/Write rules: which file classes may be written per phase.
-#   "ref"      — reference.py
 #   "editable" — anything in task.yaml:editable_files
 # plan.md is never in any set — it's machine-generated.
+# reference.py is fixed at scaffold time and not editable thereafter.
 _EDIT_RULES = {
-    GENERATE_REF:    {"ref"},
-    GENERATE_KERNEL: {"editable"},
-    EDIT:            {"editable"},
+    EDIT: {"editable"},
 }
 
 
@@ -542,8 +536,6 @@ def check_edit(phase: str, rel_path: str, editable_files,
         )
 
     allowed_classes = _EDIT_RULES.get(phase, set())
-    if "ref" in allowed_classes and rel_path == "reference.py":
-        return True, ""
     if "editable" in allowed_classes and rel_path in set(editable_files or ()):
         return True, ""
 
@@ -588,16 +580,12 @@ def compute_resume_phase(task_dir: str) -> str:
     if eval_rounds >= max_rounds:
         return FINISH
 
-    # Baseline didn't settle cleanly → demote to GENERATE_KERNEL so Edit on
-    # kernel.py is permitted again (BASELINE phase blocks editable_files
-    # writes). Mirrors hook_post_bash's live-session demotion: both
-    # seed_metric=None (no timing) and baseline_correctness=False (wrong
-    # output) count as failure. A seed that profiled but didn't verify is
-    # still a broken seed — letting resume enter PLAN would build a plan
-    # against a reference that the kernel doesn't actually match.
+    # Baseline didn't settle cleanly: route to PLAN. seed_metric=None
+    # (no timing) and baseline_correctness=False (wrong output) both
+    # mean the seed needs rewriting; that happens as plan items.
     if (progress.get("seed_metric") is None
             or progress.get("baseline_correctness") is False):
-        return GENERATE_KERNEL
+        return PLAN
 
     if not os.path.exists(plan_path(task_dir)) or status == "no_plan":
         return PLAN

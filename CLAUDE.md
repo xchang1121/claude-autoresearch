@@ -7,9 +7,10 @@ external deps beyond Python + PyYAML.
 ## Quick Start
 
 ```bash
-# Drop sources into workspace/<op_name>_ref.py (and optional _kernel.py),
+# Drop sources into workspace/<op_name>_ref.py and workspace/<op_name>_kernel.py,
 # then start a task. --dsl required; pick --devices N XOR --worker-url.
-/autoresearch --ref workspace/<op_name>_ref.py --op-name <op_name> --dsl triton_cuda --devices 0
+/autoresearch --ref workspace/<op_name>_ref.py --kernel workspace/<op_name>_kernel.py \
+              --op-name <op_name> --dsl triton_cuda --devices 0
 
 # Resume later
 /autoresearch --resume

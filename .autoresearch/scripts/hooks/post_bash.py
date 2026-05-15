@@ -5,11 +5,11 @@ PostToolUse hook for Bash — phase auto-advancement after user-issued commands.
 The only commands that advance phase from this hook are those Claude runs
 directly via the Bash tool:
   - `export AR_TASK_DIR=...`  → activate task, compute starting phase
-                                (fresh task: validate ref/kernel and pin the
-                                appropriate GENERATE_* / BASELINE phase)
-  - `baseline.py`             → PLAN on success;
-                                GENERATE_KERNEL on seed-metric failure
-                                (so kernel.py becomes editable again)
+                                (fresh task always lands at BASELINE; both
+                                reference.py and kernel.py are guaranteed
+                                present because /autoresearch requires both)
+  - `baseline.py`             → PLAN on success or on seed failure;
+                                framework_error leaves phase untouched
   - `pipeline.py`             → whatever phase pipeline.py itself wrote
   - `create_plan.py`          → EDIT on plan validation pass
                                 (called from PLAN / DIAGNOSE / REPLAN)
@@ -29,11 +29,10 @@ from phase_machine import (
     read_phase, get_guidance,
     get_task_dir, set_task_dir, get_active_item, touch_heartbeat,
     load_progress, update_progress,
-    validate_reference, validate_kernel, is_placeholder_file,
     parse_invoked_ar_script,
     progress_path, history_path, plan_path, edit_marker_path, state_path,
     PHASE_FILE,
-    BASELINE, PLAN, EDIT, DIAGNOSE, REPLAN, GENERATE_REF, GENERATE_KERNEL,
+    BASELINE, PLAN, EDIT, DIAGNOSE, REPLAN,
 )
 from workflow import PhaseController
 
@@ -109,44 +108,12 @@ def _handle_activation(new_task_dir: str):
 
 
 def _fresh_start(task_dir: str):
-    """Pick initial phase for a fresh task based on which files are present
-    AND validate them. `is_placeholder_file` (canonical) lets us short-
-    circuit the subprocess-import step on a known stub; otherwise the same
-    validate_reference / validate_kernel that gates phase advances also
-    pins the right phase from the moment of activation."""
-    ref_path = os.path.join(task_dir, "reference.py")
-    kernel_path = os.path.join(task_dir, "kernel.py")
-
-    pc = PhaseController(task_dir)
-    if is_placeholder_file(ref_path):
-        pc.on_activation_no_ref()
-        emit_status(f"[AR] Fresh start (no reference). Phase -> GENERATE_REF. {get_guidance(task_dir)}")
-        return
-
-    ok, err = validate_reference(task_dir)
-    if not ok:
-        pc.on_activation_invalid_ref()
-        emit_status(
-            f"[AR] reference.py present but invalid — Phase -> GENERATE_REF.\n"
-            f"     {err}"
-        )
-        return
-
-    if is_placeholder_file(kernel_path):
-        pc.on_activation_no_kernel()
-        emit_status(f"[AR] Fresh start (no kernel). Phase -> GENERATE_KERNEL. {get_guidance(task_dir)}")
-        return
-
-    ok, err = validate_kernel(task_dir)
-    if not ok:
-        pc.on_activation_invalid_kernel()
-        emit_status(
-            f"[AR] kernel.py present but invalid — Phase -> GENERATE_KERNEL.\n"
-            f"     {err}"
-        )
-        return
-
-    pc.on_activation_ready()
+    """Pick initial phase for a fresh task. With /autoresearch requiring
+    both --ref and --kernel, scaffold has already gated on reference
+    runnability and written the user's seed kernel; the next legal step
+    is always BASELINE. baseline.py exercises the kernel; on failure the
+    hook routes to PLAN so the agent rewrites via plan->edit."""
+    PhaseController(task_dir).on_activation_ready()
     emit_status(f"[AR] Fresh start. Phase -> BASELINE. {get_guidance(task_dir)}")
 
 
@@ -162,12 +129,13 @@ def _baseline_message(outcome, new_phase, progress, guidance):
                 "data. Seed kernel NOT evaluated — do NOT edit kernel.py. "
                 "Re-run baseline.py after fixing framework (eval.timeout, "
                 "device/worker availability, eval stderr).")
-    if new_phase == GENERATE_KERNEL:
+    if outcome != "ok":
         reason = _BASELINE_DEMOTE_REASON.get(outcome) or (
             "seed kernel produced no timing" if progress.seed_metric is None
             else "seed kernel failed correctness check")
-        return (f"[AR] Baseline failed: {reason}. Phase -> GENERATE_KERNEL. "
-                f"Fix the kernel, then re-run baseline.py.")
+        return (f"[AR] Baseline failed: {reason}. Phase -> PLAN. Plan a "
+                f"kernel fix/rewrite via the standard plan->edit loop. "
+                f"{guidance}")
     return f"[AR] Baseline complete. Phase -> PLAN. {guidance}"
 
 

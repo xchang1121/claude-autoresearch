@@ -35,8 +35,6 @@ from .models import Progress
 # ---------------------------------------------------------------------------
 
 INIT = "INIT"
-GENERATE_REF = "GENERATE_REF"
-GENERATE_KERNEL = "GENERATE_KERNEL"
 BASELINE = "BASELINE"
 PLAN = "PLAN"
 EDIT = "EDIT"
@@ -44,8 +42,7 @@ DIAGNOSE = "DIAGNOSE"
 REPLAN = "REPLAN"
 FINISH = "FINISH"
 
-ALL_PHASES = {INIT, GENERATE_REF, GENERATE_KERNEL, BASELINE, PLAN, EDIT,
-              DIAGNOSE, REPLAN, FINISH}
+ALL_PHASES = {INIT, BASELINE, PLAN, EDIT, DIAGNOSE, REPLAN, FINISH}
 
 
 # ---------------------------------------------------------------------------
