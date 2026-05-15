@@ -5,7 +5,11 @@ PreToolUse hook for Edit/Write — thin dispatcher.
 Per-phase allow/block for file targets lives in phase_machine.check_edit.
 This hook handles two concerns check_edit can't express as a pure function:
 
-  1. Files outside the task dir are always allowed (out of scope).
+  1. Files outside the active task dir are rejected. The agent's job is to
+     optimise the kernel inside <task_dir>; touching the source workspace/
+     files, repo configs, or any other path outside the task is out of
+     scope and was previously a silent footgun (e.g., the agent "fixing"
+     a workspace/<op>_ref.py the user shared with git / CI).
   2. EDIT-phase dirty-tree gate — needs live git state, not just phase.
 """
 import os
@@ -120,7 +124,21 @@ def main():
 
     rel = _rel_to_task(file_path, task_dir)
     if rel is None:
-        sys.exit(0)  # file outside task_dir — not our concern
+        # Out-of-scope edit. Block instead of allowing — agent should only
+        # touch files inside the active task_dir. Most common offender:
+        # editing the source workspace/<op>_ref.py the user passed via
+        # --ref. scaffold has already copied it into task_dir, so any
+        # legitimate "fix the ref" decision belongs to a fresh /autoresearch
+        # invocation by the user, not a side-effect of the current task.
+        block_with_guidance(
+            task_dir,
+            f"Edit target {file_path!r} is outside the active task "
+            f"directory ({task_dir}). The agent's scope is the task_dir "
+            f"only — source files in workspace/, repo configs, hooks, "
+            f"and anything else outside are off-limits. If you need to "
+            f"change a source --ref or --kernel file, exit the task and "
+            f"re-run /autoresearch with the corrected source."
+        )
 
     from task_config import load_task_config
     config = load_task_config(task_dir)
