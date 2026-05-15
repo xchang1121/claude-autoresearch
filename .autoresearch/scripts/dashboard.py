@@ -254,47 +254,70 @@ def render(task_dir, history_offset=0, history_window=None):
     lines.append(f"  {BOLD}Task:{RESET}     {task}")
     lines.append(f"  {BOLD}Status:{RESET}   {status_color}{status}{RESET}  (plan v{plan_ver})")
     lines.append(f"  {BOLD}Updated:{RESET}  {DIM}{updated}{RESET}")
+
+    # Task-level abort banner. Fires only for outcomes the agent cannot
+    # fix from inside the optimisation loop — REF_FAIL (broken source
+    # file) and FRAMEWORK_ERROR (eval pipeline crashed). Distinct from
+    # the per-component Seed / Baseline lines below: those describe
+    # whether each artefact was measurable; the banner says the WHOLE
+    # task is stuck and points at the recovery action.
+    outcome = progress.get("baseline_outcome")
+    err_src = progress.get("baseline_error_source") or ""
+    if outcome == "ref_fail":
+        lines.append("")
+        suffix = f" (error_source={err_src})" if err_src else ""
+        lines.append(f"  {BOLD}{RED}ABORTED:{RESET}  {RED}REF BROKEN{RESET}  "
+                     f"reference.py is invalid{suffix}.")
+        lines.append(f"           {DIM}Fix the source --ref file and re-run "
+                     f"/autoresearch from scratch.{RESET}")
+    elif outcome == "framework_error":
+        lines.append("")
+        lines.append(f"  {BOLD}{YELLOW}ABORTED:{RESET}  "
+                     f"{YELLOW}EVAL FRAMEWORK CRASHED{RESET}  "
+                     f"no per-shape data produced.")
+        lines.append(f"           {DIM}Check worker / OOM / eval.timeout, then "
+                     f"retry baseline.py.{RESET}")
+
     lines.append("")
     lines.append(f"  {BOLD}Budget:{RESET}   {budget_color}{budget_bar} {rounds}/{max_rounds}{RESET}")
-    seed = progress.get("seed_metric")
+
+    # Baseline (PyTorch reference timing). Can be missing when the eval
+    # framework crashed before ref was measured (framework_error) or
+    # when the reference itself was broken (ref_fail).
     baseline_tags = {
         "ref": f"{DIM}(PyTorch reference){RESET}",
         "seed_fallback": f"{YELLOW}(fallback: seed — ref not measured by worker){RESET}",
     }
-    baseline_tag = baseline_tags.get(progress.get("baseline_source"), f"{DIM}(source unknown){RESET}")
-    lines.append(f"  {BOLD}Baseline:{RESET} {baseline}  {baseline_tag}")
-    # seed_metric is None in four distinct cases — each one needs a
-    # different message because the recovery path differs. The old
-    # "FAILED TO PROFILE (passed verify but no timing)" was hard-coded
-    # for kernel_profile_crash and became misleading the moment the
-    # workflow started nulling seed timings on verify failure too.
-    if seed is None:
-        outcome = progress.get("baseline_outcome")
-        err_src = progress.get("baseline_error_source") or ""
-        if outcome == "kernel_verify_fail":
-            note = "kernel output != reference; timing dropped"
-            label_color = RED
-            label = "FAILED"
-        elif outcome == "kernel_profile_crash":
-            note = "kernel crashed during profile phase"
-            label_color = RED
-            label = "FAILED"
-        elif outcome == "framework_error":
-            note = "eval framework crashed; retry baseline.py"
-            label_color = YELLOW
-            label = "N/A"
-        elif outcome == "ref_fail":
-            note = f"reference broken (error_source={err_src or 'ref'}); fix --ref source"
-            label_color = RED
-            label = "REF BROKEN"
-        else:
-            note = "no timing recorded"
-            label_color = RED
-            label = "N/A"
-        lines.append(f"  {BOLD}Seed:{RESET}     {label_color}{label}{RESET}  "
-                     f"{DIM}({note}){RESET}")
-    elif seed != baseline:
-        lines.append(f"  {BOLD}Seed:{RESET}     {seed}  {DIM}(initial kernel){RESET}")
+    if baseline is None:
+        lines.append(f"  {BOLD}Baseline:{RESET} {DIM}— (not measured){RESET}")
+    else:
+        baseline_tag = baseline_tags.get(progress.get("baseline_source"),
+                                          f"{DIM}(source unknown){RESET}")
+        lines.append(f"  {BOLD}Baseline:{RESET} {baseline}  {baseline_tag}")
+
+    # Seed (initial kernel timing). This line reports on the SEED KERNEL
+    # specifically — was its forward pass measured? — not on task-level
+    # health. Task-level aborts (ref_fail, framework_error) already
+    # surface in the banner above; here they collapse to "not measured".
+    seed = progress.get("seed_metric")
+    if seed is not None:
+        if seed != baseline:
+            lines.append(f"  {BOLD}Seed:{RESET}     {seed}  {DIM}(initial kernel){RESET}")
+        # else: redundant with Baseline line (seed_fallback path), suppress
+    elif outcome == "kernel_verify_fail":
+        lines.append(f"  {BOLD}Seed:{RESET}     {RED}FAILED{RESET}  "
+                     f"{DIM}(kernel output != reference; timing dropped){RESET}")
+    elif outcome == "kernel_profile_crash":
+        lines.append(f"  {BOLD}Seed:{RESET}     {RED}FAILED{RESET}  "
+                     f"{DIM}(kernel crashed during profile phase){RESET}")
+    elif outcome in ("ref_fail", "framework_error"):
+        # Seed never got a chance to be measured cleanly; the banner
+        # above explains why. Don't repeat the cause here.
+        lines.append(f"  {BOLD}Seed:{RESET}     {DIM}— (not measured; see ABORTED above){RESET}")
+    else:
+        # Legacy progress without baseline_outcome, or some other
+        # un-classified state. Keep a neutral fallback.
+        lines.append(f"  {BOLD}Seed:{RESET}     {DIM}— (no timing recorded){RESET}")
     lines.append(f"  {BOLD}Best:{RESET}     {GREEN}{best}{RESET}  ({improv_str})")
     lines.append(f"  {BOLD}Commit:{RESET}   {best_commit}")
     lines.append(f"  {BOLD}Failures:{RESET} {fail_color}{failures}{RESET} consecutive" +
