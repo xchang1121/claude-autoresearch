@@ -568,7 +568,14 @@ def compute_next_phase(task_dir: str) -> str:
 
 
 def compute_resume_phase(task_dir: str) -> str:
-    """Determine phase for resuming after interruption."""
+    """Determine phase for resuming after interruption.
+
+    Mirrors PhaseController.on_baseline_settled for outcomes the live
+    hook never advanced past BASELINE — REF_FAIL / FRAMEWORK_ERROR keep
+    the task pinned at BASELINE so stop_save can let the agent exit
+    with a clear "fix --ref" / "fix worker env" message. Without that
+    parity, resuming a ref_fail task would land in PLAN and the agent
+    would burn max_rounds trying to plan around a broken reference."""
     progress = load_progress(task_dir)
     if not progress:
         return BASELINE
@@ -580,9 +587,16 @@ def compute_resume_phase(task_dir: str) -> str:
     if eval_rounds >= max_rounds:
         return FINISH
 
-    # Baseline didn't settle cleanly: route to PLAN. seed_metric=None
-    # (no timing) and baseline_correctness=False (wrong output) both
-    # mean the seed needs rewriting; that happens as plan items.
+    # Stuck states from a previous baseline: keep at BASELINE so
+    # stop_save._is_stuck fires and the agent can Stop. The carve-out
+    # has to match on_baseline_settled exactly — see workflow/transition.
+    if progress.get("baseline_outcome") in ("ref_fail", "framework_error"):
+        return BASELINE
+
+    # Kernel-side baseline failure: route to PLAN. seed_metric=None (no
+    # timing) and baseline_correctness=False (wrong output) both mean
+    # the seed needs rewriting; PLAN guidance surfaces a SEED FAILED
+    # block pushing the agent to rewrite kernel.py as plan items.
     if (progress.get("seed_metric") is None
             or progress.get("baseline_correctness") is False):
         return PLAN
