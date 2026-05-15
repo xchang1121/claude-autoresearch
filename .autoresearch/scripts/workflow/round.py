@@ -20,7 +20,8 @@ from phase_machine import (  # noqa: E402
     Progress, append_history, auto_rollback, load_progress, save_progress,
 )
 from task_config import (  # noqa: E402
-    EvalResult, check_constraints, is_improvement, load_task_config,
+    EvalOutcome, EvalResult, check_constraints, is_improvement,
+    load_task_config,
 )
 from utils.git_utils import commit_in_task  # noqa: E402
 
@@ -38,10 +39,22 @@ def record_round(task_dir: str, eval_data: dict,
         return {"decision": "ERROR", "error": "task.yaml not found"}
 
     progress = load_progress(task_dir) or Progress()
+    # eval_wrapper emits outcome (authoritative) + correctness (legacy
+    # bool). Map outcome string back to the enum; correctness becomes
+    # a derived property on EvalResult.
+    raw_outcome = eval_data.get("outcome")
+    if raw_outcome is None:
+        raw_outcome = (EvalOutcome.OK.value if eval_data.get("correctness")
+                       else EvalOutcome.KERNEL_VERIFY_FAIL.value)
+    try:
+        result_outcome = EvalOutcome(raw_outcome)
+    except ValueError:
+        result_outcome = EvalOutcome.FRAMEWORK_ERROR
     eval_result = EvalResult(
-        correctness=eval_data.get("correctness", False),
+        outcome=result_outcome,
         metrics=eval_data.get("metrics", {}),
         error=eval_data.get("error"),
+        error_source=eval_data.get("error_source"),
     )
 
     round_num = progress.eval_rounds + 1
@@ -86,7 +99,7 @@ def record_round(task_dir: str, eval_data: dict,
             elif best is None:
                 decision = "KEEP"
             else:
-                best_er = EvalResult(correctness=True,
+                best_er = EvalResult(outcome=EvalOutcome.OK,
                                      metrics={config.primary_metric: best})
                 if is_improvement(
                     eval_result, best_er,

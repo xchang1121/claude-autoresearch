@@ -488,7 +488,7 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
     worker_url = _select_worker(urls)
     if worker_url is None:
         return EvalResult(
-            correctness=False,
+            outcome=EvalOutcome.FRAMEWORK_ERROR,
             error=f"no reachable worker from: {urls}",
         )
 
