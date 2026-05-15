@@ -263,9 +263,36 @@ def render(task_dir, history_offset=0, history_window=None):
     }
     baseline_tag = baseline_tags.get(progress.get("baseline_source"), f"{DIM}(source unknown){RESET}")
     lines.append(f"  {BOLD}Baseline:{RESET} {baseline}  {baseline_tag}")
+    # seed_metric is None in four distinct cases — each one needs a
+    # different message because the recovery path differs. The old
+    # "FAILED TO PROFILE (passed verify but no timing)" was hard-coded
+    # for kernel_profile_crash and became misleading the moment the
+    # workflow started nulling seed timings on verify failure too.
     if seed is None:
-        lines.append(f"  {BOLD}Seed:{RESET}     {RED}FAILED TO PROFILE{RESET}  "
-                     f"{DIM}(seed kernel passed verify but produced no timing){RESET}")
+        outcome = progress.get("baseline_outcome")
+        err_src = progress.get("baseline_error_source") or ""
+        if outcome == "kernel_verify_fail":
+            note = "kernel output != reference; timing dropped"
+            label_color = RED
+            label = "FAILED"
+        elif outcome == "kernel_profile_crash":
+            note = "kernel crashed during profile phase"
+            label_color = RED
+            label = "FAILED"
+        elif outcome == "framework_error":
+            note = "eval framework crashed; retry baseline.py"
+            label_color = YELLOW
+            label = "N/A"
+        elif outcome == "ref_fail":
+            note = f"reference broken (error_source={err_src or 'ref'}); fix --ref source"
+            label_color = RED
+            label = "REF BROKEN"
+        else:
+            note = "no timing recorded"
+            label_color = RED
+            label = "N/A"
+        lines.append(f"  {BOLD}Seed:{RESET}     {label_color}{label}{RESET}  "
+                     f"{DIM}({note}){RESET}")
     elif seed != baseline:
         lines.append(f"  {BOLD}Seed:{RESET}     {seed}  {DIM}(initial kernel){RESET}")
     lines.append(f"  {BOLD}Best:{RESET}     {GREEN}{best}{RESET}  ({improv_str})")
