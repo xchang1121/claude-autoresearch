@@ -83,46 +83,82 @@ def _format_fail_record(rec: dict) -> str:
 
 
 # Shared plan-item scaffolding shown in PLAN / DIAGNOSE / REPLAN guidance.
-# The example is deliberately a short SENTENCE (not a snake_case identifier) —
-# dashboards surface `desc` directly in the history and plan tables, so
-# "Fuse SwiGLU into the matmul epilogue to avoid a second launch" reads far
-# better than "fuse_swiglu_epilogue". create_plan.py enforces the prose form.
 #
-# XML is the required format — tag-delimited text is structurally harder for
-# LLMs to hallucinate than JSON (no stray commas / quote escaping / brace
-# balance to track).
-# Inline XML comments inside the example double as schema reminders. The
-# model is far more likely to obey rules embedded in the structure it's
-# mimicking than rules sitting in a separate paragraph it has to remember
-# to apply. Anti-drift hints are placed where each drift tends to land:
-# attributes on <item>, extra child elements, missing fields.
+# Design notes:
+#
+# 1. THREE concrete items in the example, not one + "repeat" hint. Agents
+#    consistently copy-as-shown — a single-item example produces single-
+#    item submissions that fail the ">=3 items" check immediately.
+#
+# 2. Schema rules live in a plain bullet block ABOVE the example, not as
+#    inline <!-- XML comments -->. Comments inside the structure get
+#    treated as part of the shape and either leak into the agent's output
+#    or train the agent to think the schema is "this with prose".
+#
+# 3. Wrong-vs-right pairs cover the most common drifts (attributes,
+#    snake_case desc, all-parameter-tuning plans). Negative-only rules
+#    underperform — pair each "don't" with a concrete "do" alternative.
+#
+# 4. Example items deliberately avoid every word in create_plan.py's
+#    `_PARAM_WORDS` / `_PARAM_PHRASES` (block, tile, num_warps, etc.) so
+#    the diversity check passes when the agent generalises the shape to
+#    their own task. The three items represent: kernel fusion / memory
+#    layout / data alignment — structural changes, not parameter sweeps.
+#
+# 5. XML stays the required format (tag-delimited beats JSON for LLMs —
+#    no commas to forget, no brace balance).
+_PLAN_XML_RULES = (
+    "Plan item schema (each rule below maps to a create_plan.py check):\n"
+    "  • Root <items> has NO attributes.\n"
+    "  • At least 3 <item> children. NO attributes on <item> (pid is auto-assigned).\n"
+    "  • Each <item> has EXACTLY two children: <desc> and <rationale>.\n"
+    "    NO <id>, <pid>, <keywords>, <priority>, or any other tag.\n"
+    "  • <desc>: short prose sentence, ≥12 chars, MUST contain spaces.\n"
+    "  • <rationale>: 30-400 chars, explains WHY the change should help.\n"
+    "  • At most ONE item may be pure parameter tuning (block size / num_warps /\n"
+    "    num_stages / autotune sweep). The rest must be structural changes:\n"
+    "    algorithmic / fusion / memory layout / data movement.\n"
+    "\n"
+    "Common drifts (these get rejected):\n"
+    "  WRONG: <item id=\"p1\">…</item>          → <item>…</item>     (no attributes)\n"
+    "  WRONG: <desc>fuse_swiglu_epilogue</desc> → <desc>Fuse the SwiGLU epilogue</desc>\n"
+    "         (snake_case label fails the 'must contain spaces' check)\n"
+    "  WRONG: 3 items all named 'tune block size to N' → mix in a fusion or\n"
+    "         layout change (diversity check rejects param-only plans)\n"
+    "  WRONG: <keywords>fuse,matmul</keywords>  → drop it, _check_diversity\n"
+    "         tokenises <desc> directly, no separate keyword tag exists\n"
+    "  Escape special chars in text: '&'→'&amp;', '<'→'&lt;', '>'→'&gt;'\n"
+    "  (or wrap the field body in <![CDATA[...]]>)."
+)
 _PLAN_XML_EXAMPLE = (
-    '<items>'
-    '<!-- Provide >= 3 <item> elements. No attributes or extra tags on <items>. -->'
-    '<item>'
-    '<!-- An <item> has NO attributes and EXACTLY two child elements: '
-    '<desc> and <rationale>. Do NOT add <id>, <pid>, <keywords>, '
-    '<priority>, <reactivate_pid>, or id="..." / pid="..." attributes. '
-    'Pids are auto-assigned by create_plan.py from a monotonic counter; '
-    'the model never supplies them — supplying one is rejected. -->'
-    '<desc>Fuse SwiGLU into the matmul epilogue to avoid a second launch</desc>'
-    '<!-- <desc>: short SENTENCE (>=12 chars, has spaces). Not a '
-    'snake_case label; the dashboard shows desc verbatim. -->'
-    '<rationale>Separate SwiGLU kernel re-reads the matmul output from DRAM; '
-    'fusing it into the epilogue cuts one round-trip and a launch.</rationale>'
-    '<!-- <rationale>: 30-400 chars, explains WHY this should help. -->'
-    '</item>'
-    '<!-- Repeat <item> blocks for >= 3 total items. Same two-child rule '
-    'each time; nothing per-item is optional and nothing extra is allowed. -->'
+    '<items>\n'
+    '  <item>\n'
+    '    <desc>Fuse the activation into the matmul epilogue to avoid a second '
+    'kernel launch</desc>\n'
+    '    <rationale>The separate activation kernel re-reads the matmul output '
+    'from DRAM; folding it into the epilogue removes one round-trip and one '
+    'launch overhead.</rationale>\n'
+    '  </item>\n'
+    '  <item>\n'
+    '    <desc>Transpose the input layout so the reduction axis is contiguous '
+    'in memory</desc>\n'
+    '    <rationale>Current reduction stride is 16380 bytes, which traps the '
+    'vector core because it needs 256-byte-aligned access. Making the reduce '
+    'axis contiguous gives aligned vectorised loads.</rationale>\n'
+    '  </item>\n'
+    '  <item>\n'
+    '    <desc>Pad the inner dimension to a multiple of 64 elements</desc>\n'
+    '    <rationale>The current inner dim is 4095, one short of the 4096 '
+    'alignment the vector unit needs; padding to the next multiple lets the '
+    'main loop drop its tail-handling branch entirely.</rationale>\n'
+    '  </item>\n'
     '</items>'
 )
-_PLAN_FIELD_RULES = (
-    "Schema reminders are embedded as <!-- comments --> inside the XML "
-    "example above; read them — each comment marks the spot where a "
-    "field rule applies. Beyond schema: escape '&', '<', '>' in text as "
-    "'&amp;', '&lt;', '&gt;' (or wrap the offending field in "
-    "<![CDATA[...]]>)."
-)
+# Kept as a named constant because callers (create_plan.py docstring,
+# tests) reference the rules block by attribute. The rules text is the
+# primary content; _PLAN_FIELD_RULES is now an alias to keep the public
+# name stable.
+_PLAN_FIELD_RULES = _PLAN_XML_RULES
 
 
 def _create_plan_instruction(task_dir: str) -> str:
@@ -150,9 +186,11 @@ def _create_plan_instruction(task_dir: str) -> str:
         f"automatically. Adding `@/some/path` reintroduces the drift this "
         f"two-step form exists to prevent.)\n"
         f"\n"
-        f"XML schema (write this exact shape to the file in step 1):\n"
+        f"{_PLAN_XML_RULES}\n"
+        f"\n"
+        f"Canonical example (copy the SHAPE — three items, two children each;\n"
+        f"replace the contents with items that fit YOUR task):\n"
         f"{_PLAN_XML_EXAMPLE}\n"
-        f"{_PLAN_FIELD_RULES}\n"
     )
 
 
