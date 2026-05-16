@@ -18,6 +18,7 @@ sys.path.insert(0, SCRIPTS_ROOT)
 sys.path.insert(0, SCRIPT_DIR)
 from utils.failure_extractor import format_for_stdout
 from utils.json_io import parse_last_json_line
+from workflow import run_baseline_init
 
 
 def main():
@@ -81,11 +82,11 @@ def main():
                   flush=True)
             print(eval_data["raw_output_tail"], flush=True)
 
-    rc = subprocess.run(
-        [sys.executable, os.path.join(SCRIPT_DIR, "_baseline_init.py"),
-         task_dir, json.dumps(eval_data)],
-    ).returncode
-    sys.exit(rc)
+    # In-process call (was a subprocess + JSON-on-argv round-trip via the
+    # now-deleted _baseline_init.py shell wrapper). The workflow.baseline
+    # body owns progress.json / history.jsonl / phase writes; running it
+    # here keeps stdout interleaving sane and removes the extra fork.
+    sys.exit(run_baseline_init(task_dir, json.dumps(eval_data)))
 
 
 if __name__ == "__main__":

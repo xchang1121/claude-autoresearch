@@ -33,7 +33,7 @@ def _validate(task_dir: str) -> tuple[bool, str]:
     if progress is None:
         return False, "Missing or corrupt .ar_state/progress.json — task was never initialized"
 
-    required_fields = {"task", "eval_rounds", "max_rounds", "status"}
+    required_fields = {"task", "eval_rounds", "max_rounds"}
     missing = required_fields - set(progress.keys())
     if missing:
         return False, f"progress.json missing fields: {missing} (incompatible version)"
@@ -108,17 +108,13 @@ def main():
     # Clean stale edit marker (git clean means marker is stale)
     marker = edit_marker_path(task_dir)
     if os.path.exists(marker):
-        import subprocess
-        try:
-            diff = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=task_dir, capture_output=True, text=True, timeout=5,
-            )
-            if not diff.stdout.strip():
+        from utils.git_utils import is_working_tree_clean
+        if is_working_tree_clean(task_dir):
+            try:
                 os.remove(marker)
                 print("[resume] Cleaned stale edit marker.", file=sys.stderr)
-        except Exception:
-            pass
+            except OSError:
+                pass
 
     progress = load_progress(task_dir) or {}
     print(f"[resume] Task: {progress.get('task')}")

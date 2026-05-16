@@ -17,6 +17,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import phase_machine as _pm
+from utils.json_io import load_jsonl as _shared_load_jsonl
+from utils.json_io import _read_whole_file as _shared_read_whole_file
+from task_config.metric_policy import STUCK_BASELINE_OUTCOMES
 
 # ---------------------------------------------------------------------------
 # Non-blocking keyboard input (cross-platform)
@@ -95,23 +98,7 @@ CYAN = "\033[36m"
 RESET = "\033[0m"
 
 
-def _read_raw(path):
-    # Read everything until EOF — single os.read() returns at most one chunk
-    # and short-reads on regular files (multi-shape history.jsonl trivially
-    # passes 256 KB after ~25 rounds with 60 cases, at which point the
-    # dashboard would silently drop the tail and look frozen on the most
-    # recent rounds).
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        chunks = []
-        while True:
-            chunk = os.read(fd, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        return b"".join(chunks).decode("utf-8", errors="replace")
-    finally:
-        os.close(fd)
+_read_raw = _shared_read_whole_file  # canonical loader lives in utils.json_io
 
 
 def load_json(path):
@@ -120,20 +107,7 @@ def load_json(path):
     return json.loads(_read_raw(path))
 
 
-def load_jsonl(path):
-    """Load all entries from a JSONL file; silently drops malformed lines."""
-    if not os.path.exists(path):
-        return []
-    out = []
-    for line in _read_raw(path).split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
-    return out
+load_jsonl = _shared_load_jsonl
 
 
 def load_plan(path):
@@ -210,7 +184,10 @@ def render(task_dir, history_offset=0, history_window=None):
     best_commit = progress.get("best_commit", "?")
     failures = progress.get("consecutive_failures", 0)
     plan_ver = progress.get("plan_version", 0)
-    status = progress.get("status", "?")
+    # Status was a redundant field on Progress that just tracked "has a
+    # plan been validated yet?". Derive it here from plan.md presence so
+    # the dashboard label stays identical for users.
+    status = "active" if os.path.exists(_pm.plan_path(task_dir)) else "no_plan"
     updated_raw = progress.get("last_updated", "?")
     # Convert UTC to local time
     try:
@@ -310,7 +287,7 @@ def render(task_dir, history_offset=0, history_window=None):
     elif outcome == "kernel_profile_crash":
         lines.append(f"  {BOLD}Seed:{RESET}     {RED}FAILED{RESET}  "
                      f"{DIM}(kernel crashed during profile phase){RESET}")
-    elif outcome in ("ref_fail", "framework_error"):
+    elif outcome in STUCK_BASELINE_OUTCOMES:
         # Seed never got a chance to be measured cleanly; the banner
         # above explains why. Don't repeat the cause here.
         lines.append(f"  {BOLD}Seed:{RESET}     {DIM}— (not measured; see ABORTED above){RESET}")

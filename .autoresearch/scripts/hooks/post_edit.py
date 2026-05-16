@@ -4,7 +4,7 @@ PostToolUse hook for Edit/Write — surfaces guidance after EDIT-phase edits.
 
 Edits during EDIT phase are followed by pipeline.py to settle a round.
 
-plan.md is never a legal target for Edit/Write — hook_guard_edit blocks
+plan.md is never a legal target for Edit/Write — hooks/guard_edit blocks
 it at every phase and directs Claude to create_plan.py.
 """
 import os
@@ -13,10 +13,23 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hooks.utils import read_hook_input, emit_status, extract_target_path
 from phase_machine import (
-    read_phase, _load_config_safe,
+    read_phase,
     get_task_dir, touch_heartbeat,
     EDIT,
 )
+
+
+def _safe_load_config(task_dir: str):
+    """Best-effort TaskConfig load. Returns None on any failure — this
+    hook fires on every Edit/Write, including before AR scaffolding has
+    written task.yaml, so we must tolerate the load failing without
+    bubbling an exception out of the hook process.
+    """
+    try:
+        from task_config import load_task_config
+        return load_task_config(task_dir)
+    except Exception:
+        return None
 
 
 _WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -38,7 +51,7 @@ def main():
 
     phase = read_phase(task_dir)
 
-    config = _load_config_safe(task_dir)
+    config = _safe_load_config(task_dir)
     is_editable = False
     if config:
         try:

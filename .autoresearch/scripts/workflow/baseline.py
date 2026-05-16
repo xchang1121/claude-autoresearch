@@ -1,10 +1,10 @@
 """Round-0 (SEED) eval recorder.
 
-Lifted from `_baseline_init.py` so the body is reusable from other
-entry points (notebook re-runs, future scaffold one-shots) without
-re-invoking the CLI shell. The shell `_baseline_init.py` stays as a
-thin wrapper so existing `python _baseline_init.py <td> <eval_json>`
-call sites keep working.
+`run_baseline_init(task_dir, eval_json) -> int` is called in-process by
+engine/baseline.py after eval_wrapper completes, and returns the exit
+code engine/baseline.py propagates to its own caller. The earlier
+`_baseline_init.py` shell wrapper (subprocess + JSON-on-argv) was
+deleted once the in-process call site landed.
 
 Exit codes: see `_EXIT_FOR` below. Phase transition is owned here:
 run_baseline_init calls PhaseController.on_baseline_settled before
@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,6 +25,7 @@ from phase_machine import (  # noqa: E402
     Progress, append_history, load_progress, save_progress,
 )
 from task_config import EvalOutcome, load_task_config  # noqa: E402
+from utils.git_utils import current_head_short  # noqa: E402
 
 from .transition import PhaseController
 
@@ -62,21 +62,11 @@ def _valid(v) -> bool:
     return isinstance(v, (int, float)) and 0 < v < float("inf")
 
 
-def _git_short_head(task_dir: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=task_dir, capture_output=True, text=True,
-        )
-        return result.stdout.strip() if result.returncode == 0 else "unknown"
-    except Exception:
-        return "unknown"
-
-
 def run_baseline_init(task_dir: str, eval_json: str) -> int:
-    """Library entry point. CLI shell `_baseline_init.py` calls this with
-    sys.argv[2]. Returns process exit code. Side effects (progress,
-    history, phase) are durable on disk before this returns."""
+    """Library entry point. engine/baseline.py calls this after
+    eval_wrapper finishes; the return value becomes that script's exit
+    code. Side effects (progress, history, phase) are durable on disk
+    before this returns."""
     config = load_task_config(task_dir)
     if config is None:
         print("[baseline] ERROR: task.yaml not found", file=sys.stderr)
@@ -144,7 +134,7 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
     # against the PyTorch ref instead of seed, producing the "fake 1.00x"
     # baseline bug.
     initial_best = seed_val
-    baseline_commit = _git_short_head(task_dir)
+    baseline_commit = current_head_short(task_dir) or "unknown"
     baseline_commit_recorded = existing_baseline_commit or baseline_commit
 
     # Multi-shape: eval_client populates `num_cases` + `per_shape_descs` from
@@ -164,12 +154,10 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         baseline_metric=baseline_val,
         baseline_source=baseline_source,
         baseline_outcome=outcome.value,
-        baseline_correctness=correctness,
         baseline_error_source=error_source,
         seed_metric=seed_val,
         consecutive_failures=0,
         plan_version=0,
-        status="no_plan",
         num_cases=(int(n_cases) if isinstance(n_cases, int)
                    and n_cases >= 1 else None),
         per_shape_descs=(

@@ -45,7 +45,7 @@ from .validators import get_active_item, has_pending_items
 # `-m` (runs module instead). Earlier rounds had a generic `--[\w-]+`
 # fallback; the result was that `python --version
 # .autoresearch/scripts/X.py` falsely classified as AR(X.py), and
-# hook_post_bash thought X.py had run.
+# hooks/post_bash thought X.py had run.
 #
 # Optional `(?:\S*?/)?` before `.autoresearch/scripts/` accepts both
 # relative invocations (`python .autoresearch/scripts/X.py`) and
@@ -309,14 +309,14 @@ def parse_canonical_ar(command: str) -> Optional[str]:
 
 def parse_invoked_ar_script(command: str) -> Optional[str]:
     """Basename of the AR script invocation, or None. Used by
-    hook_post_bash for routing on baseline.py / pipeline.py /
+    hooks/post_bash for routing on baseline.py / pipeline.py /
     create_plan.py."""
     return parse_canonical_ar(command)
 
 
 def parse_script_names(command: str) -> List[Tuple[str, str]]:
     """Return [(path, basename)] for the AR script in `command`, or [].
-    Used by hook_guard_bash's hallucinated-name pre-check.
+    Used by hooks/guard_bash's hallucinated-name pre-check.
 
     Path is the canonical engine/-rooted form for blessed CLIs and the
     flat scripts/ form for top-level lifecycle scripts. Consumers only
@@ -349,18 +349,16 @@ def is_single_foreground_ar_invocation(command: str, *, script: str) -> tuple:
 # or `git diff -- .autoresearch/scripts/engine/settle.py` (READONLY shapes
 # that mention the name in args, not invocations).
 _SUBPROCESS_ONLY_AR_SCRIPTS = {
-    "eval_wrapper.py":    "subprocess-only (invoked by pipeline.py)",
-    "keep_or_discard.py": "subprocess-only (invoked by pipeline.py)",
-    "quick_check.py":     "subprocess-only (invoked by pipeline.py)",
-    "settle.py":          "subprocess-only (invoked by pipeline.py)",
-    "_baseline_init.py":  "subprocess-only (invoked by baseline.py)",
+    "eval_wrapper.py": "subprocess-only (invoked by pipeline.py / baseline.py)",
+    "quick_check.py":  "subprocess-only (invoked by pipeline.py)",
+    "settle.py":       "subprocess-only (invoked by pipeline.py)",
 }
 
 # Per-phase: which AR script names may run.
 # LIFECYCLE scripts are always allowed (handled separately, not duplicated).
 # Subprocess-only scripts above are blocked everywhere.
 # EDIT-recovery (create_plan.py while .pending_settle.json exists) is
-# layered on top by hook_guard_bash; this table reflects the normal path.
+# layered on top by hooks/guard_bash; this table reflects the normal path.
 _AR_ALLOWED_BY_PHASE = {
     INIT:     frozenset(),
     BASELINE: frozenset({"baseline.py"}),
@@ -398,7 +396,7 @@ _CANONICAL_FORM_REJECTION = (
     "AR scripts must be invoked directly: "
     "`python .autoresearch/scripts/engine/<name>.py <task_dir> [args...]` "
     "for blessed CLIs (pipeline, baseline, create_plan, eval_wrapper, "
-    "quick_check, keep_or_discard, settle, parse_args), or "
+    "quick_check, settle, parse_args), or "
     "`python .autoresearch/scripts/<name>.py` for top-level scripts "
     "(scaffold, resume, dashboard). "
     "Allowed alongside: env-var assignments, real Python flags "
@@ -433,7 +431,7 @@ def check_bash(phase: str, command: str) -> tuple:
     """
     if "git commit" in command:
         return False, ("manual 'git commit' forbidden — commits are "
-                       "produced by pipeline.py via keep_or_discard")
+                       "produced by pipeline.py via workflow.record_round")
 
     shape = classify(command)
 
@@ -580,7 +578,6 @@ def compute_resume_phase(task_dir: str) -> str:
     if not progress:
         return BASELINE
 
-    status = progress.get("status", "no_plan")
     eval_rounds = progress.get("eval_rounds", 0)
     max_rounds = progress.get("max_rounds", 999)
 
@@ -589,19 +586,25 @@ def compute_resume_phase(task_dir: str) -> str:
 
     # Stuck states from a previous baseline: keep at BASELINE so
     # stop_save._is_stuck fires and the agent can Stop. The carve-out
-    # has to match on_baseline_settled exactly — see workflow/transition.
-    if progress.get("baseline_outcome") in ("ref_fail", "framework_error"):
+    # MUST match on_baseline_settled exactly — both import the same
+    # STUCK_BASELINE_OUTCOMES set so they cannot drift.
+    import sys as _sys, os as _os
+    _scripts_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    if _scripts_dir not in _sys.path:
+        _sys.path.insert(0, _scripts_dir)
+    from task_config.metric_policy import STUCK_BASELINE_OUTCOMES
+    if progress.get("baseline_outcome") in STUCK_BASELINE_OUTCOMES:
         return BASELINE
 
     # Kernel-side baseline failure: route to PLAN. seed_metric=None (no
-    # timing) and baseline_correctness=False (wrong output) both mean
-    # the seed needs rewriting; PLAN guidance surfaces a SEED FAILED
-    # block pushing the agent to rewrite kernel.py as plan items.
+    # timing) and baseline_outcome != "ok" (kernel verify/profile crash)
+    # both mean the seed needs rewriting; PLAN guidance surfaces a SEED
+    # FAILED block pushing the agent to rewrite kernel.py as plan items.
     if (progress.get("seed_metric") is None
-            or progress.get("baseline_correctness") is False):
+            or progress.get("baseline_outcome") != "ok"):
         return PLAN
 
-    if not os.path.exists(plan_path(task_dir)) or status == "no_plan":
+    if not os.path.exists(plan_path(task_dir)):
         return PLAN
 
     if get_active_item(task_dir) is not None or has_pending_items(task_dir):

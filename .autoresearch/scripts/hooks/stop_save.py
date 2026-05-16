@@ -29,9 +29,7 @@ from phase_machine import (
     BASELINE, FINISH, get_guidance, get_task_dir,
     load_progress, read_phase, update_progress,
 )
-
-
-_STUCK_OUTCOMES = ("ref_fail", "framework_error")
+from task_config.metric_policy import STUCK_BASELINE_OUTCOMES
 
 
 def _block_stop_with_reason(reason: str) -> None:
@@ -51,7 +49,7 @@ def _is_stuck(phase: str, progress) -> bool:
     if phase != BASELINE:
         return False
     outcome = progress.get("baseline_outcome")
-    return outcome in _STUCK_OUTCOMES
+    return outcome in STUCK_BASELINE_OUTCOMES
 
 
 def main():

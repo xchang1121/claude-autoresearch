@@ -68,17 +68,13 @@ def _clean_stale_edit_marker(task_dir: str):
     marker = edit_marker_path(task_dir)
     if not os.path.exists(marker):
         return
-    try:
-        import subprocess as _sp
-        diff = _sp.run(
-            ["git", "status", "--porcelain"],
-            cwd=task_dir, capture_output=True, text=True, timeout=5,
-        )
-        if not diff.stdout.strip():
+    from utils.git_utils import is_working_tree_clean
+    if is_working_tree_clean(task_dir):
+        try:
             os.remove(marker)
             emit_status("[AR] Cleaned stale edit marker (git is clean).")
-    except Exception:
-        pass
+        except OSError:
+            pass
 
 
 def _handle_activation(new_task_dir: str):
@@ -146,14 +142,15 @@ def _baseline_message(outcome, new_phase, progress, guidance):
     return f"[AR] Baseline complete. Phase -> PLAN. {guidance}"
 
 
-def _progress_update_for_plan(task_dir: str, phase: str):
-    """Set status=active after a valid new plan. `plan_version` is owned and
-    bumped by create_plan.py — this hook must NOT re-bump it (caused double
-    increments that jumped plan_version by 2 each REPLAN)."""
-    fields = {"status": "active"}
+def _reset_failures_for_diagnose(task_dir: str, phase: str):
+    """After a DIAGNOSE-triggered replan validates, the failure streak is
+    over — zero `consecutive_failures` so the next FAIL doesn't immediately
+    re-trigger DIAGNOSE. PLAN / REPLAN keep the counter untouched (failures
+    that produced the replan are part of the same streak until proven
+    otherwise). `plan_version` is owned and bumped by create_plan.py — this
+    hook must NOT re-bump it."""
     if phase == DIAGNOSE:
-        fields["consecutive_failures"] = 0
-    update_progress(task_dir, **fields)
+        update_progress(task_dir, consecutive_failures=0)
 
 
 def main():
@@ -208,26 +205,26 @@ def main():
         from phase_machine import validate_plan, pending_settle_path
         # PLAN/DIAGNOSE/REPLAN: normal plan-creation flow.
         # EDIT: only legal as a recovery path when settle.py kept failing
-        # on a malformed plan.md (gated in hook_guard_bash by the
+        # on a malformed plan.md (gated in hooks/guard_bash by the
         # presence of .pending_settle.json). The new plan retires the
         # broken plan_version, so the orphan kd_json is no longer
         # actionable; clear the sidecar.
         #
         # NOTE: do NOT re-validate the diagnose artifact here. PreToolUse
-        # (hook_guard_bash) already enforced the artifact gate against the
+        # (hooks/guard_bash) already enforced the artifact gate against the
         # plan_version that existed BEFORE create_plan.py ran. By the time
         # this PostToolUse fires, create_plan.py has bumped plan_version
         # from N to N+1 — re-running diagnose_state would look for
         # diagnose_v(N+1).md (not yet created) and falsely reject.
         if phase == EDIT and not os.path.exists(pending_settle_path(task_dir)):
-            # Defense-in-depth: hook_guard_bash should have blocked this,
+            # Defense-in-depth: hooks/guard_bash should have blocked this,
             # but if it slipped through somehow, refuse to advance state.
             emit_status("[AR] create_plan.py in EDIT phase requires a "
                         "pending settle recovery state; nothing to do.")
             sys.exit(0)
         ok, err = validate_plan(task_dir)
         if ok:
-            _progress_update_for_plan(task_dir, phase)
+            _reset_failures_for_diagnose(task_dir, phase)
             PhaseController(task_dir).on_plan_validated()
             if phase == EDIT:
                 # Recovery completed: discard the orphan kd_json. The new

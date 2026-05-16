@@ -1,12 +1,11 @@
 """Round-N (post-EDIT) eval recorder.
 
-Lifted from `keep_or_discard.py` so pipeline.py can call it as a library
-(no subprocess + stdout JSON round-trip). The shell `keep_or_discard.py`
-stays as a thin wrapper.
-
 `record_round(task_dir, eval_data, description, plan_item) -> dict`
-returns the same shape the CLI used to print as JSON: decision,
-best_metric, eval_rounds, max_rounds, consecutive_failures.
+is called in-process by engine/pipeline.py after eval_wrapper completes,
+and returns {decision, best_metric, eval_rounds, max_rounds,
+consecutive_failures}. The earlier `keep_or_discard.py` shell wrapper
+(subprocess + stdout-JSON round-trip) was deleted once every caller
+switched to the in-process path.
 """
 from __future__ import annotations
 
@@ -32,8 +31,7 @@ def record_round(task_dir: str, eval_data: dict,
     """Single library entry point for one round of EDIT settlement.
 
     Decision flow: correctness gate -> constraint gate -> primary-metric
-    presence -> improvement check. Mirrors keep_or_discard.py byte-for-
-    byte; only the shell-vs-library wrapping differs."""
+    presence -> improvement check."""
     config = load_task_config(task_dir)
     if config is None:
         return {"decision": "ERROR", "error": "task.yaml not found"}

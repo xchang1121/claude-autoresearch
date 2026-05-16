@@ -49,6 +49,21 @@ class EvalOutcome(str, Enum):
     FRAMEWORK_ERROR = "framework_error"            # no per-shape data at all
 
 
+# Baseline outcomes the agent CANNOT recover from inside the EDIT loop:
+#   ref_fail        — reference.py is broken; only the user can fix it
+#   framework_error — eval framework crashed (worker/timeout/OOM); needs
+#                     operator intervention, not a kernel rewrite
+# Single source of truth for the "stuck" carve-out used by
+# PhaseController.on_baseline_settled, compute_resume_phase,
+# hooks/stop_save (early-Stop carve-out), hooks/post_bash (message
+# selection), and dashboard.py (banner choice). Adding a 6th stuck
+# outcome later only needs an edit here.
+STUCK_BASELINE_OUTCOMES = frozenset({
+    EvalOutcome.REF_FAIL.value,
+    EvalOutcome.FRAMEWORK_ERROR.value,
+})
+
+
 @dataclass
 class EvalResult:
     outcome: EvalOutcome = EvalOutcome.FRAMEWORK_ERROR

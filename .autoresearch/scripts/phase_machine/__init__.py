@@ -65,8 +65,6 @@ from .phase_policy import (
 )
 from .guidance import (
     get_guidance,
-    # hooks.post_edit is the one external user.
-    _load_config_safe,
 )
 
 # auto_rollback used to live in phase_machine; the implementation moved to

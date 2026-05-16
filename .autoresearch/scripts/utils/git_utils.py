@@ -1,19 +1,19 @@
 """Shared git helpers for autoresearch lifecycle code.
 
-scaffold and hook_post_edit both need to commit files inside a task's git
-repo. Historically each path open-coded its own `subprocess.run(["git", ...])`
-sequence, with subtly different error-handling — scaffold used `check=True`
-(crash loud on any git failure) while hook_post_edit's `_commit_seed`
-swallowed every error as a stderr WARNING and let phase advance anyway.
-
-The latter caused a class of bugs where the seed kernel never made it into
-HEAD, baseline ran fine on the in-tree code, phase walked forward, and the
-problem only surfaced two phases later as a misleading "uncommitted changes
-from previous round" block in `_edit_phase_git_gate`.
+`scaffold.py` (seed commit) and `workflow.round.record_round` (per-round
+KEEP commit) both stage files inside a task's git repo. Historically each
+path open-coded its own `subprocess.run(["git", ...])` sequence with
+subtly different error-handling — scaffold used `check=True` (crash loud
+on any git failure) while the earlier per-round commit helper swallowed
+every error as a stderr WARNING and let phase advance anyway. The latter
+caused a class of bugs where the seed kernel never made it into HEAD,
+baseline ran fine on the in-tree code, phase walked forward, and the
+problem only surfaced two phases later as a misleading "uncommitted
+changes from previous round" block in the EDIT-phase git gate.
 
 This module is the single canonical implementation of "stage these files
-and commit". Both scaffold and hook_post_edit now route through it. The
-contract:
+and commit". Both scaffold and the round writer now route through it.
+The contract:
 
     ok, info = commit_in_task(task_dir, paths, message)
         ok   == True  → either created a commit (info=short hash) or there
@@ -103,6 +103,27 @@ def commit_in_task(task_dir: str, paths, message: str) -> tuple:
         return False, "git operation timed out (>10s) — check for index lock or fs contention"
     except Exception as e:
         return False, f"unexpected error: {e}"
+
+
+def is_working_tree_clean(task_dir: str) -> bool:
+    """True iff `git status --porcelain` reports no changes in `task_dir`.
+
+    Used by resume.py and the post-Bash hook to decide whether the
+    `.edit_started` marker is stale (clean tree → nothing to resume →
+    marker is leftover). Both call sites previously open-coded the same
+    `git status --porcelain` subprocess; centralizing here keeps the
+    "what does clean mean" decision in one place.
+
+    On any git failure (no repo, timeout, exception) returns False
+    — we'd rather leave a marker around than incorrectly declare clean.
+    """
+    try:
+        r = _run(["git", "status", "--porcelain"], cwd=task_dir, timeout=5)
+    except subprocess.TimeoutExpired:
+        return False
+    if r.returncode != 0:
+        return False
+    return not r.stdout.strip()
 
 
 def current_head_short(task_dir: str) -> Optional[str]:

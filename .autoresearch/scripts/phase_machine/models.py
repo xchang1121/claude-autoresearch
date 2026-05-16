@@ -41,7 +41,6 @@ class Progress:
     baseline_commit: Optional[str] = None
     baseline_source: Optional[str] = None      # "ref" | "seed_fallback"
     baseline_outcome: Optional[str] = None     # task_config.EvalOutcome value
-    baseline_correctness: bool = False         # legacy view: outcome == "ok"
     # error_source: "ref" | "kernel" | None. Set by verify script's tagged
     # try/excepts. "ref" => scaffold rejects + user must fix --ref source.
     # "kernel" => normal seed-fail recovery via PLAN. None on success.
@@ -51,7 +50,6 @@ class Progress:
     # Plan
     plan_version: int = 0
     next_pid: int = 0
-    status: str = "no_plan"
 
     # Multi-shape detail (single-shape ops keep these absent)
     num_cases: Optional[int] = None

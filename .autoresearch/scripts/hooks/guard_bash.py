@@ -36,7 +36,7 @@ from utils.settings import hallucinated_scripts
 # treated as an unknown script and rejected with a sorted list of
 # valid names.
 _BLESSED_SCRIPTS = {
-    "quick_check.py", "eval_wrapper.py", "keep_or_discard.py",
+    "quick_check.py", "eval_wrapper.py",
     "scaffold.py", "baseline.py", "dashboard.py",
     "create_plan.py", "settle.py", "pipeline.py", "resume.py",
     "parse_args.py",
@@ -55,18 +55,11 @@ _LIBRARY_NOT_CLI = {
     "task_config.py": "task_config.py is a library, not a CLI.",
     "settings.py": "settings.py is a library, not a CLI.",
     "hw_detect.py": "hw_detect.py is a library, not a CLI.",
-    "hook_utils.py": ("hook_utils.py was renamed to hooks/utils.py and is "
-                      "a library, not a CLI."),
     "utils.py": "hooks/utils.py is a library, not a CLI.",
     "failure_extractor.py": "failure_extractor.py is a library, not a CLI.",
     "code_checker.py": (
         "code_checker.py is a library used by quick_check.py, not a CLI. "
         "It runs automatically as part of the pipeline."
-    ),
-    "_baseline_init.py": (
-        "_baseline_init.py is a subprocess child of baseline.py, not a "
-        "CLI. Run `python .autoresearch/scripts/engine/baseline.py "
-        "<task_dir>` instead — it invokes _baseline_init.py for you."
     ),
 }
 
@@ -132,7 +125,7 @@ def main():
     # plan.md, the agent has no legal action under normal EDIT rules
     # (kernel.py edits don't help; create_plan.py isn't in EDIT's
     # allowlist). If `.pending_settle.json` exists, allow create_plan.py
-    # as a recovery path; hook_post_bash clears the sidecar on successful
+    # as a recovery path; hooks/post_bash clears the sidecar on successful
     # create_plan validation.
     #
     # is_single_foreground_ar_invocation reuses the canonical-form regex
