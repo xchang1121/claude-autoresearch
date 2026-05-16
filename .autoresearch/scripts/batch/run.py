@@ -233,8 +233,8 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
                    rc=None,
                    note="")
 
-    # Bind THIS run's task_dir via scaffold result line on stdout
-    # (parse_scaffold_result_line); fall back to snapshot diff on idle ticks.
+    # Identity-bound task_dir from same-Popen scaffold markers; snapshot
+    # is the post-process safety net only.
     pre_task_dirs = mf.snapshot_task_dirs()
     bound_task_dir: Path | None = None
 
@@ -299,11 +299,6 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
                     break
                 if reader_done.is_set() and line_q.empty():
                     break
-                # No mid-run mtime fallback: baseline.py runs `eval_wrapper`
-                # via `subprocess.run(capture_output=True)`, so >5s silent
-                # ticks are normal. Falling back to mtime here would race
-                # a sibling same-op batch. Identity binding only during the
-                # run; pick_new_task_dir is the post-process safety net.
                 continue
             sys.stdout.write(line)
             sys.stdout.flush()
@@ -312,7 +307,11 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
             if bound_task_dir is None:
                 td = (mf.parse_scaffold_created_line(line)
                       or mf.parse_scaffold_result_line(line))
-                if td is not None:
+                # Reject paths claude might echo from prior context: must
+                # be fresh (post-snapshot) AND match this op's prefix.
+                if (td is not None
+                        and td not in pre_task_dirs
+                        and td.name.startswith(f"{op}_")):
                     bound_task_dir = td
                     mf.update_case(batch_dir, op, task_dir=str(td.resolve()))
         proc.wait(timeout=30)
