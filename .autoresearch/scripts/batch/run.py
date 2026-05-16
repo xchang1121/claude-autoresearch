@@ -308,10 +308,11 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
                 td = (mf.parse_scaffold_created_line(line)
                       or mf.parse_scaffold_result_line(line))
                 # Reject paths claude might echo from prior context: must
-                # be fresh (post-snapshot) AND match this op's prefix.
+                # be fresh AND a scaffold-formatted dir for THIS op (exact
+                # match, not prefix — `op=avg` must not claim avg_pool2d_*).
                 if (td is not None
                         and td not in pre_task_dirs
-                        and td.name.startswith(f"{op}_")):
+                        and mf.task_dir_belongs_to_op(td.name, op)):
                     bound_task_dir = td
                     mf.update_case(batch_dir, op, task_dir=str(td.resolve()))
         proc.wait(timeout=30)

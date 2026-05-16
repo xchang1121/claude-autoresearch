@@ -260,6 +260,21 @@ def repo_root() -> Path:
 
 _SCAFFOLD_RESULT_STATUSES = frozenset({"ok", "error"})
 _SCAFFOLD_CREATED_MARKER = "[scaffold] Task directory created: "
+_HEX6 = frozenset("0123456789abcdef")
+
+
+def task_dir_belongs_to_op(name: str, op: str) -> bool:
+    """Exact match for scaffold's `<op>_<int(time.time())>_<uuid.hex[:6]>`
+    layout. Prefix-only matching would let op="avg" claim
+    `avg_pool2d_*`; this splits off the last two `_` fields and
+    compares the head verbatim."""
+    parts = name.rsplit("_", 2)
+    if len(parts) != 3:
+        return False
+    head, ts, rand = parts
+    return (head == op
+            and ts.isdigit() and ts
+            and len(rand) == 6 and all(c in _HEX6 for c in rand))
 
 
 def parse_scaffold_created_line(line: str) -> Path | None:
@@ -322,7 +337,7 @@ def pick_new_task_dir(pre_snapshot: set[Path], op_name: str) -> Path | None:
     except OSError:
         return None
     matches = [d for d in (current - pre_snapshot)
-               if d.name.startswith(f"{op_name}_")]
+               if task_dir_belongs_to_op(d.name, op_name)]
     if not matches:
         return None
     matches.sort(key=lambda d: d.stat().st_mtime, reverse=True)
