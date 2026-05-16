@@ -325,10 +325,11 @@ def snapshot_task_dirs() -> set[Path]:
 
 
 def pick_new_task_dir(pre_snapshot: set[Path], op_name: str) -> Path | None:
-    """Fallback when the scaffold result line never reached us: pick the
-    most-recently-mtime dir matching `<op>_*` that's in
-    `current - pre_snapshot`. Races with sibling batches on the mtime
-    tiebreak; `parse_scaffold_result_line` is the primary path."""
+    """Post-process fallback when no in-loop identity bind landed.
+    Among `current - pre_snapshot`, pick the most-recently-mtime dir
+    whose name passes `task_dir_belongs_to_op` (exact `<op>_<ts>_<hex6>`
+    match, not a prefix). Races with sibling batches on the mtime
+    tiebreak; the in-loop scaffold parsers are the primary path."""
     tasks_root = repo_root() / "ar_tasks"
     if not tasks_root.is_dir():
         return None
