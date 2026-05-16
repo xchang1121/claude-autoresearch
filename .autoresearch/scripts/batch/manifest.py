@@ -258,27 +258,48 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
+_SCAFFOLD_RESULT_STATUSES = frozenset({"ok", "error"})
+
+
 def parse_scaffold_result_line(line: str) -> Path | None:
     """Extract a task_dir from a single line of claude's stdout when it
-    contains `scaffold.py`'s success JSON.
+    contains a `scaffold.py` result JSON — success OR failure.
 
-    scaffold prints `{"task_dir": "<absolute>", "status": "ok"}` as its
-    terminating stdout line on success (error paths emit `"status":
-    "error"`). When `claude --print --output-format text` runs scaffold
-    via the Bash tool, that JSON appears verbatim as a line in the
-    stream — parsing it gives us the task_dir created by THIS process,
-    not a sibling batch's or manual session's dir.
+    scaffold prints one of:
+      {"task_dir": "<abs>", "status": "ok"}                       (baseline OK)
+      {"task_dir": "<abs>", "status": "error", ...}               (kernel-side
+                                                                   FAIL — task
+                                                                   activates,
+                                                                   PLAN takes
+                                                                   over)
+      {"task_dir": "<abs>", "status": "error", ...}               (REF_FAIL /
+                                                                   FRAMEWORK_
+                                                                   ERROR —
+                                                                   stuck at
+                                                                   BASELINE)
+      {"status": "error", "error": "..."}                          (early
+                                                                   pre-scaffold
+                                                                   error — no
+                                                                   task_dir
+                                                                   yet)
+
+    All three task_dir-carrying shapes name the dir scaffold created
+    for THIS run. The case's final outcome (done / error) is decided
+    later from `.phase` and `proc.returncode`, not from this status
+    field, so binding on `status="error"` doesn't misreport completion
+    — it just records WHICH dir this run produced.
 
     This is "process-identity-level" binding: claude's stdout is owned
     by THIS subprocess, so a JSON line we read here came from a
-    `scaffold.py` invocation made by THIS run. The snapshot-diff
-    fallback (`pick_new_task_dir`) still runs for cases where scaffold
-    didn't print (e.g. `--resume`, future output-format changes, or
-    claude wrapping the line in unexpected text).
+    `scaffold.py` invocation made by THIS run. Concurrent same-op
+    batches that both land in `pick_new_task_dir`'s snapshot diff are
+    disambiguated correctly via this parser, including the kernel-fail
+    branch that the snapshot-diff fallback would have raced on by
+    mtime.
 
-    Returns None when the line isn't JSON, isn't a dict, doesn't have
-    the success shape, or points at a path that no longer exists on
-    disk."""
+    Returns None when the line isn't a scaffold result JSON shape, or
+    `task_dir` is missing / not a string / points at a path that no
+    longer exists on disk."""
     s = line.strip()
     if not (s.startswith("{") and s.endswith("}")):
         return None
@@ -286,11 +307,14 @@ def parse_scaffold_result_line(line: str) -> Path | None:
         d = json.loads(s)
     except json.JSONDecodeError:
         return None
-    if (not isinstance(d, dict)
-            or d.get("status") != "ok"
-            or not isinstance(d.get("task_dir"), str)):
+    if not isinstance(d, dict):
         return None
-    p = Path(d["task_dir"])
+    if d.get("status") not in _SCAFFOLD_RESULT_STATUSES:
+        return None
+    td = d.get("task_dir")
+    if not isinstance(td, str):
+        return None
+    p = Path(td)
     return p if p.is_dir() else None
 
 
