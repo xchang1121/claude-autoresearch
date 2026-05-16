@@ -463,15 +463,27 @@ def get_guidance(task_dir: str) -> str:
         # failure detail and steer the agent toward that goal.
         seed_failed_section = ""
         target_file = editable[0] if editable else "kernel.py"
-        if progress and (progress.get("seed_metric") is None
-                         or progress.get("baseline_correctness") is False):
+        # `baseline_outcome` is the schema's authoritative correctness
+        # signal (the old `baseline_correctness` bool was dropped — it
+        # was just `outcome == "ok"`). Trigger the SEED FAILED block
+        # when seed didn't produce a timing OR the kernel verify /
+        # profile crash outcomes — both mean the seed kernel needs
+        # rewriting. STUCK_BASELINE_OUTCOMES (ref_fail / framework_error)
+        # don't reach here because compute_resume_phase pins them at
+        # BASELINE before PLAN runs.
+        outcome = progress.get("baseline_outcome") if progress else None
+        seed_failed = bool(progress) and (
+            progress.get("seed_metric") is None
+            or outcome in ("kernel_verify_fail", "kernel_profile_crash")
+        )
+        if seed_failed:
             seed_reason = (
                 "seed kernel produced no timing (compile/profile failed)"
                 if progress.get("seed_metric") is None
                 else "seed kernel ran but failed correctness vs reference"
             )
             failed_shapes_block = ""
-            if progress.get("baseline_correctness") is False:
+            if outcome in ("kernel_verify_fail", "kernel_profile_crash"):
                 fail_metrics = _last_failure_metrics(task_dir)
                 block = _failed_shapes_block(fail_metrics, progress)
                 if block:

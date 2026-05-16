@@ -258,34 +258,65 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
-def find_recent_task_dir(op_name: str, since_ts: float) -> Path | None:
-    """Fallback when AUTORESEARCH_RESULT marker is missing: scan ar_tasks/ for
-    the most recent task dir matching op_name with mtime >= since_ts."""
+def snapshot_task_dirs() -> set[Path]:
+    """Snapshot the current set of `ar_tasks/<dir>` entries.
+
+    `run_one` calls this immediately before launching claude. After the
+    subprocess exits we diff the post-snapshot against this set to find
+    exactly the directories created during this run — robust against
+    concurrent batches or manual sessions hitting the same op name.
+    Previously we did `glob('<op>_*')` filtered by mtime, which could
+    grab a sibling batch's task_dir that happened to be touched in the
+    same window.
+    """
+    tasks_root = repo_root() / "ar_tasks"
+    if not tasks_root.is_dir():
+        return set()
+    return {d for d in tasks_root.iterdir() if d.is_dir()}
+
+
+def pick_new_task_dir(pre_snapshot: set[Path], op_name: str) -> Path | None:
+    """Return the task_dir created since `pre_snapshot` matching
+    `<op_name>_*`. Scaffold names task dirs `<op>_<ts>_<rand>` so a
+    fresh entry under that pattern is this run's task. If multiple new
+    dirs match (e.g. claude was retried mid-run), pick the most recent.
+    Returns None when nothing new yet — caller can poll until claude
+    has actually scaffolded the dir.
+    """
     tasks_root = repo_root() / "ar_tasks"
     if not tasks_root.is_dir():
         return None
-    candidates: list[tuple[float, Path]] = []
-    for d in tasks_root.glob(f"{op_name}_*"):
-        try:
-            mt = d.stat().st_mtime
-        except OSError:
-            continue
-        if mt >= since_ts:
-            candidates.append((mt, d))
-    if not candidates:
+    try:
+        current = {d for d in tasks_root.iterdir() if d.is_dir()}
+    except OSError:
         return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
+    new = current - pre_snapshot
+    matches = [d for d in new if d.name.startswith(f"{op_name}_")]
+    if not matches:
+        return None
+    matches.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    return matches[0]
 
 
-def find_active_task_dir() -> Path | None:
-    """Thin Path-typed shim over phase_machine.find_active_task_dir so the
-    batch monitor uses the same active-task rule as resume / dashboard.
-    Previously this module's own heartbeat-only scan could disagree with
-    resume's pointer-first rule when batch and manual sessions mixed."""
-    _scripts_dir = str(Path(__file__).resolve().parent.parent)
-    if _scripts_dir not in sys.path:
-        sys.path.insert(0, _scripts_dir)
-    from phase_machine import find_active_task_dir as _shared
-    td = _shared()
-    return Path(td) if td else None
+def find_running_case_task_dir(batch_dir: Path) -> Path | None:
+    """Return the task_dir of the case currently `status="running"` in
+    THIS batch's progress.json. Used by monitor / `monitor --dashboard`
+    to scope "active" strictly to the batch we were pointed at — the
+    repo-wide active-task pointer could belong to a sibling batch or a
+    manual session sharing `ar_tasks/`. Falls back to None while the
+    case is still scaffolding (task_dir not yet populated)."""
+    progress = load_progress(batch_dir)
+    if not progress:
+        return None
+    cases = progress.get("cases", {}) or {}
+    running = [v for v in cases.values()
+               if isinstance(v, dict) and v.get("status") == "running"]
+    if not running:
+        return None
+    # Most-recently-started running case wins if the batch races.
+    running.sort(key=lambda v: v.get("started_at", ""), reverse=True)
+    td = running[0].get("task_dir")
+    if not td:
+        return None
+    p = Path(td)
+    return p if p.is_dir() else None

@@ -380,9 +380,15 @@ def main():
         if args.worker_url:
             baseline_cmd.extend(["--worker-url", args.worker_url])
         rc = subprocess.run(baseline_cmd).returncode
-        # _EXIT_FOR[REF_FAIL] = 5 (see workflow/baseline.py). Other non-zero
-        # exits are kernel-side failures: task gets activated, hook routes
-        # to PLAN.
+        # `_EXIT_FOR` in workflow/baseline.py maps EvalOutcome → exit code:
+        #   5 = REF_FAIL              (reference is broken)
+        #   4 = FRAMEWORK_ERROR       (eval framework crashed)
+        #   3 = KERNEL_VERIFY_FAIL / KERNEL_PROFILE_CRASH (kernel bug)
+        # REF_FAIL and FRAMEWORK_ERROR are both `STUCK_BASELINE_OUTCOMES`
+        # — `PhaseController.on_baseline_settled` pins them at BASELINE
+        # and `hooks/stop_save.py` allows early Stop. Sending the agent
+        # toward plan->edit for these would burn rounds on something it
+        # provably can't fix.
         if rc == 5:
             print(json.dumps({
                 "status": "error",
@@ -397,10 +403,29 @@ def main():
                          "as ground truth and the agent cannot fix it."),
             }))
             sys.exit(5)
+        if rc == 4:
+            print(json.dumps({
+                "status": "error",
+                "task_dir": task_dir,
+                "error": ("eval framework crashed during baseline — see "
+                          "[baseline]/[eval] stderr above"),
+                "hint": ("FRAMEWORK_ERROR: no per-shape data was produced, "
+                         "so the seed kernel was not meaningfully "
+                         "exercised. This is an operator-side issue "
+                         "(eval.timeout, worker connectivity, device "
+                         "contention, OOM before any case ran) — not "
+                         "something the agent can fix via plan->edit. "
+                         "Fix the underlying eval framework and re-run "
+                         "`/autoresearch --resume <task_dir>` to retry "
+                         "baseline. Phase will stay at BASELINE until a "
+                         "kernel- or OK- outcome lands."),
+            }))
+            sys.exit(4)
         if rc != 0:
-            # Kernel-side failure. task_dir is left in place and will be
-            # activated normally; the hook routes to PLAN so the agent
-            # rewrites the kernel via plan->edit.
+            # Kernel-side failure (KERNEL_VERIFY_FAIL / KERNEL_PROFILE_CRASH).
+            # task_dir is left in place and will be activated normally;
+            # the hook routes to PLAN so the agent rewrites the kernel
+            # via plan->edit.
             print(json.dumps({
                 "status": "error",
                 "task_dir": task_dir,

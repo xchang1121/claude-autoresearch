@@ -233,6 +233,14 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
                    rc=None,
                    note="")
 
+    # Snapshot ar_tasks/ BEFORE claude scaffolds. After it exits we diff
+    # against this snapshot to find exactly the dir this run created —
+    # robust against a sibling batch or a manual session that happens
+    # to be working on the same op name. (The earlier `find_recent_task_dir`
+    # was a `<op>_*` mtime scan that could grab the wrong dir.)
+    pre_task_dirs = mf.snapshot_task_dirs()
+    bound_task_dir: Path | None = None
+
     header = (f"\n{'=' * 72}\n"
               f"[run {datetime.now().isoformat(timespec='seconds')}] op={op} "
               f"{hw_arg} rounds={args.max_rounds}\n"
@@ -278,6 +286,18 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
     interrupted = False
     try:
         while True:
+            # Bind task_dir as soon as scaffold creates it — diff against
+            # pre-snapshot, take the new dir matching `<op>_*`. Mid-run
+            # binding (vs end-of-run only) lets the batch monitor read
+            # `case.task_dir` from progress.json while the case is still
+            # running, instead of falling back to the repo-wide active
+            # pointer.
+            if bound_task_dir is None:
+                td = mf.pick_new_task_dir(pre_task_dirs, op)
+                if td is not None:
+                    bound_task_dir = td
+                    mf.update_case(batch_dir, op,
+                                   task_dir=str(td.resolve()))
             try:
                 # Short poll so a silent claude still hits the wall-clock
                 # check below within 5s of crossing the deadline.
@@ -318,11 +338,11 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
     log_fp.write(footer)
     log_fp.flush()
 
-    # Authoritative task discovery: scan ar_tasks/ for the freshest dir
-    # matching this op. There is no in-band marker — the model is forbidden
-    # from self-declaring "done"/"stuck" (any such instruction would let an
-    # early-stop heuristic creep back in). Truth lives in .ar_state/.phase.
-    td = mf.find_recent_task_dir(op, since_ts=started - 5)
+    # Authoritative task_dir: the dir created during THIS run, diffed
+    # against the pre-snapshot taken before claude launched. May already
+    # have been bound mid-run (the polling block inside the read loop);
+    # re-check at exit in case scaffold raced with EOF on the last tick.
+    td = bound_task_dir or mf.pick_new_task_dir(pre_task_dirs, op)
     if td is None:
         mf.update_case(batch_dir, op,
                        status="error",

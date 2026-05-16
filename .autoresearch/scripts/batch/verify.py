@@ -8,9 +8,20 @@ Two tiers:
         ref.py    : Model class + get_inputs + get_init_inputs
         kernel.py : ModelNew class
 
-  Tier 2 (--full, needs the same hardware /autoresearch eval would use):
-    - Runs ref(*get_inputs()) and kernel(*get_inputs())
-    - torch.allclose with atol/rtol = 1e-2
+  Tier 2 (--full, LOCAL smoke test only):
+    - Loads ref + kernel in-process, places them on `torch.npu:0` if the
+      local NPU runtime is importable, else CPU; falls back to no remote
+      worker. Then runs ref(*get_inputs()) and kernel(*get_inputs()) and
+      compares via the same allclose shared with `utils.correctness`.
+
+    Scope warning: --full is a SMOKE TEST, not an end-to-end check of
+    the batch eval path. `batch/run.py` defaults to a remote worker
+    (`--worker-url 127.0.0.1:9111`) and only falls through to local NPU
+    via `--devices`. A green --full does NOT mean the remote eval path
+    will succeed for the same op — host/device skew, package transfer,
+    and the worker-side verify+profile loop all live outside this
+    tier. Treat --full as "the kernel runs locally", treat batch/run.py
+    as the authoritative eval.
 
 Each op is run in its own subprocess so import errors / device state in one op
 don't poison the others. Results land in <batch_dir>/verify_results.json.
@@ -162,6 +173,12 @@ def _tier2_run(ref_path: Path, kernel_path: Path) -> dict:
     # buffers via torch.empty_like(x), so a CPU input means a CPU output
     # buffer the Triton kernel can't write to (max_rel ~= 1e12 garbage).
     # Matches package_builder._gen_verify_script's _to_device dance.
+    #
+    # LOCAL ONLY: see the module docstring's "Scope warning". `--full`
+    # never talks to the remote worker even if `batch/run.py` is
+    # configured to use one; a green --full at most says "the kernel
+    # works on this host's NPU / CPU", not "it will work over the
+    # configured eval backend".
     npu_mod = getattr(torch, "npu", None)
     if npu_mod is not None and getattr(npu_mod, "is_available", lambda: False)():
         device = torch.device("npu:0")
@@ -320,20 +337,32 @@ def _verify_one(case: dict, full: bool) -> dict:
 
 
 def _summary_status(record: dict, full: bool) -> str:
-    """Distill a single-letter overall status: P/F/E/S (Pass/Fail/Error/Skip)."""
+    """Distill a single-letter overall status: P/F/E/S (Pass/Fail/Error/Skip).
+
+    `compile` / `import` / `exports` are all code-content failures: the
+    source file doesn't parse, can't be loaded, or is missing the
+    required symbols. All three are "F" (real failure) so the per-tier
+    table column and this summary letter agree. `_print_table` flags
+    all three as `FAIL` — earlier this function only treated compile +
+    exports as F, which left import=FAIL rows showing `t1_ref=FAIL`
+    next to `ok=E`, a self-contradictory line."""
     t1r = record["tier1_ref"]
     t1k = record["tier1_kernel"]
     t2 = record["tier2"]
+
+    _CONTENT_FAIL_FIELDS = ("compile", "import", "exports")
 
     def _bad(t):
         return t and ("FAIL" in (t.get("compile"), t.get("import"), t.get("exports"))
                       or t.get("status") in ("FAIL", "ERROR"))
 
+    def _content_fail(t):
+        return t and any(t.get(f) == "FAIL" for f in _CONTENT_FAIL_FIELDS)
+
     if _bad(t1r):
-        return "F" if t1r.get("compile") == "FAIL" or t1r.get("exports") == "FAIL" else "E"
+        return "F" if _content_fail(t1r) else "E"
     if _bad(t1k):
-        return "F" if t1k and (t1k.get("compile") == "FAIL"
-                               or t1k.get("exports") == "FAIL") else "E"
+        return "F" if _content_fail(t1k) else "E"
     if full and t2:
         if t2.get("status") == "PASS":
             return "P"
