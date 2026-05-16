@@ -20,7 +20,6 @@ python .autoresearch/scripts/dashboard.py <task_dir> --watch
 ```
 
 Full operational details in [.claude/commands/autoresearch.md](.claude/commands/autoresearch.md).
-For unattended long runs: `/loop /autoresearch --resume`.
 
 ## Remote Worker
 

@@ -26,9 +26,6 @@ claude
 
 scaffold + 首轮 baseline 原子完成 → 进 PLAN → 自动迭代到 FINISH。
 
-**长跑自驱**：`/loop /autoresearch --resume`（失败 / 上下文溢出会自动恢复；
-不带参数取最近活跃 task）。
-
 **实时监控**（另开终端）：
 
 ```bash
