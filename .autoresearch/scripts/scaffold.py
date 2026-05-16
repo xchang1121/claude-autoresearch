@@ -380,15 +380,9 @@ def main():
         if args.worker_url:
             baseline_cmd.extend(["--worker-url", args.worker_url])
         rc = subprocess.run(baseline_cmd).returncode
-        # `_EXIT_FOR` in workflow/baseline.py maps EvalOutcome → exit code:
-        #   5 = REF_FAIL              (reference is broken)
-        #   4 = FRAMEWORK_ERROR       (eval framework crashed)
-        #   3 = KERNEL_VERIFY_FAIL / KERNEL_PROFILE_CRASH (kernel bug)
-        # REF_FAIL and FRAMEWORK_ERROR are both `STUCK_BASELINE_OUTCOMES`
-        # — `PhaseController.on_baseline_settled` pins them at BASELINE
-        # and `hooks/stop_save.py` allows early Stop. Sending the agent
-        # toward plan->edit for these would burn rounds on something it
-        # provably can't fix.
+        # baseline exit codes (workflow.baseline._EXIT_FOR):
+        #   5 REF_FAIL · 4 FRAMEWORK_ERROR · 3 KERNEL_* · 0 OK
+        # 5 and 4 are STUCK_BASELINE_OUTCOMES → no plan->edit hint.
         if rc == 5:
             print(json.dumps({
                 "status": "error",
@@ -409,23 +403,16 @@ def main():
                 "task_dir": task_dir,
                 "error": ("eval framework crashed during baseline — see "
                           "[baseline]/[eval] stderr above"),
-                "hint": ("FRAMEWORK_ERROR: no per-shape data was produced, "
-                         "so the seed kernel was not meaningfully "
-                         "exercised. This is an operator-side issue "
-                         "(eval.timeout, worker connectivity, device "
-                         "contention, OOM before any case ran) — not "
-                         "something the agent can fix via plan->edit. "
-                         "Fix the underlying eval framework and re-run "
-                         "`/autoresearch --resume <task_dir>` to retry "
-                         "baseline. Phase will stay at BASELINE until a "
-                         "kernel- or OK- outcome lands."),
+                "hint": ("FRAMEWORK_ERROR: no per-shape data — the seed "
+                         "kernel wasn't meaningfully exercised. Fix the "
+                         "eval framework (timeout / worker / device / OOM) "
+                         "and re-run `/autoresearch --resume <task_dir>`. "
+                         "Phase stays at BASELINE until kernel- or OK-."),
             }))
             sys.exit(4)
         if rc != 0:
-            # Kernel-side failure (KERNEL_VERIFY_FAIL / KERNEL_PROFILE_CRASH).
-            # task_dir is left in place and will be activated normally;
-            # the hook routes to PLAN so the agent rewrites the kernel
-            # via plan->edit.
+            # KERNEL_VERIFY_FAIL / KERNEL_PROFILE_CRASH — task activates,
+            # hook routes to PLAN.
             print(json.dumps({
                 "status": "error",
                 "task_dir": task_dir,

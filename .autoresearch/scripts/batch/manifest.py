@@ -262,44 +262,11 @@ _SCAFFOLD_RESULT_STATUSES = frozenset({"ok", "error"})
 
 
 def parse_scaffold_result_line(line: str) -> Path | None:
-    """Extract a task_dir from a single line of claude's stdout when it
-    contains a `scaffold.py` result JSON — success OR failure.
-
-    scaffold prints one of:
-      {"task_dir": "<abs>", "status": "ok"}                       (baseline OK)
-      {"task_dir": "<abs>", "status": "error", ...}               (kernel-side
-                                                                   FAIL — task
-                                                                   activates,
-                                                                   PLAN takes
-                                                                   over)
-      {"task_dir": "<abs>", "status": "error", ...}               (REF_FAIL /
-                                                                   FRAMEWORK_
-                                                                   ERROR —
-                                                                   stuck at
-                                                                   BASELINE)
-      {"status": "error", "error": "..."}                          (early
-                                                                   pre-scaffold
-                                                                   error — no
-                                                                   task_dir
-                                                                   yet)
-
-    All three task_dir-carrying shapes name the dir scaffold created
-    for THIS run. The case's final outcome (done / error) is decided
-    later from `.phase` and `proc.returncode`, not from this status
-    field, so binding on `status="error"` doesn't misreport completion
-    — it just records WHICH dir this run produced.
-
-    This is "process-identity-level" binding: claude's stdout is owned
-    by THIS subprocess, so a JSON line we read here came from a
-    `scaffold.py` invocation made by THIS run. Concurrent same-op
-    batches that both land in `pick_new_task_dir`'s snapshot diff are
-    disambiguated correctly via this parser, including the kernel-fail
-    branch that the snapshot-diff fallback would have raced on by
-    mtime.
-
-    Returns None when the line isn't a scaffold result JSON shape, or
-    `task_dir` is missing / not a string / points at a path that no
-    longer exists on disk."""
+    """Identity-bound task_dir: a scaffold result JSON in THIS claude
+    subprocess's stdout names the dir scaffold created for THIS run.
+    Accepts both ok and error shapes (error still carries task_dir for
+    kernel-fail / ref_fail / framework_error). Done/error verdict is
+    decided downstream from .phase + rc."""
     s = line.strip()
     if not (s.startswith("{") and s.endswith("}")):
         return None
@@ -307,9 +274,8 @@ def parse_scaffold_result_line(line: str) -> Path | None:
         d = json.loads(s)
     except json.JSONDecodeError:
         return None
-    if not isinstance(d, dict):
-        return None
-    if d.get("status") not in _SCAFFOLD_RESULT_STATUSES:
+    if (not isinstance(d, dict)
+            or d.get("status") not in _SCAFFOLD_RESULT_STATUSES):
         return None
     td = d.get("task_dir")
     if not isinstance(td, str):
@@ -319,16 +285,8 @@ def parse_scaffold_result_line(line: str) -> Path | None:
 
 
 def snapshot_task_dirs() -> set[Path]:
-    """Snapshot the current set of `ar_tasks/<dir>` entries.
-
-    `run_one` calls this immediately before launching claude. After the
-    subprocess exits we diff the post-snapshot against this set to find
-    exactly the directories created during this run — robust against
-    concurrent batches or manual sessions hitting the same op name.
-    Previously we did `glob('<op>_*')` filtered by mtime, which could
-    grab a sibling batch's task_dir that happened to be touched in the
-    same window.
-    """
+    """Current `ar_tasks/<dir>` set. Diff against a later snapshot to
+    find dirs created since."""
     tasks_root = repo_root() / "ar_tasks"
     if not tasks_root.is_dir():
         return set()
@@ -336,13 +294,10 @@ def snapshot_task_dirs() -> set[Path]:
 
 
 def pick_new_task_dir(pre_snapshot: set[Path], op_name: str) -> Path | None:
-    """Return the task_dir created since `pre_snapshot` matching
-    `<op_name>_*`. Scaffold names task dirs `<op>_<ts>_<rand>` so a
-    fresh entry under that pattern is this run's task. If multiple new
-    dirs match (e.g. claude was retried mid-run), pick the most recent.
-    Returns None when nothing new yet — caller can poll until claude
-    has actually scaffolded the dir.
-    """
+    """Fallback when the scaffold result line never reached us: pick the
+    most-recently-mtime dir matching `<op>_*` that's in
+    `current - pre_snapshot`. Races with sibling batches on the mtime
+    tiebreak; `parse_scaffold_result_line` is the primary path."""
     tasks_root = repo_root() / "ar_tasks"
     if not tasks_root.is_dir():
         return None
@@ -350,8 +305,8 @@ def pick_new_task_dir(pre_snapshot: set[Path], op_name: str) -> Path | None:
         current = {d for d in tasks_root.iterdir() if d.is_dir()}
     except OSError:
         return None
-    new = current - pre_snapshot
-    matches = [d for d in new if d.name.startswith(f"{op_name}_")]
+    matches = [d for d in (current - pre_snapshot)
+               if d.name.startswith(f"{op_name}_")]
     if not matches:
         return None
     matches.sort(key=lambda d: d.stat().st_mtime, reverse=True)
@@ -359,24 +314,19 @@ def pick_new_task_dir(pre_snapshot: set[Path], op_name: str) -> Path | None:
 
 
 def find_running_case_task_dir(batch_dir: Path) -> Path | None:
-    """Return the task_dir of the case currently `status="running"` in
-    THIS batch's progress.json. Used by monitor / `monitor --dashboard`
-    to scope "active" strictly to the batch we were pointed at — the
-    repo-wide active-task pointer could belong to a sibling batch or a
-    manual session sharing `ar_tasks/`. Falls back to None while the
-    case is still scaffolding (task_dir not yet populated)."""
+    """task_dir of THIS batch's currently-running case (None while
+    scaffolding). Scoped to the batch's own progress.json so monitor
+    output never leaks a sibling batch's state."""
     progress = load_progress(batch_dir)
     if not progress:
         return None
-    cases = progress.get("cases", {}) or {}
-    running = [v for v in cases.values()
+    running = [v for v in (progress.get("cases") or {}).values()
                if isinstance(v, dict) and v.get("status") == "running"]
     if not running:
         return None
-    # Most-recently-started running case wins if the batch races.
     running.sort(key=lambda v: v.get("started_at", ""), reverse=True)
     td = running[0].get("task_dir")
-    if not td:
+    if not isinstance(td, str):
         return None
     p = Path(td)
     return p if p.is_dir() else None

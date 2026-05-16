@@ -1,18 +1,8 @@
-"""Round-0 (SEED) eval recorder.
-
-`run_baseline_init(task_dir, eval_json) -> int` is called in-process by
-engine/baseline.py after eval_wrapper completes, and returns the exit
-code engine/baseline.py propagates to its own caller. The earlier
-`_baseline_init.py` shell wrapper (subprocess + JSON-on-argv) was
-deleted once the in-process call site landed.
-
-Exit codes: see `_EXIT_FOR` below. Phase transition is owned here:
-run_baseline_init calls PhaseController.on_baseline_settled before
-returning, on every code path that mutates progress.json. The Bash
-post-hook does NOT re-run the transition (used to be a second owner,
-masked by compute_next_phase's idempotence) — it just emits guidance
-based on the phase already on disk.
-"""
+"""Round-0 SEED eval recorder. `run_baseline_init(task_dir, eval_json)`
+is called in-process by engine/baseline.py and returns that script's
+exit code (see `_EXIT_FOR`). Owns the post-baseline phase transition
+via PhaseController.on_baseline_settled — the post-Bash hook only
+emits guidance off the phase already on disk."""
 from __future__ import annotations
 
 import json

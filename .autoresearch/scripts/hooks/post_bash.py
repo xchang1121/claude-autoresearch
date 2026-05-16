@@ -143,12 +143,8 @@ def _baseline_message(outcome, new_phase, progress, guidance):
 
 
 def _reset_failures_for_diagnose(task_dir: str, phase: str):
-    """After a DIAGNOSE-triggered replan validates, the failure streak is
-    over — zero `consecutive_failures` so the next FAIL doesn't immediately
-    re-trigger DIAGNOSE. PLAN / REPLAN keep the counter untouched (failures
-    that produced the replan are part of the same streak until proven
-    otherwise). `plan_version` is owned and bumped by create_plan.py — this
-    hook must NOT re-bump it."""
+    """Zero consecutive_failures only on DIAGNOSE replan validation
+    (PLAN/REPLAN keep the streak — failures led to the replan)."""
     if phase == DIAGNOSE:
         update_progress(task_dir, consecutive_failures=0)
 

@@ -1,12 +1,6 @@
-"""Round-N (post-EDIT) eval recorder.
-
-`record_round(task_dir, eval_data, description, plan_item) -> dict`
-is called in-process by engine/pipeline.py after eval_wrapper completes,
-and returns {decision, best_metric, eval_rounds, max_rounds,
-consecutive_failures}. The earlier `keep_or_discard.py` shell wrapper
-(subprocess + stdout-JSON round-trip) was deleted once every caller
-switched to the in-process path.
-"""
+"""Round-N (post-EDIT) eval recorder. `record_round` is called in-process
+by engine/pipeline.py and returns {decision, best_metric, eval_rounds,
+max_rounds, consecutive_failures}."""
 from __future__ import annotations
 
 import os

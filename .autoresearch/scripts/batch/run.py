@@ -233,11 +233,8 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
                    rc=None,
                    note="")
 
-    # Snapshot ar_tasks/ BEFORE claude scaffolds. After it exits we diff
-    # against this snapshot to find exactly the dir this run created —
-    # robust against a sibling batch or a manual session that happens
-    # to be working on the same op name. (The earlier `find_recent_task_dir`
-    # was a `<op>_*` mtime scan that could grab the wrong dir.)
+    # Bind THIS run's task_dir via scaffold result line on stdout
+    # (parse_scaffold_result_line); fall back to snapshot diff on idle ticks.
     pre_task_dirs = mf.snapshot_task_dirs()
     bound_task_dir: Path | None = None
 
@@ -301,36 +298,22 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
                     proc.kill()
                     break
                 if reader_done.is_set() and line_q.empty():
-                    # Reader saw EOF and queue is fully drained.
                     break
-                # No new line this tick — try the snapshot-diff fallback
-                # in case the scaffold result line was wrapped / escaped
-                # by claude's `--output-format text` rendering and never
-                # appeared as a standalone JSON line.
                 if bound_task_dir is None:
                     td = mf.pick_new_task_dir(pre_task_dirs, op)
                     if td is not None:
                         bound_task_dir = td
-                        mf.update_case(batch_dir, op,
-                                       task_dir=str(td.resolve()))
+                        mf.update_case(batch_dir, op, task_dir=str(td.resolve()))
                 continue
             sys.stdout.write(line)
             sys.stdout.flush()
             log_fp.write(line)
             log_fp.flush()
-            # Process-identity-level bind: scaffold.py's terminating
-            # success JSON `{"task_dir": "...", "status": "ok"}` shows
-            # up as a line in THIS claude subprocess's stdout — so
-            # parsing it can never confuse this batch's dir with a
-            # sibling batch's dir even when both scaffolds run the same
-            # op at the same instant. Authoritative when present; the
-            # snapshot-diff above is the fallback.
             if bound_task_dir is None:
                 td = mf.parse_scaffold_result_line(line)
                 if td is not None:
                     bound_task_dir = td
-                    mf.update_case(batch_dir, op,
-                                   task_dir=str(td.resolve()))
+                    mf.update_case(batch_dir, op, task_dir=str(td.resolve()))
         proc.wait(timeout=30)
     except KeyboardInterrupt:
         interrupted = True
@@ -349,10 +332,7 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
     log_fp.write(footer)
     log_fp.flush()
 
-    # Authoritative task_dir: the dir created during THIS run, diffed
-    # against the pre-snapshot taken before claude launched. May already
-    # have been bound mid-run (the polling block inside the read loop);
-    # re-check at exit in case scaffold raced with EOF on the last tick.
+    # Final pick: stdout-bound dir wins; snapshot diff is the safety net.
     td = bound_task_dir or mf.pick_new_task_dir(pre_task_dirs, op)
     if td is None:
         mf.update_case(batch_dir, op,
