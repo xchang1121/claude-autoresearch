@@ -258,6 +258,42 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
+def parse_scaffold_result_line(line: str) -> Path | None:
+    """Extract a task_dir from a single line of claude's stdout when it
+    contains `scaffold.py`'s success JSON.
+
+    scaffold prints `{"task_dir": "<absolute>", "status": "ok"}` as its
+    terminating stdout line on success (error paths emit `"status":
+    "error"`). When `claude --print --output-format text` runs scaffold
+    via the Bash tool, that JSON appears verbatim as a line in the
+    stream — parsing it gives us the task_dir created by THIS process,
+    not a sibling batch's or manual session's dir.
+
+    This is "process-identity-level" binding: claude's stdout is owned
+    by THIS subprocess, so a JSON line we read here came from a
+    `scaffold.py` invocation made by THIS run. The snapshot-diff
+    fallback (`pick_new_task_dir`) still runs for cases where scaffold
+    didn't print (e.g. `--resume`, future output-format changes, or
+    claude wrapping the line in unexpected text).
+
+    Returns None when the line isn't JSON, isn't a dict, doesn't have
+    the success shape, or points at a path that no longer exists on
+    disk."""
+    s = line.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return None
+    try:
+        d = json.loads(s)
+    except json.JSONDecodeError:
+        return None
+    if (not isinstance(d, dict)
+            or d.get("status") != "ok"
+            or not isinstance(d.get("task_dir"), str)):
+        return None
+    p = Path(d["task_dir"])
+    return p if p.is_dir() else None
+
+
 def snapshot_task_dirs() -> set[Path]:
     """Snapshot the current set of `ar_tasks/<dir>` entries.
 

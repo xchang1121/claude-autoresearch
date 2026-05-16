@@ -286,18 +286,6 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
     interrupted = False
     try:
         while True:
-            # Bind task_dir as soon as scaffold creates it — diff against
-            # pre-snapshot, take the new dir matching `<op>_*`. Mid-run
-            # binding (vs end-of-run only) lets the batch monitor read
-            # `case.task_dir` from progress.json while the case is still
-            # running, instead of falling back to the repo-wide active
-            # pointer.
-            if bound_task_dir is None:
-                td = mf.pick_new_task_dir(pre_task_dirs, op)
-                if td is not None:
-                    bound_task_dir = td
-                    mf.update_case(batch_dir, op,
-                                   task_dir=str(td.resolve()))
             try:
                 # Short poll so a silent claude still hits the wall-clock
                 # check below within 5s of crossing the deadline.
@@ -315,11 +303,34 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
                 if reader_done.is_set() and line_q.empty():
                     # Reader saw EOF and queue is fully drained.
                     break
+                # No new line this tick — try the snapshot-diff fallback
+                # in case the scaffold result line was wrapped / escaped
+                # by claude's `--output-format text` rendering and never
+                # appeared as a standalone JSON line.
+                if bound_task_dir is None:
+                    td = mf.pick_new_task_dir(pre_task_dirs, op)
+                    if td is not None:
+                        bound_task_dir = td
+                        mf.update_case(batch_dir, op,
+                                       task_dir=str(td.resolve()))
                 continue
             sys.stdout.write(line)
             sys.stdout.flush()
             log_fp.write(line)
             log_fp.flush()
+            # Process-identity-level bind: scaffold.py's terminating
+            # success JSON `{"task_dir": "...", "status": "ok"}` shows
+            # up as a line in THIS claude subprocess's stdout — so
+            # parsing it can never confuse this batch's dir with a
+            # sibling batch's dir even when both scaffolds run the same
+            # op at the same instant. Authoritative when present; the
+            # snapshot-diff above is the fallback.
+            if bound_task_dir is None:
+                td = mf.parse_scaffold_result_line(line)
+                if td is not None:
+                    bound_task_dir = td
+                    mf.update_case(batch_dir, op,
+                                   task_dir=str(td.resolve()))
         proc.wait(timeout=30)
     except KeyboardInterrupt:
         interrupted = True
