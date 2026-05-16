@@ -259,6 +259,22 @@ def repo_root() -> Path:
 
 
 _SCAFFOLD_RESULT_STATUSES = frozenset({"ok", "error"})
+_SCAFFOLD_CREATED_MARKER = "[scaffold] Task directory created: "
+
+
+def parse_scaffold_created_line(line: str) -> Path | None:
+    """Early identity bind: scaffold prints
+    `[scaffold] Task directory created: <abs>` on stderr right after
+    mkdir, BEFORE baseline runs (which can stay silent >5s and would
+    otherwise let the mid-run mtime fallback race a sibling batch)."""
+    idx = line.find(_SCAFFOLD_CREATED_MARKER)
+    if idx < 0:
+        return None
+    path = line[idx + len(_SCAFFOLD_CREATED_MARKER):].strip()
+    if not path:
+        return None
+    p = Path(path)
+    return p if p.is_dir() else None
 
 
 def parse_scaffold_result_line(line: str) -> Path | None:

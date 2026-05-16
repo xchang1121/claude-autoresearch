@@ -299,18 +299,19 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
                     break
                 if reader_done.is_set() and line_q.empty():
                     break
-                if bound_task_dir is None:
-                    td = mf.pick_new_task_dir(pre_task_dirs, op)
-                    if td is not None:
-                        bound_task_dir = td
-                        mf.update_case(batch_dir, op, task_dir=str(td.resolve()))
+                # No mid-run mtime fallback: baseline.py runs `eval_wrapper`
+                # via `subprocess.run(capture_output=True)`, so >5s silent
+                # ticks are normal. Falling back to mtime here would race
+                # a sibling same-op batch. Identity binding only during the
+                # run; pick_new_task_dir is the post-process safety net.
                 continue
             sys.stdout.write(line)
             sys.stdout.flush()
             log_fp.write(line)
             log_fp.flush()
             if bound_task_dir is None:
-                td = mf.parse_scaffold_result_line(line)
+                td = (mf.parse_scaffold_created_line(line)
+                      or mf.parse_scaffold_result_line(line))
                 if td is not None:
                     bound_task_dir = td
                     mf.update_case(batch_dir, op, task_dir=str(td.resolve()))
