@@ -1,37 +1,26 @@
 """Local eval — direct subprocess transport for --devices.
 
 Mirrors the worker server's /run endpoint but in-process: extract the
-tar.gz, run the SINGLE auto-generated `eval_<op>.py` script (which does
-verify + profile_gen + profile_base in one Python process so JIT and
-autotune state stay warm), read `eval_result.json` from the extracted
-dir, return the same dict shape the worker does.
+tar.gz via the shared `safe_extract`, run the SINGLE generated
+`eval_<op>.py` script (verify + profile_gen + profile_base in one
+Python process so JIT and autotune state stay warm), read
+`eval_result.json` from the extracted dir, return the dict shape both
+transports share.
 """
 from __future__ import annotations
 
-import io
-import json
 import logging
 import os
 import subprocess
 import sys
-import tarfile
 import tempfile
 from typing import Optional
 
+from .eval_runner import (
+    build_response, env_for, read_sidecar, safe_extract,
+)
+
 logger = logging.getLogger(__name__)
-
-
-def _env_for(device_id: int,
-             override_base_us: Optional[float] = None) -> dict:
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    env["DEVICE_ID"] = str(device_id)
-    env["ASCEND_RT_VISIBLE_DEVICES"] = str(device_id)
-    env["CUDA_VISIBLE_DEVICES"] = str(device_id)
-    env["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # Windows libiomp5 double-load
-    if override_base_us is not None and override_base_us > 0:
-        env["AR_OVERRIDE_BASE_TIME_US"] = f"{override_base_us:.6f}"
-    return env
 
 
 def _run_script(workdir: str, script: str, env: dict,
@@ -86,36 +75,14 @@ def local_eval(package_bytes: bytes, op_name: str, timeout: int,
                override_base_us: Optional[float] = None) -> dict:
     """Extract package, run eval_<op>.py, return the worker /run shape:
         {"device_id", "returncode", "log", "eval_result"}.
-    `eval_result` is the parsed contents of `eval_result.json`, or None
-    if the script crashed before writing it.
     """
     with tempfile.TemporaryDirectory(prefix=f"ar_local_{op_name}_") as tmp:
         try:
-            with tarfile.open(fileobj=io.BytesIO(package_bytes), mode="r:gz") as tar:
-                tar.extractall(tmp)
+            safe_extract(package_bytes, tmp)
         except Exception as e:
-            return {
-                "device_id": device_id,
-                "returncode": 1,
-                "log": f"extract failed: {e}",
-                "eval_result": None,
-            }
+            return build_response(
+                device_id, 1, f"extract failed: {e}", None)
 
-        env = _env_for(device_id, override_base_us=override_base_us)
+        env = env_for(device_id, override_base_us=override_base_us)
         rc, log = _run_script(tmp, f"eval_{op_name}.py", env, timeout)
-
-        eval_result = None
-        sidecar = os.path.join(tmp, "eval_result.json")
-        if os.path.isfile(sidecar):
-            try:
-                with open(sidecar, "r", encoding="utf-8") as f:
-                    eval_result = json.load(f)
-            except Exception as e:
-                logger.warning("local_eval: failed to parse sidecar: %s", e)
-
-        return {
-            "device_id": device_id,
-            "returncode": rc,
-            "log": log,
-            "eval_result": eval_result,
-        }
+        return build_response(device_id, rc, log, read_sidecar(tmp))

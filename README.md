@@ -153,13 +153,25 @@ curl http://127.0.0.1:9111/api/v1/status
 
 1. `Model(*get_init_inputs())(*get_inputs())` 拿 ref
 2. `ModelNew.forward()` 拿实测
-3. `torch.allclose` 比对，输出 `max_abs` / `max_rel` / `bad_elems(%)`
+3. AND-of-maxima 检查（对齐 `akg/akg_agents` 的精度标准）：
+
+```
+abs_diff = |ref - sol|
+rel_diff = abs_diff / (|ref| + 1e-8)
+PASS iff  max(abs_diff) <= atol  AND  max(rel_diff) <= rtol
+```
+
+solution 端任何 NaN/Inf 直接判 fail；非 Tensor 输出也判 fail。这比
+`torch.allclose` 的逐元素和式 `|a-b| <= atol + rtol*|b|` 更严，因为
+不允许"单个元素用绝对误差换相对误差"。
 
 容差固定在 [`utils/correctness.py`](.autoresearch/scripts/utils/correctness.py)：
 `DEFAULT_ATOL = DEFAULT_RTOL = 1e-2`。要调精度直接改这一个文件。
 
-ref 时延（用于 speedup 计算）由 `/api/v1/profile` 单独测，与 verify 解耦，
-dashboard 顶栏始终显示 PyTorch baseline。
+ref 时延（用于 speedup 计算）和 kernel 时延都在 worker 端单个
+`eval_<op>.py` 子进程里跑（verify warm 了 JIT/autotune 缓存，profile
+直接复用），结果落在 `eval_result.json` sidecar 里，不经 stdout。
+单一 endpoint：`POST /api/v1/run`。
 
 ## 输出
 

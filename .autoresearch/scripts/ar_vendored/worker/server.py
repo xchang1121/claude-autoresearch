@@ -4,34 +4,43 @@ Endpoints:
     GET  /api/v1/status   server-side hardware info (no auth, no body)
     POST /api/v1/run      verify + profile in one round trip
 
-The client ships a tar.gz built by package_builder. We extract it,
-pick a device slot from an internal asyncio.Queue, run the SINGLE
-auto-generated `eval_<op>.py` as one subprocess (verify + profile_gen +
-profile_base run in-process there so the JIT/autotune cache stays
-warm), then read `eval_result.json` from the extracted dir and return
-it together with stdout+stderr to the client.
+The client ships a tar.gz built by package_builder. We `safe_extract`
+it (rejecting path-traversal), pick a device slot from an internal
+asyncio.Queue, run the SINGLE auto-generated `eval_<op>.py` as one
+subprocess (verify + profile_gen + profile_base run in-process there
+so the JIT/autotune cache stays warm), then read `eval_result.json`
+from the extracted dir and return it with stdout+stderr to the client.
 
-No acquire/release endpoints, no DevicePool class — device assignment
-is internal to /run, so the client can't bake a wrong device id into
-the package and the pool never decrements for slots that were never
-reserved.
+No acquire/release endpoints, no DevicePool — device assignment is
+internal to /run, so the client can't bake a wrong device id into the
+package and the pool never decrements for slots that were never
+reserved. Extract / env / sidecar helpers are imported from
+`utils.eval_runner` so this transport can't drift from the local one.
 """
 from __future__ import annotations
 
 import asyncio
-import io
-import json
 import logging
 import os
 import signal
 import sys
-import tarfile
-import tempfile
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 import uvicorn
+
+# ar_vendored/worker/server.py → .autoresearch/scripts/ is two parents up.
+# Insert that on sys.path so we can import the shared runner helpers; the
+# worker may launch from any cwd (foreground, daemon, tmux).
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent.parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from utils.eval_runner import (  # noqa: E402
+    build_response, env_for, read_sidecar, safe_extract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,10 +102,9 @@ async def run(
     pool, exported as DEVICE_ID env to the spawned script, and released
     in the finally block — clients cannot leak a slot.
 
-    `override_base_us`: sticky baseline. When the caller already has a
-    measured PyTorch reference time, pass it here and the generated
-    eval script skips profile_base — saves one full per-shape benchmark
-    pass per round.
+    `override_base_us`: sticky baseline. When the caller has a measured
+    PyTorch reference time, pass it here and the generated eval script
+    skips profile_base — saves one full per-shape benchmark pass.
     """
     if "queue" not in _state:
         raise HTTPException(status_code=503, detail="worker not initialised")
@@ -117,48 +125,17 @@ async def run(
 async def _run_eval(package_bytes: bytes, task_id: str, op_name: str,
                     timeout: int, device_id: int,
                     override_base_us: Optional[float] = None) -> dict:
+    import tempfile
     with tempfile.TemporaryDirectory(prefix=f"ar_run_{task_id}_") as tmp:
         try:
-            with tarfile.open(fileobj=io.BytesIO(package_bytes), mode="r:gz") as tar:
-                tar.extractall(tmp)
+            safe_extract(package_bytes, tmp)
         except Exception as e:
-            return {
-                "device_id": device_id,
-                "log": f"extract failed: {e}",
-                "eval_result": None,
-            }
+            return build_response(
+                device_id, 1, f"extract failed: {e}", None)
 
-        env = _env_for(device_id)
-        if override_base_us is not None and override_base_us > 0:
-            env["AR_OVERRIDE_BASE_TIME_US"] = f"{override_base_us:.6f}"
-
+        env = env_for(device_id, override_base_us=override_base_us)
         rc, log = await _run_script(tmp, f"eval_{op_name}.py", env, timeout)
-
-        eval_result = None
-        sidecar = os.path.join(tmp, "eval_result.json")
-        if os.path.isfile(sidecar):
-            try:
-                with open(sidecar, "r", encoding="utf-8") as f:
-                    eval_result = json.load(f)
-            except Exception as e:
-                logger.warning("[%s] failed to parse sidecar: %s", task_id, e)
-
-        return {
-            "device_id": device_id,
-            "returncode": rc,
-            "log": log,
-            "eval_result": eval_result,
-        }
-
-
-def _env_for(device_id: int) -> dict:
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    env["DEVICE_ID"] = str(device_id)
-    env["ASCEND_RT_VISIBLE_DEVICES"] = str(device_id)
-    env["CUDA_VISIBLE_DEVICES"] = str(device_id)
-    env["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # Windows libiomp5 double-load
-    return env
+        return build_response(device_id, rc, log, read_sidecar(tmp))
 
 
 async def _run_script(workdir: str, script: str, env: dict,

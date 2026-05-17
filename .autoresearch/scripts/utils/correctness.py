@@ -74,9 +74,18 @@ def compare_outputs(out_ref: list, out_new: list,
         }
 
     for i, (r, n) in enumerate(zip(out_ref, out_new)):
-        # Only tensor pairs participate — autoresearch's eval never
-        # materializes scalar-only outputs through this path.
-        if not (isinstance(r, torch.Tensor) and isinstance(n, torch.Tensor)):
+        # Both sides must be tensors. Silently skipping non-tensor pairs
+        # used to let scalar / numpy / mixed-structure outputs falsely
+        # classify as PASS (the loop body would never run on them). Fail
+        # explicitly so a model misconfiguration surfaces instead of
+        # quietly producing a green eval round.
+        if not isinstance(r, torch.Tensor) or not isinstance(n, torch.Tensor):
+            all_close = False
+            diagnostics.append(
+                f"out{i}: non-tensor output not supported "
+                f"(ref={type(r).__name__}, new={type(n).__name__}); "
+                f"both outputs must be torch.Tensor instances"
+            )
             continue
 
         rf = r.detach().cpu().float()

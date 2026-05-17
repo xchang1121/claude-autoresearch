@@ -73,11 +73,18 @@ def _adapter_benchmark_body(adapter, config: TaskConfig, mode: str,
     L2-cache-clear ops out of the timing).
     """
     backend = "" if mode == "base" else (config.backend or "")
+    # framework_model="impl_model" matches the local variable name our
+    # generated `_bench_*` functions receive. tilelang_npuir and swft both
+    # reference {framework_model} verbatim in their adapter templates; if
+    # we leave the default (None), tilelang_npuir emits `return None(*inputs)`
+    # and swft emits a call to the undefined name `framework_model`, both
+    # of which crash the profile pass.
     raw = adapter.benchmark_impl(
         impl_func_name="TargetModel", inputs="inputs",
         warmup=warmup, runs=repeats,
         backend=backend, op_name=config.name,
         case_idx=0, device_id=0,
+        framework_model="impl_model",
     )
     if raw and raw.strip():
         body = textwrap.indent(textwrap.dedent(raw), "    ")
@@ -504,15 +511,21 @@ except Exception as e:
 if OVERRIDE_BASE_US is not None and OVERRIDE_BASE_US > 0:
     print(f"[eval] sticky baseline override = {{OVERRIDE_BASE_US:.2f}} us; "
           f"skipping profile_base", file=sys.stderr)
+    # NOTE: the override is a single AGGREGATE baseline_metric stored in
+    # progress.json — we do NOT have real per-shape ref timings. Don't
+    # synthesize a per_shape array by copying the aggregate to every
+    # case: eval_client would then feed those fake per-shape ratios
+    # into the geomean and the reported speedup_vs_ref would diverge
+    # from the honest base_time / gen_time ratio. By omitting per_shape
+    # entirely, eval_client's per_base=None gate falls back to the
+    # scalar speedup formula.
     result["profile_base"] = {{
         "avg_time_us": OVERRIDE_BASE_US,
         "execution_time_us": OVERRIDE_BASE_US,
         "execution_time_ms": OVERRIDE_BASE_US / 1000,
         "warmup_times": 0, "run_times": 0,
         "num_cases": num_cases,
-        "per_shape": [{{"idx": i, "case_desc": _describe_case(c, None),
-                       "avg_time_us": OVERRIDE_BASE_US, "method": "sticky"}}
-                      for i, c in enumerate(cases_cpu)],
+        "sticky": True,
     }}
 else:
     try:

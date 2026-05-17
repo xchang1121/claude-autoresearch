@@ -116,10 +116,26 @@ def _worker_status(worker_url: str, timeout: float = 5.0) -> Optional[dict]:
 
 
 def _select_worker(urls: list[str]) -> Optional[str]:
-    for url in urls:
-        if _worker_status(url) is not None:
-            return url
-    return None
+    """Prefer the reachable worker with the most free device slots.
+
+    `free` is reported by /api/v1/status. Picking by max-free spreads
+    parallel agents across workers instead of piling them onto the
+    first one in the list (which would queue while peers sit idle).
+    Tie-break by the URL's position in the caller-supplied list so
+    deterministic behaviour for single-worker setups is unchanged.
+    """
+    best: Optional[tuple[int, int, str]] = None  # (-free, index, url)
+    for idx, url in enumerate(urls):
+        status = _worker_status(url)
+        if status is None:
+            continue
+        free = status.get("free", 0)
+        if not isinstance(free, int):
+            free = 0
+        candidate = (-free, idx, url)
+        if best is None or candidate < best:
+            best = candidate
+    return best[2] if best is not None else None
 
 
 def _multipart_post(url: str, fields: dict, files: dict, timeout: float) -> dict:
