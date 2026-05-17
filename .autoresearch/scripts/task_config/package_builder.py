@@ -261,7 +261,9 @@ except Exception as e:
 # Per-case loop with ref-side vs kernel-side blame. The first failure
 # decides error_source — ref-side wins over kernel-side because a broken
 # ref invalidates the entire eval regardless of kernel correctness.
-from correctness import compare_outputs_per_case
+from correctness import (
+    compare_outputs_per_case, DEFAULT_ATOL, DEFAULT_RTOL,
+)
 
 out_ref_per_case = []
 out_new_per_case = []
@@ -314,7 +316,8 @@ if verify_error_source is not None:
 else:
     try:
         cmp_result = compare_outputs_per_case(
-            out_ref_per_case, out_new_per_case)
+            out_ref_per_case, out_new_per_case,
+            DEFAULT_ATOL, DEFAULT_RTOL)
 
         for d in cmp_result["diagnostics"]:
             print(d, file=sys.stderr)
