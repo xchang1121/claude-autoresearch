@@ -50,18 +50,14 @@ def main():
 
     if worker_urls or config.worker_urls:
         urls = worker_urls or config.worker_urls
-        print(f"[eval] Running remote eval for {config.name} via {urls[0]}"
+        print(f"[eval] remote eval for {config.name} via {urls[0]}"
               + (f" (+{len(urls)-1} fallback)" if len(urls) > 1 else ""),
               file=sys.stderr)
     else:
-        # Probe the local backend up front so the log line tells the user
-        # exactly why this run will / won't proceed locally.
-        from utils.local_worker import detect_local_backend
-        backend_key = (config.backend or "cpu").lower()
-        ok, why = detect_local_backend(backend_key)
-        status = "available" if ok else "UNAVAILABLE"
-        print(f"[eval] Running local ({backend_key}) eval for {config.name} "
-              f"— backend {status}: {why}", file=sys.stderr)
+        dev = args.device_id if args.device_id is not None else (
+            config.devices[0] if config.devices else None)
+        print(f"[eval] local eval for {config.name} (device={dev})",
+              file=sys.stderr)
 
     result = run_eval(task_dir, config, device_id=args.device_id, worker_urls=worker_urls)
 

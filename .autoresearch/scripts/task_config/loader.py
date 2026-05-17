@@ -68,15 +68,12 @@ class TaskConfig:
     # Agent budget
     max_rounds: int = 30
 
-    # Remote worker
+    # Remote eval path: ship the package to one of these worker URLs.
     worker_urls: list = field(default_factory=list)
-    """Worker Service URLs, e.g. ["http://127.0.0.1:9111"].
-    When non-empty, eval is routed to remote workers instead of local subprocess."""
 
-    # Local devices
+    # Local eval path: run verify/profile as a direct subprocess on this
+    # device id (devices[0]). When worker_urls is non-empty it wins.
     devices: list = field(default_factory=list)
-    """Device IDs for local eval (written by scaffold from --devices). When
-    non-empty, run_local_eval uses devices[0] as default device_id."""
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +116,7 @@ def load_task_config(task_dir: str) -> Optional[TaskConfig]:
     if isinstance(worker_urls, str):
         worker_urls = [u.strip() for u in worker_urls.split(",") if u.strip()]
 
-    # Parse devices list. Accepts [5] / "5" / "0,1,2".
+    # Devices list. Accepts [5] / "5" / "0,1,2".
     devices_raw = raw.get("devices", [])
     if isinstance(devices_raw, int):
         devices = [devices_raw]

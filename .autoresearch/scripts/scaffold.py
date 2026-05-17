@@ -12,17 +12,13 @@ Zero external dependency. Creates a self-contained task directory with:
   - .git/ (baseline commit)
 
 Usage:
-    # NOTE: --devices values below are placeholders; pass the actual free
-    # device id at invocation time.
+    # Local eval (direct subprocess, no HTTP). --devices is the device id.
+    python .autoresearch/scripts/scaffold.py --ref reference.py --kernel kernel.py \\
+        --op-name my_op --dsl triton_ascend --devices 0
 
-    # Local eval (arch auto-derived via npu-smi):
-    python .autoresearch/scripts/scaffold.py --ref reference.py --kernel kernel.py --op-name my_op --dsl triton_ascend --devices <DEV>
-
-    # Remote worker (arch fetched from /api/v1/status):
-    python .autoresearch/scripts/scaffold.py --ref reference.py --kernel kernel.py --op-name my_op --dsl triton_ascend --worker-url 127.0.0.1:9111
-
-    # Custom output directory:
-    python .autoresearch/scripts/scaffold.py --ref reference.py --kernel kernel.py --op-name my_op --dsl triton_cuda --devices <DEV> --output-dir /tmp/tasks
+    # Remote eval (ship package to a worker; localhost is fine).
+    python .autoresearch/scripts/scaffold.py --ref reference.py --kernel kernel.py \\
+        --op-name my_op --dsl triton_ascend --worker-url 127.0.0.1:9001
 
 Output (last line of stdout):
     {"task_dir": "/absolute/path/to/task_dir", "status": "ok"}
@@ -195,10 +191,11 @@ def _make_arg_parser() -> argparse.ArgumentParser:
                              "(default: torch).")
     parser.add_argument("--devices", default=None,
                         help="Comma-separated device IDs for local eval "
-                             "(e.g. '5' or '0,1,2,3'). Mutually exclusive "
-                             "with --worker-url.")
+                             "(direct subprocess, no HTTP). Mutually "
+                             "exclusive with --worker-url.")
     parser.add_argument("--worker-url", default=None,
-                        help="Remote worker URL(s), comma-separated. "
+                        help="Worker URL(s), comma-separated. Ships the "
+                             "package to a worker; localhost is fine. "
                              "Mutually exclusive with --devices.")
     parser.add_argument("--max-rounds", type=int, default=20)
     parser.add_argument("--eval-timeout", type=int, default=120)
@@ -263,8 +260,8 @@ def main():
     if args.devices and args.worker_url:
         print(json.dumps({"status": "error",
                           "error": "--devices and --worker-url are mutually "
-                                   "exclusive. Pick one (--devices for local "
-                                   "eval, --worker-url for remote worker)."}))
+                                   "exclusive. Pick one (--devices = local "
+                                   "subprocess; --worker-url = HTTP worker)."}))
         sys.exit(1)
 
     if args.devices:
@@ -310,7 +307,8 @@ def main():
     else:
         print(json.dumps({"status": "error",
                           "error": "must pass exactly one of --devices "
-                                   "(local eval) or --worker-url (remote)."}))
+                                   "(local subprocess) or --worker-url (HTTP "
+                                   "worker)."}))
         sys.exit(1)
 
     if not args.op_name:
@@ -347,8 +345,8 @@ def main():
         dsl=args.dsl,
         framework=args.framework,
         backend=args.backend,
-        devices=devices_list,
         arch=args.arch,
+        devices=devices_list,
         worker_urls=worker_urls,
         max_rounds=args.max_rounds,
         eval_timeout=args.eval_timeout,

@@ -61,7 +61,7 @@ def _get_dsl_adapter(dsl: Optional[str]):
 # Verify script template
 # ---------------------------------------------------------------------------
 
-def _gen_verify_script(config: TaskConfig, device_id: int = 0) -> str:
+def _gen_verify_script(config: TaskConfig) -> str:
     """Generate verify_{op_name}.py for the Worker Service.
 
     Reference outputs are re-computed on the device every round (no .pt
@@ -117,7 +117,7 @@ import os, sys, json, traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 device_type = "{device}"
-device_id = int(os.environ.get("DEVICE_ID", {device_id}))
+device_id = int(os.environ.get("DEVICE_ID", "0"))
 
 if device_type == "npu":
     os.environ.setdefault("ASCEND_RT_VISIBLE_DEVICES", str(device_id))
@@ -286,26 +286,15 @@ except Exception as e:
 # Profile script template
 # ---------------------------------------------------------------------------
 
-def _gen_profile_script(config: TaskConfig, device_id: int = 0,
+def _gen_profile_script(config: TaskConfig,
                         mode: str = "generation",
                         warmup: int = 10, repeats: int = 100) -> str:
     """Generate profile_{op_name}_{mode}.py, adapter-driven.
 
-    Structure:
-      1. Outer skeleton (device setup, model instantiation) — uniform.
-      2. Adapter-supplied `get_import_statements` + `get_special_setup_code`
-         — DSL-specific imports and one-time patches (triton autotune,
-         tilelang compile).
-      3. Adapter-supplied `benchmark_impl` — the timing block. For
-         triton_ascend this wraps `profiler_npu` (torch_npu.profiler); for
-         triton_cuda / tilelang_cuda it's `triton.testing.do_bench`; for
-         ascendc / cuda_c it's empty (those DSLs rely on msprof/nsys, routed
-         at local_worker.py, not here).
-      4. Fallback timing block — used when adapter's benchmark_impl is
-         empty or crashes at runtime.
-
-    mode='base' profiles Model (reference); mode='generation' profiles
-    ModelNew (kernel).
+    The adapter's `benchmark_impl` does the timing (profiler_npu for Ascend,
+    triton.testing.do_bench for CUDA / Triton); when it's empty we fall back
+    to a do_bench wrapper. mode='base' profiles Model (reference);
+    mode='generation' profiles ModelNew (kernel).
     """
     import textwrap
 
@@ -326,32 +315,23 @@ def _gen_profile_script(config: TaskConfig, device_id: int = 0,
     dsl_imports = adapter.get_import_statements(config.framework or "torch")
     dsl_setup = adapter.get_special_setup_code() if hasattr(adapter, "get_special_setup_code") else ""
 
-    # Adapter's benchmark_impl returns a code string indented 8-space for
-    # upstream's kernel_verifier (which calls it inside a `for case` loop).
-    # Dedent to column 0, then re-indent at 4-space for our function body.
-    #
-    # mode='base' force-routes through the adapter's `if backend=="ascend"`
-    # else-branch (triton.testing.do_bench) by passing backend="". The
-    # if-branch uses profiler_npu with dsl="triton_ascend" + a triton L2-
-    # cache-clear kernel; running that against the PyTorch Model corrupts
-    # NPU state and crashes the next aclnnArange with aivec error. The
-    # else-branch (do_bench) works for both Triton kernels and PyTorch.
-    # mode='generation' keeps the original backend so kernel timing uses
-    # profiler_npu (more accurate, filters L2-cache-clear ops).
+    # mode='base' force-routes the adapter's else-branch (triton.testing.
+    # do_bench) by passing backend="". The if-branch uses profiler_npu with
+    # a triton L2-cache-clear kernel; running that against the PyTorch
+    # Model corrupts NPU state and crashes the next aclnnArange with aivec
+    # error. mode='generation' keeps the original backend so kernel timing
+    # uses profiler_npu (more accurate, filters L2-cache-clear ops).
     benchmark_backend = "" if mode == "base" else (config.backend or "")
     raw = adapter.benchmark_impl(
         impl_func_name="TargetModel", inputs="inputs",
         warmup=warmup, runs=repeats,
         backend=benchmark_backend, op_name=config.name,
-        case_idx=0, device_id=device_id,
+        case_idx=0, device_id=0,
     )
     if raw and raw.strip():
         benchmark_body = textwrap.indent(textwrap.dedent(raw), "    ")
         benchmark_source = f"adapter ({type(adapter).__name__})"
     else:
-        # Adapter had no benchmark (ascendc / cuda_c): do_bench fallback so
-        # the local subprocess still produces a timing. Real msprof/nsys
-        # goes through local_worker.py when backend matches.
         benchmark_body = textwrap.indent(textwrap.dedent(f"""\
             import triton.testing
             def _bench():
@@ -380,7 +360,7 @@ import os, sys, json, math, time, traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 device_type = "{device}"
-device_id = int(os.environ.get("DEVICE_ID", {device_id}))
+device_id = int(os.environ.get("DEVICE_ID", "0"))
 
 if device_type == "npu":
     os.environ.setdefault("ASCEND_RT_VISIBLE_DEVICES", str(device_id))
@@ -529,7 +509,7 @@ def _exclude_pycache(tarinfo: tarfile.TarInfo):
     return tarinfo
 
 
-def _build_package(task_dir: str, config: TaskConfig, device_id: int = 0) -> bytes:
+def _build_package(task_dir: str, config: TaskConfig) -> bytes:
     """Build a tar.gz package with worker-compatible scripts.
 
     Generates and includes:
@@ -538,8 +518,8 @@ def _build_package(task_dir: str, config: TaskConfig, device_id: int = 0) -> byt
       - profile_{op_name}_generation.py (kernel timing)
       - kernel.py, reference.py, and any support .py files
 
-    Reference outputs are never shipped in the tarball and never cached on
-    the worker — verify_<op>.py recomputes Model on every round.
+    Device id is NOT baked in — the worker exports DEVICE_ID at run time
+    and the generated scripts pick it up from env.
     """
     op_name = config.name
     buf = io.BytesIO()
@@ -591,11 +571,11 @@ def _build_package(task_dir: str, config: TaskConfig, device_id: int = 0) -> byt
                 tar.add(lib_src, arcname=lib_name)
 
         _add_script(f"verify_{op_name}.py",
-                     _gen_verify_script(config, device_id))
+                     _gen_verify_script(config))
         _add_script(f"profile_{op_name}_base.py",
-                     _gen_profile_script(config, device_id, mode="base"))
+                     _gen_profile_script(config, mode="base"))
         _add_script(f"profile_{op_name}_generation.py",
-                     _gen_profile_script(config, device_id, mode="generation"))
+                     _gen_profile_script(config, mode="generation"))
 
         # Bundle the vendored adapter/profiler tree at tarball root. Generated
         # verify/profile scripts prepend sys.path with their own dir, so
