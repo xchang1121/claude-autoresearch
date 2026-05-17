@@ -73,17 +73,28 @@ def _adapter_benchmark_body(adapter, config: TaskConfig, mode: str,
     L2-cache-clear ops out of the timing).
     """
     backend = "" if mode == "base" else (config.backend or "")
-    # framework_model="impl_model" matches the local variable name our
-    # generated `_bench_*` functions receive. tilelang_npuir and swft both
-    # reference {framework_model} verbatim in their adapter templates; if
-    # we leave the default (None), tilelang_npuir emits `return None(*inputs)`
-    # and swft emits a call to the undefined name `framework_model`, both
-    # of which crash the profile pass.
+    # framework_model="impl_model" — adapter templates reference {framework_model}
+    # verbatim; tilelang_npuir / swft would otherwise emit `return None(*inputs)`
+    # or a call to the undefined name `framework_model`.
+    #
+    # case_idx="{case_idx}" — adapters that bake the index into a filename or
+    # output directory (triton_ascend.autotune_info_case_{case_idx}.json,
+    # pypto.prof_generation_output_case{case_idx}) embed `{case_idx}` inside
+    # an f-string LITERAL in their template. Passing the literal string
+    # "{case_idx}" makes the outer adapter f-string emit `{case_idx}` verbatim
+    # into the inner f-string slot — the generated code becomes
+    # `f"...case_{case_idx}.json"`, which resolves at runtime against the
+    # `case_idx` parameter our `_bench_*` functions receive from the
+    # `_run_profile` per-case loop. For DSLs that ignore case_idx the
+    # placeholder is harmless. Was hardcoded to 0 before: triton_ascend
+    # autotune metadata got clobbered across shapes; pypto reused the same
+    # persistent output dir across shapes, a real measurement risk per its
+    # own template comment.
     raw = adapter.benchmark_impl(
         impl_func_name="TargetModel", inputs="inputs",
         warmup=warmup, runs=repeats,
         backend=backend, op_name=config.name,
-        case_idx=0, device_id=0,
+        case_idx="{case_idx}", device_id=0,
         framework_model="impl_model",
     )
     if raw and raw.strip():
@@ -381,8 +392,14 @@ _empty_cache()
 # Two adapter-derived bodies; gen uses real backend (profiler_npu / do_bench),
 # base force-routes through do_bench so profiler_npu's L2-cache-clear
 # kernel doesn't corrupt the PyTorch Model state.
+#
+# `case_idx` is the per-shape index from the enclosing for-loop. Adapter
+# templates that bake the index into output dirs / filenames (pypto's
+# prof_generation_output_case{{case_idx}}, triton_ascend's
+# autotune_info_case_{{case_idx}}.json) reference this local name through
+# an f-string embedded in the body — see package_builder docstring.
 
-def _bench_gen(impl_model, inputs):
+def _bench_gen(impl_model, inputs, case_idx):
     execution_time_us = None
     execution_time_ms = None
     method = None
@@ -392,7 +409,7 @@ def _bench_gen(impl_model, inputs):
     return execution_time_us, method
 
 
-def _bench_base(impl_model, inputs):
+def _bench_base(impl_model, inputs, case_idx):
     execution_time_us = None
     execution_time_ms = None
     method = None
@@ -440,7 +457,7 @@ def _run_profile(target_cls, bench_fn, mode_label):
                 impl_model.eval()
             inputs = [x.to(device) if hasattr(x, "to") else x for x in case]
             try:
-                avg_us, method = bench_fn(impl_model, inputs)
+                avg_us, method = bench_fn(impl_model, inputs, idx)
                 if (avg_us is None or avg_us <= 0
                         or avg_us == float("inf")):
                     raise RuntimeError(
