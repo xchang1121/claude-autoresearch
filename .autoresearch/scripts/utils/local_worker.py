@@ -1,16 +1,10 @@
 """Local eval — direct subprocess transport for --devices.
 
 Mirrors the worker server's /run endpoint but in-process: extract the
-tar.gz from package_builder, run verify_<op>.py + profile_<op>_{base,
-generation}.py with DEVICE_ID exported, collect JSON artifacts, return
-a dict shaped exactly like the worker /run response so the eval_client
-result assembler is transport-agnostic.
-
-No msprof/nsys CLI wrapping, no roofline. The DSL adapter's
-benchmark_impl (profiler_npu for Ascend, do_bench for CUDA/Triton) is
-what gives accurate per-shape timing — it's embedded in the generated
-profile script, runs inside the same subprocess, and produces the
-*_profile_result.json files this module reads back.
+tar.gz, run the SINGLE auto-generated `eval_<op>.py` script (which does
+verify + profile_gen + profile_base in one Python process so JIT and
+autotune state stay warm), read `eval_result.json` from the extracted
+dir, return the same dict shape the worker does.
 """
 from __future__ import annotations
 
@@ -27,13 +21,16 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def _env_for(device_id: int) -> dict:
+def _env_for(device_id: int,
+             override_base_us: Optional[float] = None) -> dict:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["DEVICE_ID"] = str(device_id)
     env["ASCEND_RT_VISIBLE_DEVICES"] = str(device_id)
     env["CUDA_VISIBLE_DEVICES"] = str(device_id)
     env["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # Windows libiomp5 double-load
+    if override_base_us is not None and override_base_us > 0:
+        env["AR_OVERRIDE_BASE_TIME_US"] = f"{override_base_us:.6f}"
     return env
 
 
@@ -84,39 +81,14 @@ def _run_script(workdir: str, script: str, env: dict,
     return rc, log.strip()
 
 
-def _collect_artifacts(directory: str) -> dict[str, str]:
-    artifacts: dict[str, str] = {}
-    for root, _dirs, files in os.walk(directory):
-        for fname in files:
-            if not (fname.endswith(".json") or fname.endswith(".jsonl")):
-                continue
-            full = os.path.join(root, fname)
-            rel = os.path.relpath(full, directory).replace("\\", "/")
-            try:
-                with open(full, "r", encoding="utf-8") as f:
-                    artifacts[rel] = f.read()
-            except Exception as e:
-                logger.warning("cannot read artifact %s: %s", rel, e)
-    return artifacts
-
-
-def _avg_us(artifacts: dict[str, str], key: str) -> Optional[float]:
-    raw = artifacts.get(key)
-    if not raw:
-        return None
-    try:
-        v = json.loads(raw).get("avg_time_us")
-    except Exception:
-        return None
-    if isinstance(v, (int, float)) and 0 < v < float("inf"):
-        return float(v)
-    return None
-
-
 def local_eval(package_bytes: bytes, op_name: str, timeout: int,
-               device_id: int) -> dict:
-    """Run verify + profile (base + generation) and return the same dict
-    shape as the worker /run endpoint."""
+               device_id: int,
+               override_base_us: Optional[float] = None) -> dict:
+    """Extract package, run eval_<op>.py, return the worker /run shape:
+        {"device_id", "returncode", "log", "eval_result"}.
+    `eval_result` is the parsed contents of `eval_result.json`, or None
+    if the script crashed before writing it.
+    """
     with tempfile.TemporaryDirectory(prefix=f"ar_local_{op_name}_") as tmp:
         try:
             with tarfile.open(fileobj=io.BytesIO(package_bytes), mode="r:gz") as tar:
@@ -124,34 +96,26 @@ def local_eval(package_bytes: bytes, op_name: str, timeout: int,
         except Exception as e:
             return {
                 "device_id": device_id,
-                "verify": {"success": False, "log": f"extract failed: {e}",
-                            "artifacts": {}},
-                "profile": {"log": "", "artifacts": {},
-                            "gen_time": None, "base_time": None},
+                "returncode": 1,
+                "log": f"extract failed: {e}",
+                "eval_result": None,
             }
 
-        env = _env_for(device_id)
-        verify_rc, verify_log = _run_script(
-            tmp, f"verify_{op_name}.py", env, timeout)
-        # Both profile scripts always run — kernel failures still let us
-        # capture the ref baseline (the user-facing speedup anchor).
-        _, base_log = _run_script(
-            tmp, f"profile_{op_name}_base.py", env, timeout)
-        _, gen_log = _run_script(
-            tmp, f"profile_{op_name}_generation.py", env, timeout)
+        env = _env_for(device_id, override_base_us=override_base_us)
+        rc, log = _run_script(tmp, f"eval_{op_name}.py", env, timeout)
 
-        artifacts = _collect_artifacts(tmp)
+        eval_result = None
+        sidecar = os.path.join(tmp, "eval_result.json")
+        if os.path.isfile(sidecar):
+            try:
+                with open(sidecar, "r", encoding="utf-8") as f:
+                    eval_result = json.load(f)
+            except Exception as e:
+                logger.warning("local_eval: failed to parse sidecar: %s", e)
+
         return {
             "device_id": device_id,
-            "verify": {
-                "success": verify_rc == 0,
-                "log": verify_log,
-                "artifacts": artifacts,
-            },
-            "profile": {
-                "log": (base_log + "\n" + gen_log).strip(),
-                "artifacts": artifacts,
-                "gen_time": _avg_us(artifacts, "generation_profile_result.json"),
-                "base_time": _avg_us(artifacts, "base_profile_result.json"),
-            },
+            "returncode": rc,
+            "log": log,
+            "eval_result": eval_result,
         }

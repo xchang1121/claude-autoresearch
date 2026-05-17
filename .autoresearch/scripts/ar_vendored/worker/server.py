@@ -1,18 +1,19 @@
-"""AutoResearch worker — single HTTP endpoint, runs eval scripts locally.
+"""AutoResearch worker — single HTTP endpoint, runs eval script locally.
 
 Endpoints:
     GET  /api/v1/status   server-side hardware info (no auth, no body)
     POST /api/v1/run      verify + profile in one round trip
 
-The client (eval_client.py) ships a tar.gz built by package_builder. We
-extract it, pick a device slot from an internal asyncio.Queue, run
-verify_<op>.py then profile_<op>_base.py + profile_<op>_generation.py as
-subprocesses (DEVICE_ID exported via env), and return a single dict the
-client converges into an EvalResult.
+The client ships a tar.gz built by package_builder. We extract it,
+pick a device slot from an internal asyncio.Queue, run the SINGLE
+auto-generated `eval_<op>.py` as one subprocess (verify + profile_gen +
+profile_base run in-process there so the JIT/autotune cache stays
+warm), then read `eval_result.json` from the extracted dir and return
+it together with stdout+stderr to the client.
 
-No acquire/release endpoints, no DevicePool class — device assignment is
-internal to /run, which means the client can't bake a wrong device id
-into the package and the pool never decrements for slots that were never
+No acquire/release endpoints, no DevicePool class — device assignment
+is internal to /run, so the client can't bake a wrong device id into
+the package and the pool never decrements for slots that were never
 reserved.
 """
 from __future__ import annotations
@@ -86,17 +87,25 @@ async def run(
     task_id: str = Form(...),
     op_name: str = Form(...),
     timeout: int = Form(600),
+    override_base_us: Optional[float] = Form(None),
 ):
     """Verify + profile in one call. Device is picked server-side from the
-    pool, exported as DEVICE_ID env to the spawned scripts, and released
-    in the finally block — clients cannot leak a slot."""
+    pool, exported as DEVICE_ID env to the spawned script, and released
+    in the finally block — clients cannot leak a slot.
+
+    `override_base_us`: sticky baseline. When the caller already has a
+    measured PyTorch reference time, pass it here and the generated
+    eval script skips profile_base — saves one full per-shape benchmark
+    pass per round.
+    """
     if "queue" not in _state:
         raise HTTPException(status_code=503, detail="worker not initialised")
     package_bytes = await package.read()
     device_id = await _state["queue"].get()
     try:
         logger.info("[%s] run %s on device %d", task_id, op_name, device_id)
-        return await _run_eval(package_bytes, task_id, op_name, timeout, device_id)
+        return await _run_eval(package_bytes, task_id, op_name, timeout,
+                               device_id, override_base_us=override_base_us)
     finally:
         await _state["queue"].put(device_id)
 
@@ -106,7 +115,8 @@ async def run(
 # ---------------------------------------------------------------------------
 
 async def _run_eval(package_bytes: bytes, task_id: str, op_name: str,
-                    timeout: int, device_id: int) -> dict:
+                    timeout: int, device_id: int,
+                    override_base_us: Optional[float] = None) -> dict:
     with tempfile.TemporaryDirectory(prefix=f"ar_run_{task_id}_") as tmp:
         try:
             with tarfile.open(fileobj=io.BytesIO(package_bytes), mode="r:gz") as tar:
@@ -114,38 +124,30 @@ async def _run_eval(package_bytes: bytes, task_id: str, op_name: str,
         except Exception as e:
             return {
                 "device_id": device_id,
-                "verify": {"success": False, "log": f"extract failed: {e}",
-                            "artifacts": {}},
-                "profile": {"log": "", "artifacts": {},
-                            "gen_time": None, "base_time": None},
+                "log": f"extract failed: {e}",
+                "eval_result": None,
             }
 
         env = _env_for(device_id)
+        if override_base_us is not None and override_base_us > 0:
+            env["AR_OVERRIDE_BASE_TIME_US"] = f"{override_base_us:.6f}"
 
-        verify_rc, verify_log = await _run_script(
-            tmp, f"verify_{op_name}.py", env, timeout)
-        # Even if verify failed, run both profile scripts: the reference
-        # baseline is independent of kernel correctness and is the anchor
-        # for speedup. The kernel profile is allowed to fail too.
-        _, base_log = await _run_script(
-            tmp, f"profile_{op_name}_base.py", env, timeout)
-        _, gen_log = await _run_script(
-            tmp, f"profile_{op_name}_generation.py", env, timeout)
+        rc, log = await _run_script(tmp, f"eval_{op_name}.py", env, timeout)
 
-        artifacts = _collect_artifacts(tmp)
+        eval_result = None
+        sidecar = os.path.join(tmp, "eval_result.json")
+        if os.path.isfile(sidecar):
+            try:
+                with open(sidecar, "r", encoding="utf-8") as f:
+                    eval_result = json.load(f)
+            except Exception as e:
+                logger.warning("[%s] failed to parse sidecar: %s", task_id, e)
+
         return {
             "device_id": device_id,
-            "verify": {
-                "success": verify_rc == 0,
-                "log": verify_log,
-                "artifacts": artifacts,
-            },
-            "profile": {
-                "log": (base_log + "\n" + gen_log).strip(),
-                "artifacts": artifacts,
-                "gen_time": _avg_us(artifacts, "generation_profile_result.json"),
-                "base_time": _avg_us(artifacts, "base_profile_result.json"),
-            },
+            "returncode": rc,
+            "log": log,
+            "eval_result": eval_result,
         }
 
 
@@ -195,36 +197,6 @@ async def _run_script(workdir: str, script: str, env: dict,
     if stderr:
         log += ("\n" if log else "") + stderr.decode(errors="replace")
     return rc, log.strip()
-
-
-def _collect_artifacts(directory: str) -> dict[str, str]:
-    """Return {relpath: file_text} for every .json/.jsonl under directory."""
-    artifacts: dict[str, str] = {}
-    for root, _dirs, files in os.walk(directory):
-        for fname in files:
-            if not (fname.endswith(".json") or fname.endswith(".jsonl")):
-                continue
-            full = os.path.join(root, fname)
-            rel = os.path.relpath(full, directory).replace("\\", "/")
-            try:
-                with open(full, "r", encoding="utf-8") as f:
-                    artifacts[rel] = f.read()
-            except Exception as e:
-                logger.warning("cannot read artifact %s: %s", rel, e)
-    return artifacts
-
-
-def _avg_us(artifacts: dict[str, str], key: str) -> Optional[float]:
-    raw = artifacts.get(key)
-    if not raw:
-        return None
-    try:
-        v = json.loads(raw).get("avg_time_us")
-    except Exception:
-        return None
-    if isinstance(v, (int, float)) and 0 < v < float("inf"):
-        return float(v)
-    return None
 
 
 # ---------------------------------------------------------------------------

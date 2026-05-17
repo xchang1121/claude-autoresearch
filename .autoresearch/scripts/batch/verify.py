@@ -32,9 +32,7 @@ import manifest as mf
 # source of truth for the allclose comparison — verify.py and
 # autoresearch's eval can't drift.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils.correctness import (  # noqa: E402
-    compare_outputs_per_case, DEFAULT_ATOL, DEFAULT_RTOL,
-)
+from utils.correctness import compare_outputs_per_case  # noqa: E402
 from utils.input_groups import resolve as _resolve_groups  # noqa: E402
 
 VERIFY_RESULTS = "verify_results.json"
@@ -115,11 +113,11 @@ def _tier2_run(ref_path: Path, kernel_path: Path) -> dict:
     """Run ref + kernel, compare outputs via the shared correctness module
     (autoresearch's eval calls into the same `compare_outputs`).
 
-    atol/rtol are imported from correctness (DEFAULT_ATOL / DEFAULT_RTOL);
-    this function no longer takes them as args. Tweak the constants at
-    module level if you really need to (you almost certainly don't)."""
-    out: dict = {"status": "skip", "msg": "", "max_abs_diff": None,
-                 "atol": DEFAULT_ATOL, "rtol": DEFAULT_RTOL}
+    Tolerances are per-dtype, derived from each ref tensor's dtype inside
+    `compare_outputs_per_case` — no longer worker arguments. See
+    `utils/correctness.py` for the table.
+    """
+    out: dict = {"status": "skip", "msg": "", "max_abs_diff": None}
 
     try:
         import torch  # type: ignore
@@ -190,8 +188,7 @@ def _tier2_run(ref_path: Path, kernel_path: Path) -> dict:
         out["msg"] = f"forward: {type(e).__name__}: {e}"
         return out
 
-    cmp = compare_outputs_per_case(out_ref_per_case, out_new_per_case,
-                                   DEFAULT_ATOL, DEFAULT_RTOL)
+    cmp = compare_outputs_per_case(out_ref_per_case, out_new_per_case)
     out["max_abs_diff"] = cmp["max_abs_diff"]
     out["num_cases"] = len(cases)
     out["per_case"] = cmp["per_case"]
@@ -422,7 +419,7 @@ def run_verification(batch_dir: Path, *, full: bool = False,
 
     print(f"verify  batch_dir={batch_dir}  "
           f"tier={'1+2' if full else '1'}  ops={len(cases)}  "
-          f"tols: atol={DEFAULT_ATOL:g}  rtol={DEFAULT_RTOL:g}")
+          f"tols: per-dtype (see utils/correctness.py)")
     print()
 
     results: dict = {}
@@ -440,7 +437,6 @@ def run_verification(batch_dir: Path, *, full: bool = False,
     out_path = batch_dir / VERIFY_RESULTS
     out_path.write_text(json.dumps({
         "full": full,
-        "atol": DEFAULT_ATOL, "rtol": DEFAULT_RTOL,
         "results": results,
     }, indent=2), encoding="utf-8")
 

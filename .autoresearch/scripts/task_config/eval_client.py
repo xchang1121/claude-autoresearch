@@ -9,8 +9,14 @@ worker_urls=None) -> EvalResult`. Routing:
      (`utils.local_worker.local_eval`).
   3. Else → EvalResult with FRAMEWORK_ERROR explaining what's missing.
 
-Both transports return the same {verify, profile, device_id} dict so
-`_assemble_eval_result` is transport-agnostic.
+Both transports run the SAME generated `eval_<op>.py` script in one
+Python process and return the same dict:
+
+    {"device_id", "returncode", "log", "eval_result"}
+
+where `eval_result` is the sidecar JSON written by the script. We never
+parse stdout-tail JSON — CANN's tiling warnings could (and did) corrupt
+it.
 """
 import json
 import math
@@ -27,21 +33,14 @@ from .package_builder import _build_package
 _scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
-from utils.json_io import parse_last_json_line as _last_json_line  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Per-shape eval_timeout scaling + case-count probe
+# Per-shape eval_timeout scaling
 # ---------------------------------------------------------------------------
 
 def _count_ref_cases(task_dir: str, config: TaskConfig) -> int:
-    """Probe the ref module locally and count input cases.
-
-    Mirrors what the generated verify script does: import ref + run
-    input_groups.resolve, which duck-types between get_input_groups
-    (multi-shape) and get_inputs (single-shape collapsed to N=1). Any
-    failure falls back to 1 (single-shape semantics, no scaling).
-    """
+    """Probe the ref module locally and count input cases."""
     ref_path = os.path.join(task_dir, config.ref_file)
     if not os.path.isfile(ref_path):
         return 1
@@ -60,8 +59,8 @@ def _count_ref_cases(task_dir: str, config: TaskConfig) -> int:
         spec.loader.exec_module(mod)
         return max(len(_resolve(mod)), 1)
     except Exception as e:
-        print(f"[eval_client] WARN: case-count probe failed ({type(e).__name__}: "
-              f"{e}); eval_timeout will not scale per shape.", file=sys.stderr)
+        print(f"[eval_client] WARN: case-count probe failed "
+              f"({type(e).__name__}: {e})", file=sys.stderr)
         return 1
     finally:
         if sys_path_added:
@@ -74,6 +73,26 @@ def _count_ref_cases(task_dir: str, config: TaskConfig) -> int:
 def _effective_timeout(config: TaskConfig, num_cases: int) -> int:
     """config.eval_timeout is the budget per shape; scale by case count."""
     return int(config.eval_timeout) * max(int(num_cases), 1)
+
+
+def _override_base_from_progress(task_dir: str) -> Optional[float]:
+    """Sticky baseline: read the recorded baseline_metric so the eval
+    script can skip profile_base. Only honoured when the prior
+    baseline_init recorded baseline_source='ref'.
+    """
+    if _scripts_dir not in sys.path:
+        sys.path.insert(0, _scripts_dir)
+    try:
+        from phase_machine import load_progress  # type: ignore
+        progress = load_progress(task_dir) or {}
+    except Exception:
+        return None
+    if progress.get("baseline_source") != "ref":
+        return None
+    v = progress.get("baseline_metric")
+    if isinstance(v, (int, float)) and 0 < v < float("inf"):
+        return float(v)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -127,12 +146,18 @@ def _multipart_post(url: str, fields: dict, files: dict, timeout: float) -> dict
 
 
 def _worker_run(worker_url: str, package: bytes, task_id: str,
-                op_name: str, timeout: float) -> dict:
-    """POST /api/v1/run. Returns the worker's combined verify+profile dict."""
+                op_name: str, timeout: float,
+                override_base_us: Optional[float] = None) -> dict:
+    """POST /api/v1/run. Returns {device_id, returncode, log, eval_result}."""
+    fields: dict = {
+        "task_id": task_id, "op_name": op_name,
+        "timeout": str(int(timeout)),
+    }
+    if override_base_us is not None and override_base_us > 0:
+        fields["override_base_us"] = f"{override_base_us:.6f}"
     return _multipart_post(
         f"{worker_url}/api/v1/run",
-        fields={"task_id": task_id, "op_name": op_name,
-                "timeout": str(int(timeout))},
+        fields=fields,
         files={"package": ("package.tar.gz", package, "application/gzip")},
         timeout=timeout + 30,
     )
@@ -146,50 +171,58 @@ def _finite(v) -> bool:
     return isinstance(v, (int, float)) and 0 < v < float("inf")
 
 
-def _parse_profile_artifact(artifacts: dict, key: str) -> Optional[dict]:
-    raw = artifacts.get(key)
-    if not raw:
+def _avg_us(block: Optional[dict]) -> Optional[float]:
+    if not isinstance(block, dict):
         return None
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
+    v = block.get("avg_time_us")
+    return float(v) if _finite(v) else None
 
 
-def _per_shape_us(art: Optional[dict]) -> Optional[list]:
-    if not art:
+def _per_shape_us(block: Optional[dict]) -> Optional[list]:
+    if not isinstance(block, dict):
         return None
-    ps = art.get("per_shape")
+    ps = block.get("per_shape")
     if not isinstance(ps, list) or not ps:
         return None
     return [(s.get("avg_time_us") if isinstance(s, dict) else None) for s in ps]
 
 
-def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
-    """Combine verify + profile responses into an EvalResult."""
-    verify_log = verify_resp.get("log", "")
-    verify_ok = bool(verify_resp.get("success", False))
-    verify_json = _last_json_line(verify_log) or {}
-    error_source = verify_json.get("error_source") if not verify_ok else None
+def _assemble_eval_result(resp: dict) -> EvalResult:
+    """Convert a transport response into an EvalResult.
 
-    artifacts = profile_resp.get("artifacts") or {}
-    gen_time = profile_resp.get("gen_time")
-    base_time = profile_resp.get("base_time")
-    gen_art = _parse_profile_artifact(artifacts, "generation_profile_result.json")
-    base_art = _parse_profile_artifact(artifacts, "base_profile_result.json")
+    `resp` shape (from both worker /run and utils.local_worker.local_eval):
+        {"device_id": int, "returncode": int, "log": str,
+         "eval_result": {"verify": {...}, "profile_gen": {...},
+                          "profile_base": {...}, "ok": bool, "errors": [...]}}
+    """
+    log = resp.get("log", "")
+    eval_result = resp.get("eval_result") or {}
 
-    per_gen = _per_shape_us(gen_art)
-    per_base = _per_shape_us(base_art)
+    verify = eval_result.get("verify") or {}
+    profile_gen = eval_result.get("profile_gen") or {}
+    profile_base = eval_result.get("profile_base") or {}
 
-    gen_ok = _finite(gen_time)
-    base_ok = _finite(base_time)
+    verify_ok = bool(verify.get("correctness"))
+    error_source = verify.get("error_source")  # "ref" | "kernel" | None
+
+    gen_time = _avg_us(profile_gen)
+    base_time = _avg_us(profile_base)
+    per_gen = _per_shape_us(profile_gen)
+    per_base = _per_shape_us(profile_base)
+
     crashed_shapes = (
         [i for i, t in enumerate(per_gen) if not _finite(t)]
         if per_gen is not None else []
     )
 
+    # Outcome — error_source="ref" supersedes; FRAMEWORK_ERROR when both
+    # verify failed AND profile produced no per-shape data (sidecar
+    # missing or the script crashed before Phase D).
     if error_source == "ref":
         outcome = EvalOutcome.REF_FAIL
+    elif not eval_result:
+        # No sidecar — script crashed before writing it.
+        outcome = EvalOutcome.FRAMEWORK_ERROR
     elif per_gen is None and not verify_ok:
         outcome = EvalOutcome.FRAMEWORK_ERROR
     elif not verify_ok:
@@ -200,11 +233,11 @@ def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
         outcome = EvalOutcome.OK
 
     metrics: dict = {}
-    if gen_ok:
+    if _finite(gen_time):
         metrics["latency_us"] = gen_time
-    if base_ok:
+    if _finite(base_time):
         metrics["ref_latency_us"] = base_time
-    if gen_ok and base_ok:
+    if _finite(gen_time) and _finite(base_time):
         metrics["speedup_vs_ref"] = base_time / gen_time
 
     if per_gen is not None:
@@ -220,9 +253,6 @@ def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
                 for b, g in zip(per_base, per_gen)
             ]
             metrics["per_shape_speedup"] = per_speedup
-            # Geomean over valid per-shape ratios; N=1 collapses to the
-            # plain ratio set above (override is harmless and keeps the
-            # `speedup_aggregation` field populated uniformly).
             valid = [s for s in per_speedup if _finite(s)]
             if valid:
                 metrics["speedup_vs_ref"] = math.exp(
@@ -232,52 +262,56 @@ def _assemble_eval_result(verify_resp: dict, profile_resp: dict) -> EvalResult:
             if bad:
                 metrics["per_shape_speedup_bad_cases"] = bad
         descs = [s.get("case_desc")
-                 for s in ((gen_art or {}).get("per_shape") or [])
+                 for s in (profile_gen.get("per_shape") or [])
                  if isinstance(s, dict)]
         if any(descs):
             metrics["per_shape_descs"] = descs
 
-    # Verify-side failure detail (failed cases, worst idx) — surfaces which
-    # shape the kernel mishandled so DIAGNOSE can pinpoint it.
-    if not verify_ok and verify_json:
-        n_cases = verify_json.get("num_cases")
+    # Verify-side failure detail — surfaces which shape the kernel
+    # mishandled so DIAGNOSE can pinpoint without scraping log text.
+    if not verify_ok and verify:
+        n_cases = verify.get("num_cases")
         if isinstance(n_cases, int) and n_cases >= 1:
-            failed_idx = verify_json.get("failed_indices") or []
+            failed_idx = verify.get("failed_indices") or []
             if isinstance(failed_idx, list):
                 metrics["correctness_failed_cases"] = failed_idx[:30]
                 metrics["correctness_failed_count"] = len(failed_idx)
                 metrics["correctness_total_cases"] = n_cases
-            worst_idx = verify_json.get("worst_idx")
+            worst_idx = verify.get("worst_idx")
             if isinstance(worst_idx, int):
                 metrics["correctness_worst_case"] = worst_idx
-            worst_max = verify_json.get("worst_max_abs_diff")
+            worst_max = verify.get("worst_max_abs_diff")
             if isinstance(worst_max, (int, float)):
                 metrics["correctness_worst_max_abs"] = worst_max
 
     if outcome == EvalOutcome.OK:
         error = None
     elif outcome == EvalOutcome.REF_FAIL:
-        error = f"reference.py failed: {verify_json.get('error') or '(no detail)'}"
+        error = (f"reference.py failed: "
+                 f"{verify.get('error') or '(no detail)'}")
     elif outcome == EvalOutcome.KERNEL_PROFILE_CRASH:
         error = (f"kernel crashed during profile on {len(crashed_shapes)} of "
                  f"{len(per_gen)} shapes")
     elif outcome == EvalOutcome.FRAMEWORK_ERROR:
-        error = "eval framework produced no per-shape data (timeout / crash / OOM)"
+        if not eval_result:
+            error = (f"eval script crashed before writing sidecar "
+                     f"(rc={resp.get('returncode')})")
+        else:
+            error = "eval framework produced no per-shape data"
     else:
-        error = "kernel output != reference"
+        error = verify.get("error") or "kernel output != reference"
 
-    profile_log = profile_resp.get("log", "")
     return EvalResult(
         outcome=outcome,
         metrics=metrics,
         error=error,
-        raw_output=(verify_log + "\n" + profile_log)[-4096:],
+        raw_output=log[-4096:],
         error_source=error_source,
     )
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Entry points
 # ---------------------------------------------------------------------------
 
 def run_remote_eval(task_dir: str, config: TaskConfig,
@@ -298,7 +332,8 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
         print(f"[remote_eval] multi-shape: num_cases={num_cases}, "
               f"timeout={config.eval_timeout}s/shape x {num_cases} = "
               f"{eff_timeout}s", file=sys.stderr)
-    print(f"[remote_eval] worker={worker_url} task={task_id}", file=sys.stderr)
+    print(f"[remote_eval] worker={worker_url} task={task_id}",
+          file=sys.stderr)
 
     try:
         package = _build_package(task_dir, config)
@@ -306,18 +341,24 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
         return EvalResult(outcome=EvalOutcome.FRAMEWORK_ERROR,
                           error=f"failed to build package: {e}")
 
+    override = _override_base_from_progress(task_dir)
+    if override is not None:
+        print(f"[remote_eval] sticky baseline override={override:.2f} us",
+              file=sys.stderr)
+
     try:
-        resp = _worker_run(worker_url, package, task_id, config.name, eff_timeout)
+        resp = _worker_run(worker_url, package, task_id, config.name,
+                           eff_timeout, override_base_us=override)
     except Exception as e:
         return EvalResult(outcome=EvalOutcome.FRAMEWORK_ERROR,
                           error=f"worker /run failed: {e}")
 
-    return _assemble_eval_result(resp.get("verify", {}), resp.get("profile", {}))
+    return _assemble_eval_result(resp)
 
 
 def run_local_eval(task_dir: str, config: TaskConfig,
                    device_id: Optional[int] = None) -> EvalResult:
-    """Run verify + profile in a local subprocess (no HTTP)."""
+    """Run the single eval_<op>.py in a local subprocess."""
     if device_id is not None:
         dev = int(device_id)
     elif config.devices:
@@ -341,12 +382,17 @@ def run_local_eval(task_dir: str, config: TaskConfig,
               f"{eff_timeout}s", file=sys.stderr)
     print(f"[local_eval] device={dev}", file=sys.stderr)
 
+    override = _override_base_from_progress(task_dir)
+    if override is not None:
+        print(f"[local_eval] sticky baseline override={override:.2f} us",
+              file=sys.stderr)
+
     if _scripts_dir not in sys.path:
         sys.path.insert(0, _scripts_dir)
     from utils.local_worker import local_eval as _local_eval
-
-    resp = _local_eval(package, config.name, eff_timeout, dev)
-    return _assemble_eval_result(resp.get("verify", {}), resp.get("profile", {}))
+    resp = _local_eval(package, config.name, eff_timeout, dev,
+                       override_base_us=override)
+    return _assemble_eval_result(resp)
 
 
 def run_eval(task_dir: str, config: TaskConfig,
