@@ -34,6 +34,50 @@ import manifest as mf
 import verify
 
 
+def _preflight_check_hook_paths() -> int:
+    """Verify every `.autoresearch/scripts/...py` referenced by
+    `.claude/settings.json` hook commands actually exists. Returns 0 on
+    pass, prints a re-sync hint and returns 1 on stale paths.
+
+    A common breakage is settings.json was activated before a refactor
+    that renamed hook scripts — the activated settings.json then
+    references stale paths, all hooks silently fail, and Claude has no
+    AR guidance when the batch later runs.
+    """
+    import json
+    import re
+    repo_root = Path(__file__).resolve().parents[3]
+    settings_path = repo_root / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        return 0
+    try:
+        settings = json.loads(settings_path.read_text())
+    except Exception as e:
+        print(f"[preflight] cannot parse {settings_path}: {e}",
+              file=sys.stderr)
+        return 1
+
+    pattern = re.compile(r"\.autoresearch/scripts/[\w/]+\.py")
+    missing: list[tuple[str, str]] = []
+    for phase, entries in (settings.get("hooks") or {}).items():
+        for entry in entries:
+            for hook in entry.get("hooks") or []:
+                for rel in pattern.findall(hook.get("command", "")):
+                    if not (repo_root / rel).is_file():
+                        missing.append((phase, rel))
+
+    if missing:
+        print(f"[preflight] {settings_path} references missing hook scripts:",
+              file=sys.stderr)
+        for phase, rel in missing:
+            print(f"    {phase}: {rel}", file=sys.stderr)
+        print("\nLikely cause: settings.json activated before a refactor "
+              "renamed hook scripts. Re-sync from the canonical source.",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Prepare a batch dir: discover ops + verify Tier 1.",
@@ -60,6 +104,10 @@ def main() -> int:
     batch_dir = Path(args.batch_dir).resolve()
     if not batch_dir.is_dir():
         sys.exit(f"batch dir not found: {batch_dir}")
+
+    # ---- Step 0: preflight (hook paths) ----------------------------------
+    if _preflight_check_hook_paths() != 0:
+        return 1
 
     # ---- Step 1: discover -------------------------------------------------
     print(f"[prepare 1/2] discover  batch_dir={batch_dir}")
