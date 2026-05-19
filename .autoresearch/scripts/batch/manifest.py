@@ -345,20 +345,63 @@ def pick_new_task_dir(pre_snapshot: set[Path], op_name: str) -> Path | None:
     return matches[0]
 
 
+def _parse_iso_ts(s: Any) -> float:
+    if not isinstance(s, str):
+        return 0.0
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except ValueError:
+        return 0.0
+
+
 def find_running_case_task_dir(batch_dir: Path) -> Path | None:
-    """task_dir of THIS batch's currently-running case (None while
-    scaffolding). Scoped to the batch's own progress.json so monitor
-    output never leaks a sibling batch's state."""
+    """task_dir of THIS batch's currently-running case, sourced from
+    filesystem state — not from `batch_progress.task_dir`, which depends
+    on `claude --print` flushing the scaffold line to stdout and can lag
+    by tens of minutes.
+
+    Primary source: `<repo>/.autoresearch/.active_task`, written by the
+    post_bash hook the instant Claude runs `export AR_TASK_DIR=...`.
+    Scoped to this batch by verifying the pointed dir's name matches
+    the running case's op (so a sibling batch / manual session sharing
+    `ar_tasks/` can't bleed into this view)."""
     progress = load_progress(batch_dir)
     if not progress:
         return None
-    running = [v for v in (progress.get("cases") or {}).values()
+    running = [(op, v) for op, v in (progress.get("cases") or {}).items()
                if isinstance(v, dict) and v.get("status") == "running"]
     if not running:
         return None
-    running.sort(key=lambda v: v.get("started_at", ""), reverse=True)
-    td = running[0].get("task_dir")
-    if not isinstance(td, str):
-        return None
-    p = Path(td)
-    return p if p.is_dir() else None
+    running.sort(key=lambda kv: kv[1].get("started_at", ""), reverse=True)
+    op, case = running[0]
+
+    pointer = repo_root() / ".autoresearch" / ".active_task"
+    if pointer.is_file():
+        try:
+            td = Path(pointer.read_text(encoding="utf-8").strip())
+        except OSError:
+            td = None
+        if td is not None and td.is_dir() and task_dir_belongs_to_op(td.name, op):
+            return td
+
+    # run.py's stdout-parsed record: usable when claude has flushed.
+    recorded = case.get("task_dir")
+    if isinstance(recorded, str):
+        p = Path(recorded)
+        if p.is_dir() and task_dir_belongs_to_op(p.name, op):
+            return p
+
+    # Last-ditch: scan ar_tasks/ for matches with mtime >= started_at.
+    started_ts = _parse_iso_ts(case.get("started_at"))
+    tasks_root = repo_root() / "ar_tasks"
+    if tasks_root.is_dir():
+        try:
+            cands = [d for d in tasks_root.iterdir()
+                     if d.is_dir()
+                     and task_dir_belongs_to_op(d.name, op)
+                     and d.stat().st_mtime >= started_ts]
+        except OSError:
+            cands = []
+        if cands:
+            return max(cands, key=lambda d: d.stat().st_mtime)
+    return None
