@@ -17,8 +17,10 @@ Output: human-readable status to stdout. Claude Code sees it and acts accordingl
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_ROOT = os.path.dirname(SCRIPT_DIR)
@@ -250,13 +252,19 @@ def main():
               flush=True)
     print("[PIPELINE] Running eval...", flush=True)
     eval_cmd = [sys.executable, os.path.join(SCRIPT_DIR, "eval_wrapper.py"), task_dir] + worker_flag
+    # Run in a throwaway tmpdir so CANN's unsolicited PROF_* dumps don't
+    # accumulate in the repo (torch_npu.profiler dumps to cwd; a tmpdir
+    # that gets deleted afterwards catches them silently).
+    _eval_tmpdir = tempfile.mkdtemp(prefix="ar_eval_")
     try:
         ev = subprocess.run(eval_cmd, capture_output=True, text=True,
-                            timeout=pipeline_eval_cap)
+                            timeout=pipeline_eval_cap, cwd=_eval_tmpdir)
     except subprocess.TimeoutExpired:
         auto_rollback(task_dir)
         print(f"[PIPELINE] EVAL TIMEOUT (>{pipeline_eval_cap}s). Rolled back.")
         sys.exit(0)
+    finally:
+        shutil.rmtree(_eval_tmpdir, ignore_errors=True)
 
     eval_json = parse_last_json_line(ev.stdout)
     if eval_json is None:

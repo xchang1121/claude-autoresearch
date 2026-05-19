@@ -9,8 +9,10 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_ROOT = os.path.dirname(SCRIPT_DIR)
@@ -38,10 +40,14 @@ def main():
         extra += ["--worker-url", args.worker_url]
 
     print("[baseline] Running baseline eval...", flush=True)
-    ev = subprocess.run(
-        [sys.executable, os.path.join(SCRIPT_DIR, "eval_wrapper.py"), task_dir] + extra,
-        capture_output=True, text=True,
-    )
+    _eval_tmpdir = tempfile.mkdtemp(prefix="ar_eval_")
+    try:
+        ev = subprocess.run(
+            [sys.executable, os.path.join(SCRIPT_DIR, "eval_wrapper.py"), task_dir] + extra,
+            capture_output=True, text=True, cwd=_eval_tmpdir,
+        )
+    finally:
+        shutil.rmtree(_eval_tmpdir, ignore_errors=True)
     if ev.stderr:
         print(ev.stderr, end="", file=sys.stderr, flush=True)
 
