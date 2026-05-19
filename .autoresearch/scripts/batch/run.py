@@ -464,6 +464,42 @@ def print_summary(batch_dir: Path, total_elapsed: float,
     print("=" * 72)
 
 
+def _preflight_check_hook_paths():
+    """Walk .claude/settings.json hook commands, extract paths to
+    `.autoresearch/scripts/...py` references, and verify each file exists.
+    Exits with a clear error if any hook is stale (typical cause: settings
+    activated before a refactor that renamed/moved hook scripts).
+    """
+    import json, re
+    repo_root = Path(__file__).resolve().parents[3]
+    settings_path = repo_root / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        return  # No activated settings → nothing to check.
+    try:
+        settings = json.loads(settings_path.read_text())
+    except Exception as e:
+        sys.exit(f"[preflight] cannot parse {settings_path}: {e}")
+
+    pattern = re.compile(r"\.autoresearch/scripts/[\w/]+\.py")
+    missing = []
+    for phase, entries in (settings.get("hooks") or {}).items():
+        for entry in entries:
+            for hook in entry.get("hooks") or []:
+                cmd = hook.get("command", "")
+                for rel in pattern.findall(cmd):
+                    if not (repo_root / rel).is_file():
+                        missing.append((phase, rel))
+
+    if missing:
+        lines = [f"[preflight] {settings_path} references missing hook scripts:"]
+        for phase, rel in missing:
+            lines.append(f"    {phase}: {rel}")
+        lines.append("")
+        lines.append("Likely cause: settings.json activated before a refactor")
+        lines.append("renamed hook scripts. Re-sync from the canonical source.")
+        sys.exit("\n".join(lines))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Batch driver for /autoresearch.")
     ap.add_argument("batch_dir", help="dir containing manifest.yaml/json")
@@ -524,6 +560,12 @@ def main() -> int:
         worker_url = "127.0.0.1:9111"
         hw_arg = f"--worker-url {worker_url}"
         health_check_worker(worker_url)
+
+    # Preflight: .claude/settings.json hook commands must reference existing
+    # scripts. A common breakage is settings.json got copied/mv'd before a
+    # refactor that renamed hook scripts — all hooks silently fail and
+    # Claude has no AR guidance.
+    _preflight_check_hook_paths()
 
     try:
         cases = mf.resolve_cases(batch_dir, manifest_data, mode)
