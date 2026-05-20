@@ -129,14 +129,13 @@ def read_sidecar(workdir: str, name: str = EVAL_SIDECAR) -> Optional[dict]:
 def synth_sticky_ref_payload(override_base_us: float,
                              override_base_per_shape_us: Optional[list],
                              num_cases: int) -> dict:
-    """Build a ref-side payload matching what the in-script sticky
-    branch (package_builder.py Phase E, OVERRIDE_BASE_US != None) would
-    produce.
+    """Build a ref-side payload from a previously measured sticky
+    baseline so the runner can skip the ref subprocess this round.
 
-    Used when the two-pass runner SKIPS the ref subprocess (sticky
-    baseline) — without this, merge_sidecars would have ref=None and
-    the merged profile_base would be None, dropping ref_latency_us /
-    speedup_vs_ref from the round's metrics entirely.
+    Without this, the kernel-only pass writes no profile_base and
+    merge_sidecars would have ref=None — the merged profile_base would
+    then be None, dropping ref_latency_us / speedup_vs_ref from the
+    round's metrics entirely.
     """
     block: dict = {
         "avg_time_us": float(override_base_us),

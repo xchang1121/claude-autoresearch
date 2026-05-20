@@ -1,26 +1,26 @@
 """Eval script generation + tar.gz package assembly.
 
-The generated `eval_<op>.py` is the contract between this client and the
-worker (or local subprocess runner). Both transports unpack the same
-tarball and run the same single script, which does verify + profile_gen
-+ profile_base in ONE Python process and writes `eval_result.json` as a
-sidecar.
+The generated `eval_<op>.py` is the contract between this client and
+the worker (or local subprocess runner). Both transports unpack the
+same tarball and run the script twice per round (once with
+AR_EVAL_PHASE=ref_only, once with kernel_only) so a kernel-induced
+device hang / SIGKILL in pass 2 can't take down ref data from pass 1.
+Each pass writes its own sidecar JSON; the runner merges them.
 
-Why one script (not three):
+Why keep verify + profile_gen in the same process (the kernel pass):
 
-  - Triton JIT cache and autotune state are in-process. The previous
-    3-subprocess layout meant profile_gen's autotune re-explored the
-    config space from scratch — warmup budget burned on exploration
-    instead of measurement, contaminating per-shape timing.
+  - Triton JIT cache and autotune state are in-process. Splitting
+    verify and profile_gen meant profile_gen's autotune re-explored
+    the config space from scratch — warmup budget burned on
+    exploration instead of measurement, contaminating per-shape
+    timing.
   - CANN's tiling-struct warnings to stdout could pollute the
     stdout-tail JSON parsed by `_last_json_line` and silently corrupt
     verify classification. Sidecar JSON eliminates that hazard.
-  - Three cold `torch_npu` inits per round added ~30s of fixed
-    overhead on Ascend.
 
 This file owns:
   - DSL adapter resolution (`_get_dsl_adapter`, `_detect_device_type`).
-  - The single eval-script template (`_gen_eval_script`).
+  - The eval-script template (`_gen_eval_script`).
   - Tarball assembly (`_build_package`).
 """
 import io
@@ -199,11 +199,14 @@ def _gen_eval_script(config: TaskConfig) -> str:
 
     return f'''\
 #!/usr/bin/env python3
-"""Auto-generated single-process eval (dsl={config.dsl}, backend={config.backend}).
+"""Auto-generated eval (dsl={config.dsl}, backend={config.backend}).
 
-Phases run in one Python interpreter so verify warms the JIT / autotune
-cache that profile_gen reuses. Result is a sidecar `eval_result.json` —
-NOT stdout JSON (which CANN warnings could corrupt).
+Selected by AR_EVAL_PHASE: production runners spawn this twice per
+round (ref_only then kernel_only). The kernel pass keeps verify and
+profile_gen in one process so verify warms the JIT / autotune cache
+profile_gen reuses; the ref pass runs profile_base independently so a
+kernel device-fault can't take it down. Result is a sidecar JSON at
+AR_EVAL_SIDECAR — never stdout (CANN warnings would corrupt it).
 
 profile_gen benchmark = {bench_gen_label}
 profile_base benchmark = {bench_base_label}
@@ -602,7 +605,7 @@ def _exclude_pycache(tarinfo: tarfile.TarInfo):
 def _build_package(task_dir: str, config: TaskConfig) -> bytes:
     """Build a tar.gz package containing:
       - kernel.py / reference.py / other .py support files from task_dir
-      - eval_<op>.py (single-process orchestrator)
+      - eval_<op>.py (phase-gated orchestrator; runner spawns twice)
       - correctness.py + input_groups.py (lib modules at tarball root)
       - ar_vendored/ (DSL adapters + profiler_npu + patches)
 

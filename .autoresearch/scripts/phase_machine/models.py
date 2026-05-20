@@ -118,9 +118,20 @@ class Progress:
             return cls()
         known = {f.name for f in fields(cls)}
         kept = {k: v for k, v in data.items() if k in known}
-        unknown = sorted(set(data) - known)
+        unknown = sorted(set(data) - known - _LEGACY_DROPPED)
         if unknown:
             import sys
             print(f"[Progress.from_dict] dropping unknown fields: {unknown}",
                   file=sys.stderr)
         return cls(**kept)
+
+
+# Field names that older Progress versions wrote to progress.json and we
+# no longer carry on the dataclass. Drop them silently — surfacing them
+# every load only pollutes stderr for tasks created before the schema
+# change.
+_LEGACY_DROPPED = frozenset({
+    "baseline_commit",       # deleted: only baseline.py self-referenced it
+    "baseline_correctness",  # deleted: implied by baseline_outcome == "ok"
+    "status",                # deleted: only stop_save wrote it, no reader
+})

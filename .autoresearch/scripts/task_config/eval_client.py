@@ -9,14 +9,17 @@ worker_urls=None) -> EvalResult`. Routing:
      (`utils.local_worker.local_eval`).
   3. Else → EvalResult with INFRA_FAIL explaining what's missing.
 
-Both transports run the SAME generated `eval_<op>.py` script in one
-Python process and return the same dict:
+Both transports run the same generated `eval_<op>.py` script in TWO
+passes per round (ref-only then kernel-only) so a kernel SIGKILL /
+device hang in pass 2 can't erase ref data the ref pass already wrote.
+Per-phase sidecars are merged before returning the dict shape both
+transports share:
 
     {"device_id", "returncode", "log", "eval_result"}
 
-where `eval_result` is the sidecar JSON written by the script. We never
-parse stdout-tail JSON — CANN's tiling warnings could (and did) corrupt
-it.
+where `eval_result` is the merged `{verify, profile_gen, profile_base,
+ok, errors}` dict. We never parse stdout-tail JSON — CANN's tiling
+warnings could (and did) corrupt it.
 """
 import sys
 from typing import Optional
@@ -85,7 +88,7 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
 
 def run_local_eval(task_dir: str, config: TaskConfig,
                    device_id: Optional[int] = None) -> EvalResult:
-    """Run the single eval_<op>.py in a local subprocess."""
+    """Run eval_<op>.py in the local two-pass driver (ref then kernel)."""
     if device_id is not None:
         dev = int(device_id)
     elif config.devices:

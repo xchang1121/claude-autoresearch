@@ -108,14 +108,15 @@ async def run(
     in the finally block — clients cannot leak a slot.
 
     `override_base_us`: sticky aggregate baseline. When the caller has
-    a measured PyTorch reference time, pass it here and the generated
-    eval script skips profile_base — saves one full per-shape benchmark
-    pass.
+    a measured PyTorch reference time, pass it here and the runner
+    skips the ref subprocess pass entirely (synthesising a ref payload
+    via `utils.eval_runner.synth_sticky_ref_payload`) — saves one full
+    per-shape benchmark pass.
 
     `override_base_per_shape_us`: JSON-encoded list of per-case
-    aggregate timings the SEED round measured. When supplied alongside
-    override_base_us, the generated script materialises a per_shape
-    base profile so speedup_vs_ref stays a geomean of per-shape ratios
+    timings the SEED round measured. When supplied alongside
+    override_base_us, the synthesised ref payload includes a per_shape
+    block so speedup_vs_ref stays a geomean of per-shape ratios
     (matching the SEED round's aggregation).
     """
     if "queue" not in _state:
