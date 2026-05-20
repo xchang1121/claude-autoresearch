@@ -232,13 +232,14 @@ def _assemble_eval_result(resp: dict) -> EvalResult:
     )
 
     # Outcome — only two non-OK paths:
-    #   error_source == "ref" or sidecar missing  → INFRA_FAIL (operator only).
-    #   anything else failing                      → KERNEL_FAIL (PLAN-recoverable).
+    #   error_source == "ref"  → broken --ref source file; agent locked out
+    #                            (reference.py isn't editable). INFRA_FAIL.
+    #   anything else failing  → kernel responsibility (verify mismatch,
+    #                            profile crash, compile error, timeout,
+    #                            sidecar missing — all KERNEL_FAIL).
     # Pure transport failures (worker unreachable / no NPU) set INFRA_FAIL
-    # in run_eval before we ever call _assemble.
+    # in run_eval / run_remote_eval before we ever call _assemble.
     if error_source == "ref":
-        outcome = EvalOutcome.INFRA_FAIL
-    elif not eval_result:
         outcome = EvalOutcome.INFRA_FAIL
     elif verify_ok and not crashed_shapes:
         outcome = EvalOutcome.OK
@@ -300,14 +301,11 @@ def _assemble_eval_result(resp: dict) -> EvalResult:
     if outcome == EvalOutcome.OK:
         error = None
     elif outcome == EvalOutcome.INFRA_FAIL:
-        if error_source == "ref":
-            error = (f"reference.py failed: "
-                     f"{verify.get('error') or '(no detail)'}")
-        elif not eval_result:
-            error = (f"eval script crashed before writing sidecar "
-                     f"(rc={resp.get('returncode')})")
-        else:
-            error = "eval framework produced no per-shape data"
+        error = (f"reference.py failed: "
+                 f"{verify.get('error') or '(no detail)'}")
+    elif not eval_result:
+        error = (f"kernel exited without producing verify result "
+                 f"(rc={resp.get('returncode')})")
     elif not verify_ok:
         error = verify.get("error") or "kernel output != reference"
     else:
