@@ -1,11 +1,12 @@
 """Local eval — direct subprocess transport for --devices.
 
 Mirrors the worker server's /run endpoint but in-process: extract the
-tar.gz via the shared `safe_extract`, run the SINGLE generated
-`eval_<op>.py` script (verify + profile_gen + profile_base in one
-Python process so JIT and autotune state stay warm), read
-`eval_result.json` from the extracted dir, return the dict shape both
-transports share.
+tar.gz via the shared `safe_extract`, run the generated `eval_<op>.py`
+script TWICE (once ref-only, once kernel-only) so a kernel-induced
+SIGKILL / device hang in the kernel pass can't take down ref data that
+the ref pass already wrote. Merge per-phase sidecars and return the
+dict shape both transports share. When a sticky baseline is supplied
+the ref pass is skipped.
 """
 from __future__ import annotations
 
@@ -17,7 +18,8 @@ import tempfile
 from typing import Optional
 
 from .eval_runner import (
-    build_response, env_for, read_sidecar, safe_extract,
+    build_response, env_for, merge_sidecars, read_sidecar, safe_extract,
+    write_merged_sidecar,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,9 +76,16 @@ def local_eval(package_bytes: bytes, op_name: str, timeout: int,
                device_id: int,
                override_base_us: Optional[float] = None,
                override_base_per_shape_us: Optional[list] = None) -> dict:
-    """Extract package, run eval_<op>.py, return the worker /run shape:
+    """Extract package, run eval_<op>.py in two passes (ref + kernel),
+    merge per-phase sidecars, return the worker /run shape:
         {"device_id", "returncode", "log", "eval_result"}.
+
+    Skips the ref pass entirely when override_base_us is set (sticky
+    baseline — ref doesn't need re-measuring this round).
     """
+    skip_ref = (override_base_us is not None and override_base_us > 0)
+    script = f"eval_{op_name}.py"
+
     with tempfile.TemporaryDirectory(prefix=f"ar_local_{op_name}_") as tmp:
         try:
             safe_extract(package_bytes, tmp)
@@ -84,7 +93,35 @@ def local_eval(package_bytes: bytes, op_name: str, timeout: int,
             return build_response(
                 device_id, 1, f"extract failed: {e}", None)
 
-        env = env_for(device_id, override_base_us=override_base_us,
-                      override_base_per_shape_us=override_base_per_shape_us)
-        rc, log = _run_script(tmp, f"eval_{op_name}.py", env, timeout)
-        return build_response(device_id, rc, log, read_sidecar(tmp))
+        # --- Pass 1: ref-only subprocess (immune to kernel-side death) -
+        if skip_ref:
+            ref_log = ""
+            ref_payload: Optional[dict] = None
+        else:
+            ref_env = env_for(
+                device_id,
+                override_base_us=override_base_us,
+                override_base_per_shape_us=override_base_per_shape_us,
+                phase="ref_only",
+                sidecar_path=os.path.join(tmp, "eval_result_ref.json"),
+            )
+            _, ref_log = _run_script(tmp, script, ref_env, timeout)
+            ref_payload = read_sidecar(tmp, "eval_result_ref.json")
+
+        # --- Pass 2: kernel-only subprocess (verify + profile_gen) ----
+        # rc is taken from this pass — downstream readers treat the
+        # kernel-side returncode as authoritative for round outcomes.
+        kernel_env = env_for(
+            device_id,
+            override_base_us=override_base_us,
+            override_base_per_shape_us=override_base_per_shape_us,
+            phase="kernel_only",
+            sidecar_path=os.path.join(tmp, "eval_result_kernel.json"),
+        )
+        rc, kernel_log = _run_script(tmp, script, kernel_env, timeout)
+        kernel_payload = read_sidecar(tmp, "eval_result_kernel.json")
+
+        merged = merge_sidecars(ref_payload, kernel_payload)
+        write_merged_sidecar(tmp, merged)
+        log = "\n".join(s for s in (ref_log, kernel_log) if s).strip()
+        return build_response(device_id, rc, log, merged)

@@ -149,8 +149,8 @@ def _base_benchmark_body(warmup: int, repeats: int) -> tuple[str, str]:
 
 
 def _gen_eval_script(config: TaskConfig) -> str:
-    """Generate `eval_<op>.py` — verify + profile_gen + profile_base in one
-    Python process, with a single `eval_result.json` sidecar.
+    """Generate `eval_<op>.py` — verify + profile_gen + profile_base, with
+    a single `eval_result.json` sidecar.
 
     Iteration counts come from `config.warmup_times` and `config.run_times`
     (task.yaml `eval.warmup_times` / `eval.run_times`), defaulting to
@@ -160,13 +160,23 @@ def _gen_eval_script(config: TaskConfig) -> str:
     Phase layout (all caught independently; partial results still land in
     the sidecar):
 
-      Phase A — ref-side setup           error_source="ref"
+      Phase A — ref-side setup           error_source="ref"   (always)
       Phase B — kernel-side import       error_source="kernel"
       Phase C — verify (Model vs ModelNew, per-case)
                 first-failing case decides error_source
       Phase D — profile_gen (ModelNew under adapter benchmark_impl)
       Phase E — profile_base (Model under profiler_npu, matching akg-hitl)
                 skipped when AR_OVERRIDE_BASE_TIME_US env is set
+
+    `AR_EVAL_PHASE` env selects which subset runs:
+      "ref_only"     — Phase A + E only (no kernel import; immune to
+                       kernel SIGKILL / device hang in a sibling pass)
+      "kernel_only"  — Phase A + B + C + D only (no profile_base)
+      "all" (default for ad-hoc reproducer) — A + B + C + D + E
+
+    Production callers spawn this script TWICE per round (ref_only then
+    kernel_only) so a kernel UB overflow / device fault in pass 2 can't
+    erase ref data that pass 1 already wrote to its sidecar.
 
     Profile D uses the warm JIT/autotune state populated by verify — no
     autotune exploration during warmup, so the measured shape timing
@@ -228,6 +238,17 @@ SIDECAR_PATH = os.environ.get(
     "AR_EVAL_SIDECAR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "{EVAL_SIDECAR}"),
 )
+# Phase selector — production callers spawn TWO subprocesses per round
+# (ref_only then kernel_only) so a kernel UB overflow / device fault in
+# the kernel pass can't take down ref data from the ref pass. "all" is
+# the legacy single-process behavior, kept for ad-hoc reproducer use.
+PHASE = os.environ.get("AR_EVAL_PHASE", "all")
+if PHASE not in ("all", "ref_only", "kernel_only"):
+    print(f"[eval] WARN: unknown AR_EVAL_PHASE={{PHASE!r}}, defaulting to 'all'",
+          file=sys.stderr)
+    PHASE = "all"
+DO_KERNEL_PHASES = PHASE in ("all", "kernel_only")
+DO_REF_PHASE = PHASE in ("all", "ref_only")
 OVERRIDE_BASE_US = float(os.environ["AR_OVERRIDE_BASE_TIME_US"]) \\
     if os.environ.get("AR_OVERRIDE_BASE_TIME_US") else None
 # Sticky per-shape ref baseline (JSON list). Paired with
@@ -312,135 +333,146 @@ except Exception as e:
 
 
 # === Phase B: kernel-side import ========================================
-try:
-    from {kernel_file} import ModelNew
-except Exception as e:
-    traceback.print_exc()
-    result["ok"] = False
-    result["verify"] = {{
-        "correctness": False,
-        "error_source": "kernel",
-        "error": (f"import failed: cannot import name 'ModelNew' from "
-                  f"'{kernel_file}' ({{type(e).__name__}}: {{e}})"),
-        "num_cases": num_cases,
-        "per_case": [], "diagnostics": [], "failed_indices": [],
-        "worst_idx": None, "worst_max_abs_diff": None,
-    }}
-    # Without a kernel module there's nothing left to do — skip profile.
-    _write_and_exit(1)
+# Skipped in ref_only mode (ref pass doesn't need ModelNew). When the
+# kernel pass hits an import error we still let Phase E try to measure
+# ref — that's the whole point of the split, ref shouldn't be held
+# hostage by a broken kernel.
+ModelNew = None
+kernel_imported = False
+if DO_KERNEL_PHASES:
+    try:
+        from {kernel_file} import ModelNew
+        kernel_imported = True
+    except Exception as e:
+        traceback.print_exc()
+        result["ok"] = False
+        result["verify"] = {{
+            "correctness": False,
+            "error_source": "kernel",
+            "error": (f"import failed: cannot import name 'ModelNew' from "
+                      f"'{kernel_file}' ({{type(e).__name__}}: {{e}})"),
+            "num_cases": num_cases,
+            "per_case": [], "diagnostics": [], "failed_indices": [],
+            "worst_idx": None, "worst_max_abs_diff": None,
+        }}
 
 
 # === Phase C: verify (warms JIT cache for profile_gen) ==================
 # Per-case loop with ref-side vs kernel-side blame. The first failure
 # decides error_source — ref-side wins over kernel-side because a broken
 # ref invalidates the entire eval regardless of kernel correctness.
+# Whole block skipped when kernel_imported is False (ref_only mode or
+# Phase B import failed). `correctness` is bundled at tarball root and
+# is needed regardless of mode by other tooling — keep the import
+# unconditional.
 from correctness import (
     compare_outputs_per_case, DEFAULT_ATOL, DEFAULT_RTOL,
 )
 
-out_ref_per_case = []
-out_new_per_case = []
-verify_error_source = None
-verify_error_msg = None
+if kernel_imported:
+    out_ref_per_case = []
+    out_new_per_case = []
+    verify_error_source = None
+    verify_error_msg = None
 
-try:
-    model_ref = Model(*init_inputs).to(device).eval()
-    with torch.no_grad():
-        for case in cases_cpu:
-            ref_inputs_dev = [x.to(device) if hasattr(x, "to") else x
-                              for x in case]
-            out_ref_per_case.append(_to_cpu_list(model_ref(*ref_inputs_dev)))
-            del ref_inputs_dev
-    del model_ref
-    _empty_cache()
-except Exception as e:
-    traceback.print_exc()
-    verify_error_source = "ref"
-    verify_error_msg = (f"reference forward failed on device: "
-                        f"{{type(e).__name__}}: {{e}}")
-
-if verify_error_source is None:
     try:
-        model_new = ModelNew(*init_inputs).to(device).eval()
+        model_ref = Model(*init_inputs).to(device).eval()
         with torch.no_grad():
             for case in cases_cpu:
-                inputs_dev = [x.to(device) if hasattr(x, "to") else x
-                              for x in case]
-                out_new_per_case.append(_to_cpu_list(model_new(*inputs_dev)))
-                del inputs_dev
-        # Keep model_new around briefly — describe_case may use its
-        # metadata. Delete after we're done with the compare block.
+                ref_inputs_dev = [x.to(device) if hasattr(x, "to") else x
+                                  for x in case]
+                out_ref_per_case.append(_to_cpu_list(model_ref(*ref_inputs_dev)))
+                del ref_inputs_dev
+        del model_ref
+        _empty_cache()
     except Exception as e:
         traceback.print_exc()
-        verify_error_source = "kernel"
-        verify_error_msg = (f"kernel forward failed: "
+        verify_error_source = "ref"
+        verify_error_msg = (f"reference forward failed on device: "
                             f"{{type(e).__name__}}: {{e}}")
-        model_new = None
 
-if verify_error_source is not None:
-    result["verify"] = {{
-        "correctness": False,
-        "error_source": verify_error_source,
-        "error": verify_error_msg,
-        "num_cases": num_cases,
-        "per_case": [], "diagnostics": [], "failed_indices": [],
-        "worst_idx": None, "worst_max_abs_diff": None,
-    }}
-else:
-    try:
-        cmp_result = compare_outputs_per_case(
-            out_ref_per_case, out_new_per_case,
-            DEFAULT_ATOL, DEFAULT_RTOL)
+    if verify_error_source is None:
+        try:
+            model_new = ModelNew(*init_inputs).to(device).eval()
+            with torch.no_grad():
+                for case in cases_cpu:
+                    inputs_dev = [x.to(device) if hasattr(x, "to") else x
+                                  for x in case]
+                    out_new_per_case.append(_to_cpu_list(model_new(*inputs_dev)))
+                    del inputs_dev
+            # Keep model_new around briefly — describe_case may use its
+            # metadata. Delete after we're done with the compare block.
+        except Exception as e:
+            traceback.print_exc()
+            verify_error_source = "kernel"
+            verify_error_msg = (f"kernel forward failed: "
+                                f"{{type(e).__name__}}: {{e}}")
+            model_new = None
 
-        for d in cmp_result["diagnostics"]:
-            print(d, file=sys.stderr)
-
-        # FAILED_SHAPES line for failure_extractor.multi_shape_failed_shapes
-        # — gives DIAGNOSE the offending case desc directly.
-        if not cmp_result["correctness"] and num_cases > 1:
-            failed = cmp_result.get("failed_indices") or []
-            if failed:
-                shape_strs = []
-                for i in failed[:10]:
-                    if 0 <= i < num_cases:
-                        shape_strs.append(
-                            f"case {{i}}={{_describe_case(cases_cpu[i], model_new)}}")
-                if shape_strs:
-                    suffix = " ..." if len(failed) > 10 else ""
-                    print("[verify] FAILED_SHAPES: " +
-                          "; ".join(shape_strs) + suffix, file=sys.stderr)
-
-        result["verify"] = {{
-            "correctness": cmp_result["correctness"],
-            "error_source": None if cmp_result["correctness"] else "kernel",
-            "error": (None if cmp_result["correctness"]
-                      else "kernel output != reference"),
-            "num_cases": num_cases,
-            "per_case": cmp_result.get("per_case", []),
-            "diagnostics": cmp_result["diagnostics"],
-            "failed_indices": cmp_result.get("failed_indices", []),
-            "worst_idx": cmp_result.get("worst_idx"),
-            "worst_max_abs_diff": cmp_result.get("worst_max_abs_diff"),
-        }}
-    except Exception as e:
-        traceback.print_exc()
+    if verify_error_source is not None:
         result["verify"] = {{
             "correctness": False,
-            "error_source": "kernel",
-            "error": f"comparison failed: {{type(e).__name__}}: {{e}}",
+            "error_source": verify_error_source,
+            "error": verify_error_msg,
             "num_cases": num_cases,
             "per_case": [], "diagnostics": [], "failed_indices": [],
             "worst_idx": None, "worst_max_abs_diff": None,
         }}
+    else:
+        try:
+            cmp_result = compare_outputs_per_case(
+                out_ref_per_case, out_new_per_case,
+                DEFAULT_ATOL, DEFAULT_RTOL)
 
-# Free verify-side tensors before profile pass — HBM doesn't fit both.
-try:
-    del model_new
-except NameError:
-    pass
-out_ref_per_case.clear()
-out_new_per_case.clear()
-_empty_cache()
+            for d in cmp_result["diagnostics"]:
+                print(d, file=sys.stderr)
+
+            # FAILED_SHAPES line for failure_extractor.multi_shape_failed_shapes
+            # — gives DIAGNOSE the offending case desc directly.
+            if not cmp_result["correctness"] and num_cases > 1:
+                failed = cmp_result.get("failed_indices") or []
+                if failed:
+                    shape_strs = []
+                    for i in failed[:10]:
+                        if 0 <= i < num_cases:
+                            shape_strs.append(
+                                f"case {{i}}={{_describe_case(cases_cpu[i], model_new)}}")
+                    if shape_strs:
+                        suffix = " ..." if len(failed) > 10 else ""
+                        print("[verify] FAILED_SHAPES: " +
+                              "; ".join(shape_strs) + suffix, file=sys.stderr)
+
+            result["verify"] = {{
+                "correctness": cmp_result["correctness"],
+                "error_source": None if cmp_result["correctness"] else "kernel",
+                "error": (None if cmp_result["correctness"]
+                          else "kernel output != reference"),
+                "num_cases": num_cases,
+                "per_case": cmp_result.get("per_case", []),
+                "diagnostics": cmp_result["diagnostics"],
+                "failed_indices": cmp_result.get("failed_indices", []),
+                "worst_idx": cmp_result.get("worst_idx"),
+                "worst_max_abs_diff": cmp_result.get("worst_max_abs_diff"),
+            }}
+        except Exception as e:
+            traceback.print_exc()
+            result["verify"] = {{
+                "correctness": False,
+                "error_source": "kernel",
+                "error": f"comparison failed: {{type(e).__name__}}: {{e}}",
+                "num_cases": num_cases,
+                "per_case": [], "diagnostics": [], "failed_indices": [],
+                "worst_idx": None, "worst_max_abs_diff": None,
+            }}
+
+    # Free verify-side tensors before profile pass — HBM doesn't fit both.
+    try:
+        del model_new
+    except NameError:
+        pass
+    out_ref_per_case.clear()
+    out_new_per_case.clear()
+    _empty_cache()
 
 
 # === Benchmark helpers ===================================================
@@ -531,71 +563,77 @@ def _run_profile(target_cls, bench_fn, mode_label):
 
 
 # === Phase D: profile_gen (warm cache from verify) ======================
+# Reads verify_block populated by Phase C. In ref_only mode the verify
+# block is None — verify_ok defaults to False and we skip Phase D
+# regardless.
 verify_block = result.get("verify") or {{}}
 verify_ok = bool(verify_block.get("correctness"))
 verify_error_source = verify_block.get("error_source")
 
-# Skip profile entirely on ref-side failure — the ref is broken, timing
-# numbers would be meaningless and Phase E would crash on the same issue.
-if verify_error_source == "ref":
-    print("[eval] ref-side failure — skipping profile phases",
-          file=sys.stderr)
-    _write_and_exit(2)
-
-try:
-    result["profile_gen"] = _run_profile(ModelNew, _bench_gen, "gen")
-except Exception as e:
-    traceback.print_exc()
-    result["ok"] = False
-    result["errors"].append({{
-        "phase": "profile_gen",
-        "type": type(e).__name__, "msg": str(e),
-    }})
+if kernel_imported and verify_error_source != "ref":
+    # ref-side failure short-circuits Phase D in the same subprocess
+    # (profile_gen needs ref forward as part of adapter setup for some
+    # DSLs). Phase E is independent and may still try its own ref
+    # measurement — that's the whole point of the split when this script
+    # is run as the kernel-only pass.
+    try:
+        result["profile_gen"] = _run_profile(ModelNew, _bench_gen, "gen")
+    except Exception as e:
+        traceback.print_exc()
+        result["ok"] = False
+        result["errors"].append({{
+            "phase": "profile_gen",
+            "type": type(e).__name__, "msg": str(e),
+        }})
 
 
 # === Phase E: profile_base (PyTorch reference) ==========================
 # Sticky baseline: AR_OVERRIDE_BASE_TIME_US env (set by eval_client from
 # progress.json baseline_metric) lets us skip this — base timing of the
 # PyTorch reference doesn't change round-to-round.
-if OVERRIDE_BASE_US is not None and OVERRIDE_BASE_US > 0:
-    print(f"[eval] sticky baseline override = {{OVERRIDE_BASE_US:.2f}} us; "
-          f"skipping profile_base", file=sys.stderr)
-    # When per-shape ref was captured at SEED time (progress.baseline_per_shape_us),
-    # eval_client passes it through AR_OVERRIDE_BASE_PER_SHAPE_US so we
-    # can materialise per_shape here. speedup_vs_ref then stays a geomean
-    # of per-shape ratios across sticky rounds. Without per-shape data
-    # (legacy progress or partial measurement), omit per_shape and let
-    # eval_client fall back to the scalar base/gen ratio for this round.
-    base_block = {{
-        "avg_time_us": OVERRIDE_BASE_US,
-        "execution_time_us": OVERRIDE_BASE_US,
-        "execution_time_ms": OVERRIDE_BASE_US / 1000,
-        "warmup_times": 0, "run_times": 0,
-        "num_cases": num_cases,
-        "sticky": True,
-    }}
-    if (OVERRIDE_BASE_PER_SHAPE_US is not None
-            and len(OVERRIDE_BASE_PER_SHAPE_US) == num_cases):
-        base_block["per_shape"] = [
-            {{"avg_time_us": v, "method": "sticky"}}
-            for v in OVERRIDE_BASE_PER_SHAPE_US
-        ]
-    elif OVERRIDE_BASE_PER_SHAPE_US is not None:
-        print(f"[eval] WARN: sticky per_shape length "
-              f"{{len(OVERRIDE_BASE_PER_SHAPE_US)}} != num_cases "
-              f"{{num_cases}}; skipping per_shape override",
-              file=sys.stderr)
-    result["profile_base"] = base_block
-else:
-    try:
-        result["profile_base"] = _run_profile(Model, _bench_base, "base")
-    except Exception as e:
-        traceback.print_exc()
-        result["ok"] = False
-        result["errors"].append({{
-            "phase": "profile_base",
-            "type": type(e).__name__, "msg": str(e),
-        }})
+# Phase E is skipped entirely in kernel_only mode (DO_REF_PHASE=False);
+# the ref subprocess from the two-pass runner owns ref measurement.
+if DO_REF_PHASE:
+    if OVERRIDE_BASE_US is not None and OVERRIDE_BASE_US > 0:
+        print(f"[eval] sticky baseline override = {{OVERRIDE_BASE_US:.2f}} us; "
+              f"skipping profile_base", file=sys.stderr)
+        # When per-shape ref was captured at SEED time
+        # (progress.baseline_per_shape_us), eval_client passes it through
+        # AR_OVERRIDE_BASE_PER_SHAPE_US so we can materialise per_shape
+        # here. speedup_vs_ref then stays a geomean of per-shape ratios
+        # across sticky rounds. Without per-shape data (legacy progress
+        # or partial measurement), omit per_shape and let eval_client
+        # fall back to the scalar base/gen ratio for this round.
+        base_block = {{
+            "avg_time_us": OVERRIDE_BASE_US,
+            "execution_time_us": OVERRIDE_BASE_US,
+            "execution_time_ms": OVERRIDE_BASE_US / 1000,
+            "warmup_times": 0, "run_times": 0,
+            "num_cases": num_cases,
+            "sticky": True,
+        }}
+        if (OVERRIDE_BASE_PER_SHAPE_US is not None
+                and len(OVERRIDE_BASE_PER_SHAPE_US) == num_cases):
+            base_block["per_shape"] = [
+                {{"avg_time_us": v, "method": "sticky"}}
+                for v in OVERRIDE_BASE_PER_SHAPE_US
+            ]
+        elif OVERRIDE_BASE_PER_SHAPE_US is not None:
+            print(f"[eval] WARN: sticky per_shape length "
+                  f"{{len(OVERRIDE_BASE_PER_SHAPE_US)}} != num_cases "
+                  f"{{num_cases}}; skipping per_shape override",
+                  file=sys.stderr)
+        result["profile_base"] = base_block
+    else:
+        try:
+            result["profile_base"] = _run_profile(Model, _bench_base, "base")
+        except Exception as e:
+            traceback.print_exc()
+            result["ok"] = False
+            result["errors"].append({{
+                "phase": "profile_base",
+                "type": type(e).__name__, "msg": str(e),
+            }})
 
 _write_and_exit(0 if verify_ok else 1)
 '''

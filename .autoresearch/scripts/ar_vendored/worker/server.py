@@ -6,15 +6,17 @@ Endpoints:
 
 The client ships a tar.gz built by package_builder. We `safe_extract`
 it (rejecting path-traversal), pick a device slot from an internal
-asyncio.Queue, run the SINGLE auto-generated `eval_<op>.py` as one
-subprocess (verify + profile_gen + profile_base run in-process there
-so the JIT/autotune cache stays warm), then read `eval_result.json`
-from the extracted dir and return it with stdout+stderr to the client.
+asyncio.Queue, run the generated `eval_<op>.py` TWICE (ref pass then
+kernel pass) so a kernel-induced SIGKILL / device hang in the kernel
+pass can't erase ref data the ref pass already wrote. Per-phase
+sidecars are merged into eval_result.json and returned with the
+combined stdout+stderr. When a sticky baseline is supplied the ref
+pass is skipped.
 
 No acquire/release endpoints, no DevicePool — device assignment is
 internal to /run, so the client can't bake a wrong device id into the
 package and the pool never decrements for slots that were never
-reserved. Extract / env / sidecar helpers are imported from
+reserved. Extract / env / sidecar / merge helpers are imported from
 `utils.eval_runner` so this transport can't drift from the local one.
 """
 from __future__ import annotations
@@ -40,7 +42,8 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from utils.eval_runner import (  # noqa: E402
-    build_response, env_for, read_sidecar, safe_extract,
+    build_response, env_for, merge_sidecars, read_sidecar, safe_extract,
+    write_merged_sidecar,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,6 +150,9 @@ async def _run_eval(package_bytes: bytes, task_id: str, op_name: str,
                     override_base_us: Optional[float] = None,
                     override_base_per_shape_us: Optional[list] = None) -> dict:
     import tempfile
+    skip_ref = (override_base_us is not None and override_base_us > 0)
+    script = f"eval_{op_name}.py"
+
     with tempfile.TemporaryDirectory(prefix=f"ar_run_{task_id}_") as tmp:
         try:
             safe_extract(package_bytes, tmp)
@@ -154,10 +160,37 @@ async def _run_eval(package_bytes: bytes, task_id: str, op_name: str,
             return build_response(
                 device_id, 1, f"extract failed: {e}", None)
 
-        env = env_for(device_id, override_base_us=override_base_us,
-                      override_base_per_shape_us=override_base_per_shape_us)
-        rc, log = await _run_script(tmp, f"eval_{op_name}.py", env, timeout)
-        return build_response(device_id, rc, log, read_sidecar(tmp))
+        # --- Pass 1: ref-only subprocess (immune to kernel-side death) -
+        if skip_ref:
+            ref_log = ""
+            ref_payload: Optional[dict] = None
+        else:
+            ref_env = env_for(
+                device_id,
+                override_base_us=override_base_us,
+                override_base_per_shape_us=override_base_per_shape_us,
+                phase="ref_only",
+                sidecar_path=os.path.join(tmp, "eval_result_ref.json"),
+            )
+            _, ref_log = await _run_script(tmp, script, ref_env, timeout)
+            ref_payload = read_sidecar(tmp, "eval_result_ref.json")
+
+        # --- Pass 2: kernel-only subprocess (verify + profile_gen) ----
+        # Kernel-pass rc is the authoritative round outcome.
+        kernel_env = env_for(
+            device_id,
+            override_base_us=override_base_us,
+            override_base_per_shape_us=override_base_per_shape_us,
+            phase="kernel_only",
+            sidecar_path=os.path.join(tmp, "eval_result_kernel.json"),
+        )
+        rc, kernel_log = await _run_script(tmp, script, kernel_env, timeout)
+        kernel_payload = read_sidecar(tmp, "eval_result_kernel.json")
+
+        merged = merge_sidecars(ref_payload, kernel_payload)
+        write_merged_sidecar(tmp, merged)
+        log = "\n".join(s for s in (ref_log, kernel_log) if s).strip()
+        return build_response(device_id, rc, log, merged)
 
 
 async def _run_script(workdir: str, script: str, env: dict,
