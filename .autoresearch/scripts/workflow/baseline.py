@@ -91,17 +91,52 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
     # the speedup anchor. Earlier versions overwrote baseline_metric on
     # every re-run, which made the "1.27x vs ref" message compare round-N
     # kernels against a different anchor than round-0 kernels.
+    #
+    # Fingerprint: when warmup/run/num_cases changed since the stored
+    # anchor was measured, sticky reuse becomes a lie — anchor is under
+    # old config but this round's kernels run under new. If we ALSO
+    # have a fresh ref_val this round, re-anchor to it; otherwise keep
+    # stale values AND stale fingerprint (don't overwrite fp to claim
+    # the old number matches the new config).
     existing = load_progress(task_dir) or Progress()
     existing_baseline = existing.baseline_metric
     existing_source = existing.baseline_source
     existing_baseline_commit = existing.baseline_commit
+    existing_fp = existing.baseline_fingerprint
+    existing_per_shape = existing.baseline_per_shape_us
 
+    current_fp = {
+        "warmup_times": int(getattr(config, "warmup_times", 10)),
+        "run_times": int(getattr(config, "run_times", 100)),
+        "num_cases": int(metrics.get("num_cases") or 1),
+    }
+    fp_match = (isinstance(existing_fp, dict) and existing_fp == current_fp)
+
+    reuse_sticky = False
     if _valid(existing_baseline) and existing_source == "ref":
-        baseline_val = existing_baseline
-        baseline_source = "ref"
-        print(f"[baseline] sticky baseline = {existing_baseline} "
-              f"(kept from first eval; this round's ref={ref_val} ignored)",
-              file=sys.stderr)
+        if fp_match:
+            baseline_val = existing_baseline
+            baseline_source = "ref"
+            reuse_sticky = True
+            print(f"[baseline] sticky baseline = {existing_baseline} "
+                  f"(fingerprint match; this round's ref={ref_val} ignored)",
+                  file=sys.stderr)
+        elif ref_val is not None:
+            baseline_val = ref_val
+            baseline_source = "ref"
+            existing_baseline_commit = None
+            print(f"[baseline] fingerprint changed "
+                  f"({existing_fp} -> {current_fp}); re-anchoring to "
+                  f"fresh ref={ref_val}", file=sys.stderr)
+        else:
+            baseline_val = existing_baseline
+            baseline_source = "ref"
+            reuse_sticky = True
+            print(f"[baseline] WARN: fingerprint changed "
+                  f"({existing_fp} -> {current_fp}) but no fresh ref this "
+                  f"round; keeping stale baseline={existing_baseline} with "
+                  f"stale fingerprint to avoid misrepresenting the anchor",
+                  file=sys.stderr)
     elif ref_val is not None:
         baseline_val = ref_val
         baseline_source = "ref"
@@ -132,25 +167,23 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
     # without re-parsing history.jsonl. Single-shape ops leave both absent.
     n_cases = metrics.get("num_cases")
     descs = metrics.get("per_shape_descs")
-    # Pin per-shape ref timings alongside baseline_metric so sticky
-    # rounds (which skip profile_base) can still compute geomean
-    # speedup. Only kept when ref was actually measured this round.
-    per_shape_base = metrics.get("per_shape_base_us")
-    if (baseline_source == "ref"
-            and isinstance(per_shape_base, list) and per_shape_base
-            and all(_valid(v) for v in per_shape_base)):
-        baseline_per_shape = [float(v) for v in per_shape_base]
+    # Per-shape ref timings + fingerprint follow the SAME anchor source as
+    # baseline_metric — reuse existing when sticky, capture fresh when
+    # re-anchoring / first measurement, None for seed_fallback.
+    if reuse_sticky:
+        baseline_per_shape = existing_per_shape
+        baseline_fp = existing_fp
+    elif baseline_source == "ref":
+        per_shape_base = metrics.get("per_shape_base_us")
+        if (isinstance(per_shape_base, list) and per_shape_base
+                and all(_valid(v) for v in per_shape_base)):
+            baseline_per_shape = [float(v) for v in per_shape_base]
+        else:
+            baseline_per_shape = None
+        baseline_fp = current_fp
     else:
         baseline_per_shape = None
-    # Pin the eval-config fingerprint alongside the baseline so sticky
-    # rounds re-measure ref if the user changes warmup/run/case count.
-    baseline_fp = None
-    if baseline_source == "ref":
-        baseline_fp = {
-            "warmup_times": int(getattr(config, "warmup_times", 10)),
-            "run_times": int(getattr(config, "run_times", 100)),
-            "num_cases": int(metrics.get("num_cases") or 1),
-        }
+        baseline_fp = None
     save_progress(task_dir, Progress(
         task=config.name,
         eval_rounds=0,

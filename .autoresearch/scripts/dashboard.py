@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""
-Live dashboard for autoresearch progress.
-
-Run in a separate terminal:
-    python .autoresearch/scripts/dashboard.py <task_dir> [--watch N]
-
---watch N: refresh every N seconds (default: 5). Ctrl+C to stop.
-Without --watch: print once and exit.
-"""
+"""Live dashboard for autoresearch progress."""
 
 import argparse
 import json

@@ -136,6 +136,52 @@ def read_sidecar(workdir: str, name: str = EVAL_SIDECAR) -> Optional[dict]:
         return None
 
 
+def synth_sticky_ref_payload(override_base_us: float,
+                             override_base_per_shape_us: Optional[list],
+                             num_cases: int) -> dict:
+    """Build a ref-side payload matching what the in-script sticky
+    branch (package_builder.py Phase E, OVERRIDE_BASE_US != None) would
+    produce.
+
+    Used when the two-pass runner SKIPS the ref subprocess (sticky
+    baseline) — without this, merge_sidecars would have ref=None and
+    the merged profile_base would be None, dropping ref_latency_us /
+    speedup_vs_ref from the round's metrics entirely.
+    """
+    block: dict = {
+        "avg_time_us": float(override_base_us),
+        "execution_time_us": float(override_base_us),
+        "execution_time_ms": float(override_base_us) / 1000.0,
+        "warmup_times": 0,
+        "run_times": 0,
+        "num_cases": int(num_cases),
+        "sticky": True,
+    }
+    if (isinstance(override_base_per_shape_us, list)
+            and override_base_per_shape_us
+            and len(override_base_per_shape_us) == int(num_cases)):
+        block["per_shape"] = [
+            {"avg_time_us": float(v), "method": "sticky"}
+            for v in override_base_per_shape_us
+        ]
+    return {"profile_base": block, "ok": True, "errors": []}
+
+
+def num_cases_from_kernel_payload(kernel: Optional[dict]) -> int:
+    """Pull num_cases from a kernel-pass sidecar — verify writes it,
+    profile_gen does too. Returns 1 when neither is present so the
+    sticky synthesis never blows up on missing data."""
+    if not isinstance(kernel, dict):
+        return 1
+    v = (kernel.get("verify") or {}).get("num_cases")
+    if isinstance(v, int) and v >= 1:
+        return v
+    v = (kernel.get("profile_gen") or {}).get("num_cases")
+    if isinstance(v, int) and v >= 1:
+        return v
+    return 1
+
+
 def merge_sidecars(ref: Optional[dict],
                    kernel: Optional[dict]) -> Optional[dict]:
     """Combine per-phase sidecars into the canonical eval_result shape.

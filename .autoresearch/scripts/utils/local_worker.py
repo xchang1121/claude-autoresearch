@@ -18,8 +18,8 @@ import tempfile
 from typing import Optional
 
 from .eval_runner import (
-    build_response, env_for, merge_sidecars, read_sidecar, safe_extract,
-    write_merged_sidecar,
+    build_response, env_for, merge_sidecars, num_cases_from_kernel_payload,
+    read_sidecar, safe_extract, synth_sticky_ref_payload, write_merged_sidecar,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,8 @@ def local_eval(package_bytes: bytes, op_name: str, timeout: int,
                 device_id, 1, f"extract failed: {e}", None)
 
         # --- Pass 1: ref-only subprocess (immune to kernel-side death) -
+        # Skipped on sticky-baseline rounds; ref_payload is synthesized
+        # AFTER pass 2 finishes so we can read num_cases off it.
         if skip_ref:
             ref_log = ""
             ref_payload: Optional[dict] = None
@@ -120,6 +122,17 @@ def local_eval(package_bytes: bytes, op_name: str, timeout: int,
         )
         rc, kernel_log = _run_script(tmp, script, kernel_env, timeout)
         kernel_payload = read_sidecar(tmp, "eval_result_kernel.json")
+
+        # Sticky-baseline path: kernel-only pass writes no profile_base
+        # (Phase E gated by DO_REF_PHASE=False). Without a synthesized
+        # ref payload, merge_sidecars would leave profile_base=None and
+        # the round would lose ref_latency_us / speedup_vs_ref entirely.
+        if skip_ref:
+            ref_payload = synth_sticky_ref_payload(
+                override_base_us,
+                override_base_per_shape_us,
+                num_cases_from_kernel_payload(kernel_payload),
+            )
 
         merged = merge_sidecars(ref_payload, kernel_payload)
         write_merged_sidecar(tmp, merged)
