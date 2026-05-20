@@ -11,9 +11,11 @@ Bash gate is three layers, each with one job:
        OTHER      anything else (ad-hoc bash, malformed AR, writes)
      Consults command text only — no phase, no filesystem.
 
-  2. PHASE TABLE — `_AR_ALLOWED_BY_PHASE` / `_OTHER_ALLOWED_BY_PHASE`.
-     Static dicts. LIFECYCLE / READONLY are implicitly allowed everywhere.
-     A rule change is a one-row edit.
+  2. PHASE TABLE — `_AR_ALLOWED_BY_PHASE`. Static dict.
+     LIFECYCLE / READONLY are implicitly allowed everywhere.
+     OTHER is never allowed (writes go through Edit/Write tool gated by
+     check_edit, state changes go through AR scripts) — a single
+     ownership invariant for .ar_state/ across both tools.
 
   3. `check_bash` — global string bans, classify(), table lookup.
 
@@ -344,18 +346,41 @@ def parse_invoked_ar_script(command: str) -> Optional[str]:
     return parse_canonical_ar(command)
 
 
-def parse_script_names(command: str) -> List[Tuple[str, str]]:
-    """Return [(path, basename)] for the AR script in `command`, or [].
-    Used by hooks/guard_bash's hallucinated-name pre-check.
+_SCRIPT_SHAPE_RE = re.compile(
+    r'\.autoresearch/scripts/((?:engine/)?[A-Za-z_]\w*\.py)\b'
+)
+# Match the python launcher as a whole word so unrelated tokens like
+# `python_helper` don't trigger the unknown-script hint on read-only
+# references (`cat .../python_helper.py`). `\bpy\b` is intentionally
+# omitted — it false-matches `.py` extensions in cat/git diff args.
+# Windows `py` launcher users should write `python` explicitly.
+_PY_LAUNCHER_RE = re.compile(r'\bpython(?:\d+(?:\.\d+)?)?\b')
 
-    Path is the canonical engine/-rooted form for blessed CLIs and the
-    flat scripts/ form for top-level lifecycle scripts. Consumers only
-    care about the basename today; the path is informational."""
-    invoked = parse_canonical_ar(command)
-    if not invoked:
+
+def parse_script_names(command: str) -> List[Tuple[str, str]]:
+    """Return [(path, basename)] for every `.autoresearch/scripts/X.py`
+    reference in a python-invocation command, regardless of canonical-
+    location validity. Used by hooks/guard_bash's hallucinated/library/
+    unknown-name pre-check: that pass wants the basename even when the
+    invocation is non-canonical (wrong directory, malformed shape), so
+    it can give a targeted hint before check_bash falls through to the
+    generic canonical-form rejection.
+
+    Returns [] when the command isn't a python invocation — read-only
+    references (`cat .../X.py`, `git diff -- .../X.py`) and unrelated
+    chains don't get unknown-script hints.
+
+    Path is the slash-form sub-path under `.autoresearch/scripts/`
+    (e.g. `engine/eval.py` or `scaffold.py`); basename is the trailing
+    file name. Consumers today only read the basename."""
+    normalized = _normalize(command)
+    if not _PY_LAUNCHER_RE.search(normalized):
         return []
-    sub = "" if invoked in _LIFECYCLE_SCRIPTS else "engine/"
-    return [(f".autoresearch/scripts/{sub}{invoked}", invoked)]
+    out: List[Tuple[str, str]] = []
+    for sub in _SCRIPT_SHAPE_RE.findall(normalized):
+        basename = sub.rsplit("/", 1)[-1]
+        out.append((f".autoresearch/scripts/{sub}", basename))
+    return out
 
 
 def is_single_foreground_ar_invocation(command: str, *, script: str) -> tuple:
