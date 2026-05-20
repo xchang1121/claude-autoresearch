@@ -20,6 +20,7 @@ reserved. Extract / env / sidecar helpers are imported from
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -97,23 +98,42 @@ async def run(
     op_name: str = Form(...),
     timeout: int = Form(600),
     override_base_us: Optional[float] = Form(None),
+    override_base_per_shape_us: Optional[str] = Form(None),
 ):
     """Verify + profile in one call. Device is picked server-side from the
     pool, exported as DEVICE_ID env to the spawned script, and released
     in the finally block — clients cannot leak a slot.
 
-    `override_base_us`: sticky baseline. When the caller has a measured
-    PyTorch reference time, pass it here and the generated eval script
-    skips profile_base — saves one full per-shape benchmark pass.
+    `override_base_us`: sticky aggregate baseline. When the caller has
+    a measured PyTorch reference time, pass it here and the generated
+    eval script skips profile_base — saves one full per-shape benchmark
+    pass.
+
+    `override_base_per_shape_us`: JSON-encoded list of per-case
+    aggregate timings the SEED round measured. When supplied alongside
+    override_base_us, the generated script materialises a per_shape
+    base profile so speedup_vs_ref stays a geomean of per-shape ratios
+    (matching the SEED round's aggregation).
     """
     if "queue" not in _state:
         raise HTTPException(status_code=503, detail="worker not initialised")
     package_bytes = await package.read()
+    per_shape: Optional[list] = None
+    if override_base_per_shape_us:
+        try:
+            per_shape = json.loads(override_base_per_shape_us)
+            if not (isinstance(per_shape, list) and per_shape):
+                per_shape = None
+        except Exception as e:
+            logger.warning("[%s] bad override_base_per_shape_us JSON: %s",
+                           task_id, e)
+            per_shape = None
     device_id = await _state["queue"].get()
     try:
         logger.info("[%s] run %s on device %d", task_id, op_name, device_id)
         return await _run_eval(package_bytes, task_id, op_name, timeout,
-                               device_id, override_base_us=override_base_us)
+                               device_id, override_base_us=override_base_us,
+                               override_base_per_shape_us=per_shape)
     finally:
         await _state["queue"].put(device_id)
 
@@ -124,7 +144,8 @@ async def run(
 
 async def _run_eval(package_bytes: bytes, task_id: str, op_name: str,
                     timeout: int, device_id: int,
-                    override_base_us: Optional[float] = None) -> dict:
+                    override_base_us: Optional[float] = None,
+                    override_base_per_shape_us: Optional[list] = None) -> dict:
     import tempfile
     with tempfile.TemporaryDirectory(prefix=f"ar_run_{task_id}_") as tmp:
         try:
@@ -133,7 +154,8 @@ async def _run_eval(package_bytes: bytes, task_id: str, op_name: str,
             return build_response(
                 device_id, 1, f"extract failed: {e}", None)
 
-        env = env_for(device_id, override_base_us=override_base_us)
+        env = env_for(device_id, override_base_us=override_base_us,
+                      override_base_per_shape_us=override_base_per_shape_us)
         rc, log = await _run_script(tmp, f"eval_{op_name}.py", env, timeout)
         return build_response(device_id, rc, log, read_sidecar(tmp))
 

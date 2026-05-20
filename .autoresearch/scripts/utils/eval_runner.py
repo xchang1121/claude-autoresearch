@@ -68,12 +68,17 @@ def safe_extract(package_bytes: bytes, dst: str) -> None:
 
 
 def env_for(device_id: int,
-            override_base_us: Optional[float] = None) -> dict:
+            override_base_us: Optional[float] = None,
+            override_base_per_shape_us: Optional[list] = None) -> dict:
     """Env vars the generated eval_<op>.py reads.
 
-    DEVICE_ID selects which NPU/GPU to bind. AR_OVERRIDE_BASE_TIME_US,
-    when set, tells the script to skip profile_base and reuse the
-    caller-supplied baseline (sticky baseline path).
+    DEVICE_ID selects which NPU/GPU to bind.
+    AR_OVERRIDE_BASE_TIME_US, when set, tells the script to skip
+    profile_base and reuse the caller-supplied aggregate baseline.
+    AR_OVERRIDE_BASE_PER_SHAPE_US, when set (JSON list of floats),
+    additionally populates `profile_base.per_shape` so speedup_vs_ref
+    keeps computing as a geomean of per-shape ratios — sticky rounds
+    aggregate the same way the SEED round did.
     """
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -84,6 +89,10 @@ def env_for(device_id: int,
     env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
     if override_base_us is not None and override_base_us > 0:
         env["AR_OVERRIDE_BASE_TIME_US"] = f"{override_base_us:.6f}"
+    if (isinstance(override_base_per_shape_us, list)
+            and override_base_per_shape_us):
+        env["AR_OVERRIDE_BASE_PER_SHAPE_US"] = json.dumps(
+            [float(v) for v in override_base_per_shape_us])
     return env
 
 

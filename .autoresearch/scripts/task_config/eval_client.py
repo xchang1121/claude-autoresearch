@@ -75,10 +75,22 @@ def _effective_timeout(config: TaskConfig, num_cases: int) -> int:
     return int(config.eval_timeout) * max(int(num_cases), 1)
 
 
-def _override_base_from_progress(task_dir: str) -> Optional[float]:
-    """Sticky baseline: read the recorded baseline_metric so the eval
-    script can skip profile_base. Only honoured when the prior
-    baseline_init recorded baseline_source='ref'.
+def _override_base_from_progress(
+        task_dir: str,
+        config: Optional[TaskConfig] = None,
+        num_cases: Optional[int] = None,
+        ) -> Optional[tuple[float, Optional[list]]]:
+    """Sticky baseline: read (aggregate_us, per_shape_us) from progress.json
+    so the eval script can skip profile_base. Only honoured when the
+    prior baseline_init recorded baseline_source='ref' AND the stored
+    fingerprint matches the current config (warmup_times, run_times,
+    num_cases). Mismatch → return None so the caller re-measures ref.
+
+    per_shape_us is the per-case ref timings the SEED round measured —
+    sticky rounds reuse them so speedup_vs_ref stays a geomean of
+    per-shape ratios. None on the per_shape slot when SEED didn't
+    capture per-shape detail (legacy progress without
+    baseline_per_shape_us).
     """
     if _scripts_dir not in sys.path:
         sys.path.insert(0, _scripts_dir)
@@ -90,9 +102,36 @@ def _override_base_from_progress(task_dir: str) -> Optional[float]:
     if progress.get("baseline_source") != "ref":
         return None
     v = progress.get("baseline_metric")
-    if isinstance(v, (int, float)) and 0 < v < float("inf"):
-        return float(v)
-    return None
+    if not (isinstance(v, (int, float)) and 0 < v < float("inf")):
+        return None
+    # Fingerprint check: invalidate sticky if the eval config changed
+    # since the baseline was measured. Skipped when caller didn't
+    # supply config — backwards-compatible with the pre-fingerprint
+    # contract.
+    if config is not None:
+        stored = progress.get("baseline_fingerprint") or {}
+        current = {
+            "warmup_times": int(getattr(config, "warmup_times", 10)),
+            "run_times": int(getattr(config, "run_times", 100)),
+            "num_cases": int(num_cases or 1),
+        }
+        if isinstance(stored, dict) and stored:
+            mismatch = {k: (stored.get(k), current[k])
+                        for k in current
+                        if stored.get(k) != current[k]}
+            if mismatch:
+                print(f"[eval_client] sticky baseline invalidated: "
+                      f"fingerprint mismatch {mismatch}; will re-measure ref",
+                      file=sys.stderr)
+                return None
+    per_shape = progress.get("baseline_per_shape_us")
+    if (isinstance(per_shape, list) and per_shape
+            and all(isinstance(x, (int, float))
+                    and 0 < x < float("inf") for x in per_shape)):
+        per_shape_validated = [float(x) for x in per_shape]
+    else:
+        per_shape_validated = None
+    return float(v), per_shape_validated
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +202,8 @@ def _multipart_post(url: str, fields: dict, files: dict, timeout: float) -> dict
 
 def _worker_run(worker_url: str, package: bytes, task_id: str,
                 op_name: str, timeout: float,
-                override_base_us: Optional[float] = None) -> dict:
+                override_base_us: Optional[float] = None,
+                override_base_per_shape_us: Optional[list] = None) -> dict:
     """POST /api/v1/run. Returns {device_id, returncode, log, eval_result}."""
     fields: dict = {
         "task_id": task_id, "op_name": op_name,
@@ -171,6 +211,10 @@ def _worker_run(worker_url: str, package: bytes, task_id: str,
     }
     if override_base_us is not None and override_base_us > 0:
         fields["override_base_us"] = f"{override_base_us:.6f}"
+    if (isinstance(override_base_per_shape_us, list)
+            and override_base_per_shape_us):
+        fields["override_base_per_shape_us"] = json.dumps(
+            [float(v) for v in override_base_per_shape_us])
     return _multipart_post(
         f"{worker_url}/api/v1/run",
         fields=fields,
@@ -201,6 +245,18 @@ def _per_shape_us(block: Optional[dict]) -> Optional[list]:
     if not isinstance(ps, list) or not ps:
         return None
     return [(s.get("avg_time_us") if isinstance(s, dict) else None) for s in ps]
+
+
+def _per_shape_methods(block: Optional[dict]) -> Optional[list]:
+    """Per-shape `method` strings (e.g. "profiler_npu", "do_bench_base").
+    Used to detect kernel-vs-ref measurement-method mismatches so a
+    cross-method comparison doesn't silently produce a bogus speedup."""
+    if not isinstance(block, dict):
+        return None
+    ps = block.get("per_shape")
+    if not isinstance(ps, list) or not ps:
+        return None
+    return [(s.get("method") if isinstance(s, dict) else None) for s in ps]
 
 
 def _assemble_eval_result(resp: dict) -> EvalResult:
@@ -257,24 +313,56 @@ def _assemble_eval_result(resp: dict) -> EvalResult:
     if per_gen is not None:
         metrics["num_cases"] = len(per_gen)
         metrics["per_shape_gen_us"] = per_gen
+        # Per-shape method (profiler_npu / do_bench_base / crashed /
+        # adapter-specific). Surfaced so cross-method comparisons can
+        # be flagged when gen and base measured with different methods.
+        gen_methods = _per_shape_methods(profile_gen)
+        if gen_methods:
+            metrics["per_shape_gen_method"] = gen_methods
+            uniq_gen = sorted({m for m in gen_methods if m})
+            if uniq_gen:
+                metrics["timing_method_gen"] = uniq_gen[0] if len(uniq_gen) == 1 else "mixed"
         if crashed_shapes:
             metrics["profile_crashed_cases"] = crashed_shapes[:30]
             metrics["profile_crashed_count"] = len(crashed_shapes)
         if per_base is not None and len(per_base) == len(per_gen):
             metrics["per_shape_base_us"] = per_base
+            base_methods = _per_shape_methods(profile_base)
+            if base_methods:
+                metrics["per_shape_base_method"] = base_methods
+                uniq_base = sorted({m for m in base_methods if m})
+                if uniq_base:
+                    metrics["timing_method_base"] = uniq_base[0] if len(uniq_base) == 1 else "mixed"
+            # Cross-method comparison flag: when gen and base measured
+            # with different methods, the speedup_vs_ref ratio mixes
+            # measurement semantics (e.g. profiler op-self-time vs
+            # do_bench wall-clock). Surface so downstream can either
+            # warn or invalidate. "sticky" on either side is excluded
+            # — sticky base is a reused profiler_npu_base measurement,
+            # not a different method per se.
+            mg = metrics.get("timing_method_gen")
+            mb = metrics.get("timing_method_base")
+            if (mg and mb and mg != mb
+                    and mg != "sticky" and mb != "sticky"):
+                metrics["timing_method_mismatch"] = {"gen": mg, "base": mb}
             per_speedup = [
                 (b / g) if (_finite(b) and _finite(g)) else None
                 for b, g in zip(per_base, per_gen)
             ]
             metrics["per_shape_speedup"] = per_speedup
+            bad = [i for i, s in enumerate(per_speedup) if not _finite(s)]
+            if bad:
+                metrics["per_shape_speedup_bad_cases"] = bad
+            # Aggregation contract: latency = arithmetic mean (set above);
+            # speedup = geometric mean of per-shape ratios. Sticky-baseline
+            # rounds rebuild per_base from baseline_per_shape_us so this
+            # stays consistent round-to-round; single-shape ops collapse
+            # to geomean == scalar.
             valid = [s for s in per_speedup if _finite(s)]
             if valid:
                 metrics["speedup_vs_ref"] = math.exp(
                     sum(math.log(s) for s in valid) / len(valid))
                 metrics["speedup_aggregation"] = "geomean"
-            bad = [i for i, s in enumerate(per_speedup) if not _finite(s)]
-            if bad:
-                metrics["per_shape_speedup_bad_cases"] = bad
         descs = [s.get("case_desc")
                  for s in (profile_gen.get("per_shape") or [])
                  if isinstance(s, dict)]
@@ -352,14 +440,21 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
         return EvalResult(outcome=EvalOutcome.INFRA_FAIL,
                           error=f"failed to build package: {e}")
 
-    override = _override_base_from_progress(task_dir)
+    override = _override_base_from_progress(task_dir, config=config,
+                                             num_cases=num_cases)
     if override is not None:
-        print(f"[remote_eval] sticky baseline override={override:.2f} us",
-              file=sys.stderr)
+        override_agg, override_per_shape = override
+        ps_note = (f" (+ per-shape {len(override_per_shape)})"
+                   if override_per_shape else " (aggregate only)")
+        print(f"[remote_eval] sticky baseline override={override_agg:.2f} us"
+              f"{ps_note}", file=sys.stderr)
+    else:
+        override_agg, override_per_shape = None, None
 
     try:
         resp = _worker_run(worker_url, package, task_id, config.name,
-                           eff_timeout, override_base_us=override)
+                           eff_timeout, override_base_us=override_agg,
+                           override_base_per_shape_us=override_per_shape)
     except Exception as e:
         return EvalResult(outcome=EvalOutcome.INFRA_FAIL,
                           error=f"worker /run failed: {e}")
@@ -393,16 +488,23 @@ def run_local_eval(task_dir: str, config: TaskConfig,
               f"{eff_timeout}s", file=sys.stderr)
     print(f"[local_eval] device={dev}", file=sys.stderr)
 
-    override = _override_base_from_progress(task_dir)
+    override = _override_base_from_progress(task_dir, config=config,
+                                             num_cases=num_cases)
     if override is not None:
-        print(f"[local_eval] sticky baseline override={override:.2f} us",
-              file=sys.stderr)
+        override_agg, override_per_shape = override
+        ps_note = (f" (+ per-shape {len(override_per_shape)})"
+                   if override_per_shape else " (aggregate only)")
+        print(f"[local_eval] sticky baseline override={override_agg:.2f} us"
+              f"{ps_note}", file=sys.stderr)
+    else:
+        override_agg, override_per_shape = None, None
 
     if _scripts_dir not in sys.path:
         sys.path.insert(0, _scripts_dir)
     from utils.local_worker import local_eval as _local_eval
     resp = _local_eval(package, config.name, eff_timeout, dev,
-                       override_base_us=override)
+                       override_base_us=override_agg,
+                       override_base_per_shape_us=override_per_shape)
     return _assemble_eval_result(resp)
 
 

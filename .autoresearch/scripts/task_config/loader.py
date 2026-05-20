@@ -86,6 +86,21 @@ class TaskConfig:
 # YAML loader
 # ---------------------------------------------------------------------------
 
+def _pos_int(block: dict, key: str, default: int, yaml_path: str) -> int:
+    """Read a positive-integer field from a task.yaml block. Profiler
+    schedule + warmup loop both go nonsense at <=0 — fail loud at
+    config-load time rather than wait for an aclnnArange crash mid-run.
+    """
+    raw = block.get(key, default)
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{yaml_path}: eval.{key}={raw!r} is not an integer")
+    if v < 1:
+        raise ValueError(f"{yaml_path}: eval.{key}={v} must be >= 1")
+    return v
+
+
 def load_task_config(task_dir: str) -> Optional[TaskConfig]:
     """Load TaskConfig from task_dir/task.yaml. Returns None if not found."""
     yaml_path = os.path.join(task_dir, "task.yaml")
@@ -143,8 +158,8 @@ def load_task_config(task_dir: str) -> Optional[TaskConfig]:
         editable_files=raw.get("editable_files", []),
         ref_file=agent_block.get("ref_file") or "reference.py",
         eval_timeout=eval_block.get("timeout", 600),
-        warmup_times=int(eval_block.get("warmup_times", 10)),
-        run_times=int(eval_block.get("run_times", 100)),
+        warmup_times=_pos_int(eval_block, "warmup_times", 10, yaml_path),
+        run_times=_pos_int(eval_block, "run_times", 100, yaml_path),
         primary_metric=metric_block.get("primary", "score"),
         lower_is_better=metric_block.get("lower_is_better", True),
         improvement_threshold=metric_block.get("improvement_threshold", 0.0),

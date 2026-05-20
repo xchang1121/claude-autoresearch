@@ -230,6 +230,22 @@ SIDECAR_PATH = os.environ.get(
 )
 OVERRIDE_BASE_US = float(os.environ["AR_OVERRIDE_BASE_TIME_US"]) \\
     if os.environ.get("AR_OVERRIDE_BASE_TIME_US") else None
+# Sticky per-shape ref baseline (JSON list). Paired with
+# OVERRIDE_BASE_US so speedup_vs_ref stays a geomean of per-shape
+# ratios instead of falling back to scalar after the first round.
+_override_ps_raw = os.environ.get("AR_OVERRIDE_BASE_PER_SHAPE_US")
+if _override_ps_raw:
+    try:
+        OVERRIDE_BASE_PER_SHAPE_US = [
+            float(v) for v in json.loads(_override_ps_raw)
+            if isinstance(v, (int, float)) and 0 < v < float("inf")
+        ]
+        if not OVERRIDE_BASE_PER_SHAPE_US:
+            OVERRIDE_BASE_PER_SHAPE_US = None
+    except Exception:
+        OVERRIDE_BASE_PER_SHAPE_US = None
+else:
+    OVERRIDE_BASE_PER_SHAPE_US = None
 
 result = {{
     "verify": None,
@@ -460,32 +476,6 @@ def _bench_base(impl_model, inputs, case_idx):
     return execution_time_us, method
 
 
-def _cpu_timer_fallback(impl_model, inputs):
-    for _ in range({warmup}):
-        with torch.no_grad():
-            impl_model(*inputs)
-    if device_type == "npu":
-        torch.npu.synchronize()
-    elif device_type == "cuda":
-        torch.cuda.synchronize()
-    times = []
-    for _ in range({repeats}):
-        if device_type == "npu":
-            torch.npu.synchronize()
-        elif device_type == "cuda":
-            torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        with torch.no_grad():
-            impl_model(*inputs)
-        if device_type == "npu":
-            torch.npu.synchronize()
-        elif device_type == "cuda":
-            torch.cuda.synchronize()
-        times.append((time.perf_counter() - t0) * 1e6)
-    return (sum(times) / len(times) if times else float("inf"),
-            "cpu_timer_fallback")
-
-
 def _run_profile(target_cls, bench_fn, mode_label):
     per_shape = []
     for idx, case in enumerate(cases_cpu):
@@ -497,18 +487,19 @@ def _run_profile(target_cls, bench_fn, mode_label):
             if hasattr(impl_model, "eval"):
                 impl_model.eval()
             inputs = [x.to(device) if hasattr(x, "to") else x for x in case]
-            try:
-                avg_us, method = bench_fn(impl_model, inputs, idx)
-                if (avg_us is None or avg_us <= 0
-                        or avg_us == float("inf")):
-                    raise RuntimeError(
-                        f"adapter benchmark returned invalid avg_us={{avg_us!r}}")
-            except Exception as e:
+            avg_us, method = bench_fn(impl_model, inputs, idx)
+            if (avg_us is None or avg_us <= 0
+                    or avg_us == float("inf")):
+                # adapter ran but returned a non-finite / non-positive
+                # value. Mark crashed; don't silently fall back to a
+                # different timing method (e.g. CPU wall-clock) — that
+                # would silently mix semantics across rounds and
+                # produce a dishonest speedup_vs_ref.
                 print(f"[profile {{mode_label}}] case {{idx}} adapter "
-                      f"failed: {{e}}; falling back to cpu timer",
+                      f"returned invalid avg_us={{avg_us!r}}; marking "
+                      f"crashed",
                       file=sys.stderr)
-                traceback.print_exc()
-                avg_us, method = _cpu_timer_fallback(impl_model, inputs)
+                avg_us, method = float("inf"), "crashed"
         except Exception as e:
             print(f"[profile {{mode_label}}] case {{idx}} setup/timing "
                   f"failed: {{e}}", file=sys.stderr)
@@ -569,15 +560,13 @@ except Exception as e:
 if OVERRIDE_BASE_US is not None and OVERRIDE_BASE_US > 0:
     print(f"[eval] sticky baseline override = {{OVERRIDE_BASE_US:.2f}} us; "
           f"skipping profile_base", file=sys.stderr)
-    # NOTE: the override is a single AGGREGATE baseline_metric stored in
-    # progress.json — we do NOT have real per-shape ref timings. Don't
-    # synthesize a per_shape array by copying the aggregate to every
-    # case: eval_client would then feed those fake per-shape ratios
-    # into the geomean and the reported speedup_vs_ref would diverge
-    # from the honest base_time / gen_time ratio. By omitting per_shape
-    # entirely, eval_client's per_base=None gate falls back to the
-    # scalar speedup formula.
-    result["profile_base"] = {{
+    # When per-shape ref was captured at SEED time (progress.baseline_per_shape_us),
+    # eval_client passes it through AR_OVERRIDE_BASE_PER_SHAPE_US so we
+    # can materialise per_shape here. speedup_vs_ref then stays a geomean
+    # of per-shape ratios across sticky rounds. Without per-shape data
+    # (legacy progress or partial measurement), omit per_shape and let
+    # eval_client fall back to the scalar base/gen ratio for this round.
+    base_block = {{
         "avg_time_us": OVERRIDE_BASE_US,
         "execution_time_us": OVERRIDE_BASE_US,
         "execution_time_ms": OVERRIDE_BASE_US / 1000,
@@ -585,6 +574,18 @@ if OVERRIDE_BASE_US is not None and OVERRIDE_BASE_US > 0:
         "num_cases": num_cases,
         "sticky": True,
     }}
+    if (OVERRIDE_BASE_PER_SHAPE_US is not None
+            and len(OVERRIDE_BASE_PER_SHAPE_US) == num_cases):
+        base_block["per_shape"] = [
+            {{"avg_time_us": v, "method": "sticky"}}
+            for v in OVERRIDE_BASE_PER_SHAPE_US
+        ]
+    elif OVERRIDE_BASE_PER_SHAPE_US is not None:
+        print(f"[eval] WARN: sticky per_shape length "
+              f"{{len(OVERRIDE_BASE_PER_SHAPE_US)}} != num_cases "
+              f"{{num_cases}}; skipping per_shape override",
+              file=sys.stderr)
+    result["profile_base"] = base_block
 else:
     try:
         result["profile_base"] = _run_profile(Model, _bench_base, "base")

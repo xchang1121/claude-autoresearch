@@ -72,7 +72,8 @@ def _run_script(workdir: str, script: str, env: dict,
 
 def local_eval(package_bytes: bytes, op_name: str, timeout: int,
                device_id: int,
-               override_base_us: Optional[float] = None) -> dict:
+               override_base_us: Optional[float] = None,
+               override_base_per_shape_us: Optional[list] = None) -> dict:
     """Extract package, run eval_<op>.py, return the worker /run shape:
         {"device_id", "returncode", "log", "eval_result"}.
     """
@@ -83,6 +84,7 @@ def local_eval(package_bytes: bytes, op_name: str, timeout: int,
             return build_response(
                 device_id, 1, f"extract failed: {e}", None)
 
-        env = env_for(device_id, override_base_us=override_base_us)
+        env = env_for(device_id, override_base_us=override_base_us,
+                      override_base_per_shape_us=override_base_per_shape_us)
         rc, log = _run_script(tmp, f"eval_{op_name}.py", env, timeout)
         return build_response(device_id, rc, log, read_sidecar(tmp))

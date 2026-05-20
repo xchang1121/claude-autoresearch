@@ -132,6 +132,25 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
     # without re-parsing history.jsonl. Single-shape ops leave both absent.
     n_cases = metrics.get("num_cases")
     descs = metrics.get("per_shape_descs")
+    # Pin per-shape ref timings alongside baseline_metric so sticky
+    # rounds (which skip profile_base) can still compute geomean
+    # speedup. Only kept when ref was actually measured this round.
+    per_shape_base = metrics.get("per_shape_base_us")
+    if (baseline_source == "ref"
+            and isinstance(per_shape_base, list) and per_shape_base
+            and all(_valid(v) for v in per_shape_base)):
+        baseline_per_shape = [float(v) for v in per_shape_base]
+    else:
+        baseline_per_shape = None
+    # Pin the eval-config fingerprint alongside the baseline so sticky
+    # rounds re-measure ref if the user changes warmup/run/case count.
+    baseline_fp = None
+    if baseline_source == "ref":
+        baseline_fp = {
+            "warmup_times": int(getattr(config, "warmup_times", 10)),
+            "run_times": int(getattr(config, "run_times", 100)),
+            "num_cases": int(metrics.get("num_cases") or 1),
+        }
     save_progress(task_dir, Progress(
         task=config.name,
         eval_rounds=0,
@@ -144,6 +163,8 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         baseline_source=baseline_source,
         baseline_outcome=outcome.value,
         baseline_error_source=error_source,
+        baseline_per_shape_us=baseline_per_shape,
+        baseline_fingerprint=baseline_fp,
         seed_metric=seed_val,
         consecutive_failures=0,
         plan_version=0,

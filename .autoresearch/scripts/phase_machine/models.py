@@ -45,6 +45,19 @@ class Progress:
     # try/excepts. "ref" => scaffold rejects + user must fix --ref source.
     # "kernel" => normal seed-fail recovery via PLAN. None on success.
     baseline_error_source: Optional[str] = None
+    # Per-shape ref timings (us) from the SEED round, sticky alongside
+    # baseline_metric. Without this, sticky-baseline rounds (which skip
+    # profile_base) had no per-shape ref to compute speedup_vs_ref as a
+    # geomean of per-shape ratios — speedup_vs_ref silently flipped from
+    # geomean (round 0) to scalar (round 1+).
+    baseline_per_shape_us: Optional[list] = None
+    # Fingerprint of the config used when baseline_metric was last
+    # measured. eval_client invalidates the sticky baseline when this
+    # doesn't match the current config — protects against users changing
+    # eval.warmup_times / eval.run_times or the case-count for the same
+    # task, where the old ref anchor would no longer be comparable.
+    # Shape: {"warmup_times": int, "run_times": int, "num_cases": int}.
+    baseline_fingerprint: Optional[dict] = None
     seed_metric: Optional[float] = None
 
     # Plan

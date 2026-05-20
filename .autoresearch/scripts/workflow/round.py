@@ -152,12 +152,27 @@ def record_round(task_dir: str, eval_data: dict,
     # sticky after that: subsequent rounds don't overwrite.
     new_baseline_metric = progress.baseline_metric
     new_baseline_source = progress.baseline_source
+    new_baseline_per_shape = progress.baseline_per_shape_us
+    new_baseline_fp = progress.baseline_fingerprint
     if new_baseline_metric is None:
         ref_us = eval_result.metrics.get("ref_latency_us")
         if (isinstance(ref_us, (int, float))
                 and 0 < ref_us < float("inf")):
             new_baseline_metric = float(ref_us)
             new_baseline_source = "ref"
+            # Capture per-shape ref alongside the aggregate so future
+            # sticky-baseline rounds compute the same geomean speedup
+            # the SEED round would have.
+            psb = eval_result.metrics.get("per_shape_base_us")
+            if (isinstance(psb, list) and psb
+                    and all(isinstance(v, (int, float))
+                            and 0 < v < float("inf") for v in psb)):
+                new_baseline_per_shape = [float(v) for v in psb]
+            new_baseline_fp = {
+                "warmup_times": int(getattr(config, "warmup_times", 10)),
+                "run_times": int(getattr(config, "run_times", 100)),
+                "num_cases": int(eval_result.metrics.get("num_cases") or 1),
+            }
             print(f"[keep_or_discard] backfilling baseline_metric="
                   f"{new_baseline_metric:.2f}us (source=ref) from R{round_num}",
                   file=sys.stderr)
@@ -169,6 +184,8 @@ def record_round(task_dir: str, eval_data: dict,
         best_commit=new_best_commit,
         baseline_metric=new_baseline_metric,
         baseline_source=new_baseline_source,
+        baseline_per_shape_us=new_baseline_per_shape,
+        baseline_fingerprint=new_baseline_fp,
     )
     save_progress(task_dir, progress)
 
