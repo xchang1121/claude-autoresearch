@@ -22,7 +22,7 @@ from hooks.utils import (read_hook_input, block_decision, block_with_guidance,
 from phase_machine import (
     read_phase, get_task_dir, touch_heartbeat,
     edit_marker_path, check_edit, EDIT, DIAGNOSE,
-    diagnose_state,
+    diagnose_state, pending_settle_path,
 )
 
 
@@ -145,13 +145,16 @@ def main():
     editable_files = list(config.editable_files) if config else []
 
     phase = read_phase(task_dir)
-    # plan_items.xml in DIAGNOSE is gated on the three-state action;
-    # compute it here so check_edit can apply that rule. Outside DIAGNOSE
-    # the action is irrelevant — pass None (gate stays open).
+    # plan_items.xml in DIAGNOSE is gated on the three-state action; in
+    # EDIT it's gated on pending-settle recovery. Compute both so
+    # check_edit can apply the rules.
     diag_action = (diagnose_state(task_dir).action
                    if phase == DIAGNOSE else None)
+    pending = (phase == EDIT
+               and os.path.isfile(pending_settle_path(task_dir)))
     ok, reason = check_edit(phase, rel, editable_files,
-                            diagnose_action=diag_action)
+                            diagnose_action=diag_action,
+                            pending_settle=pending)
     if not ok:
         block_with_guidance(task_dir, reason)
 

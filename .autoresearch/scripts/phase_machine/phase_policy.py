@@ -369,20 +369,6 @@ _AR_ALLOWED_BY_PHASE = {
     FINISH:   frozenset(),
 }
 
-# Per-phase: do we accept OTHER (ad-hoc shell, anything not classified
-# as AR/LIFECYCLE/READONLY)? Strict phases reject; permissive phases
-# accept. AR-mention-but-not-canonical is rejected in EVERY phase
-# (handled in check_bash, not via this table).
-_OTHER_ALLOWED_BY_PHASE = {
-    INIT:     False,
-    BASELINE: False,
-    DIAGNOSE: False,
-    PLAN:     True,
-    REPLAN:   True,
-    EDIT:     True,
-    FINISH:   True,
-}
-
 # Edit/Write rules: which file classes may be written per phase.
 #   "editable" — anything in task.yaml:editable_files
 # plan.md is never in any set — it's machine-generated.
@@ -455,12 +441,14 @@ def check_bash(phase: str, command: str) -> tuple:
                        f"allowed; allowed = {allowed_txt}")
 
     # OTHER. AR-mention here means a malformed AR shape (chain, wrapper,
-    # backgrounded, --version, etc.) — reject everywhere.
+    # backgrounded, --version, etc.) — reject with the canonical-form
+    # explanation. All other ad-hoc shell is rejected too: bash writes
+    # need to come through guard_edit's whitelist (Edit/Write tool) or an
+    # AR script, never raw `>` / `sed -i` / `cp`, because those bypass
+    # the .ar_state ownership invariant guard_edit enforces.
     if ".autoresearch/scripts/" in _normalize(command):
         return False, _CANONICAL_FORM_REJECTION
 
-    if _OTHER_ALLOWED_BY_PHASE.get(phase, False):
-        return True, ""
     return False, (f"phase {phase}: only AR scripts, lifecycle scripts, "
                    f"and read-only commands are allowed")
 
@@ -469,7 +457,8 @@ _DIAGNOSE_ARTIFACT_RE = re.compile(r"^\.ar_state/diagnose_v\d+\.md$")
 
 
 def check_edit(phase: str, rel_path: str, editable_files,
-               *, diagnose_action: Optional[str] = None) -> tuple:
+               *, diagnose_action: Optional[str] = None,
+               pending_settle: bool = False) -> tuple:
     """Return (allowed: bool, reason: str) for an Edit/Write on `rel_path`
     (task-dir-relative, forward-slash form) at `phase`.
 
@@ -477,13 +466,12 @@ def check_edit(phase: str, rel_path: str, editable_files,
     progress, history, plan.md, report.md, heartbeat, and markers are all
     machine-maintained — letting Claude Edit them would let the model skip
     phases, rewrite counters, or forge history. Two paths are agent-writable:
-      - .ar_state/plan_items.xml: the XML input file /autoresearch hands to
-        create_plan.py. In DIAGNOSE this write is gated on
-        `diagnose_action` so the agent can't pre-stage stale plan input
-        before the subagent has produced (or the cap has retired) the
-        diagnosis artifact. Caller hooks are expected to compute the
-        action via `diagnose_state(...).action` and pass it; if not
-        provided, the gate is open (matches pre-DIAGNOSE behaviour).
+      - .ar_state/plan_items.xml: the XML input file create_plan.py
+        consumes. Writable iff create_plan.py is the legal next AR script,
+        which is PLAN / REPLAN / DIAGNOSE (gated on diagnose_action) and
+        EDIT under pending-settle recovery. Caller hooks are expected to
+        compute diagnose_action via `diagnose_state(...).action` and
+        pending_settle from `.pending_settle.json` existence.
       - .ar_state/diagnose_v<N>.md: the DIAGNOSE-phase artifact. The
         ar-diagnosis subagent is the intended writer (per the prompt
         contract), but hook payloads do NOT distinguish main agent from
@@ -496,21 +484,33 @@ def check_edit(phase: str, rel_path: str, editable_files,
     """
     if rel_path.startswith(".ar_state/"):
         if rel_path == f".ar_state/{PLAN_ITEMS_FILE}":
-            # In DIAGNOSE the write is gated on the three-state action
-            # (see validators.diagnose_state). NEED_DIAGNOSIS = subagent
-            # hasn't validated yet; allowing plan_items.xml here lets the
-            # agent skip the diagnosis. READY / MANUAL_FALLBACK both
-            # legitimately want the plan input written.
-            if (phase == DIAGNOSE
-                    and diagnose_action == "NEED_DIAGNOSIS"):
-                return False, (
-                    f".ar_state/{PLAN_ITEMS_FILE} is locked while DIAGNOSE "
-                    f"awaits a valid diagnosis artifact. Issue Task with "
-                    f"subagent_type='ar-diagnosis' first; once the artifact "
-                    f"validates (or the attempt cap relaxes the gate) "
-                    f"plan_items.xml becomes writable."
-                )
-            return True, ""
+            if phase in (PLAN, REPLAN):
+                return True, ""
+            if phase == DIAGNOSE:
+                # NEED_DIAGNOSIS = subagent hasn't validated yet; allowing
+                # plan_items.xml here lets the agent skip diagnosis.
+                # READY / MANUAL_FALLBACK both legitimately want the plan
+                # input written.
+                if diagnose_action == "NEED_DIAGNOSIS":
+                    return False, (
+                        f".ar_state/{PLAN_ITEMS_FILE} is locked while "
+                        f"DIAGNOSE awaits a valid diagnosis artifact. "
+                        f"Issue Task with subagent_type='ar-diagnosis' "
+                        f"first; once the artifact validates (or the "
+                        f"attempt cap relaxes the gate) plan_items.xml "
+                        f"becomes writable."
+                    )
+                return True, ""
+            if phase == EDIT and pending_settle:
+                # settle.py crashed mid-round; create_plan.py is allowed
+                # as recovery, so plan_items.xml input is too.
+                return True, ""
+            return False, (
+                f".ar_state/{PLAN_ITEMS_FILE} is only writable when "
+                f"create_plan.py is the legal next step "
+                f"(PLAN / REPLAN / DIAGNOSE.{{READY,FALLBACK}} / "
+                f"EDIT.pending-settle); current phase={phase}."
+            )
         if _DIAGNOSE_ARTIFACT_RE.match(rel_path):
             if phase == DIAGNOSE:
                 return True, ""

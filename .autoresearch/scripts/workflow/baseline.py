@@ -20,12 +20,15 @@ from utils.git_utils import current_head_short  # noqa: E402
 from .transition import PhaseController
 
 
-# Outcome → exit code. on_baseline_settled reads `baseline_outcome` from
-# progress and dispatches phase independently — exit codes are kept for
-# scaffold.py's "rc != 0 → surface error" check.
+# Outcome → exit code. Binary: 0 = task is activatable (kernel may need
+# rewrite via PLAN, but state machine handles that), non-zero = task is
+# NOT activatable. scaffold.py's "rc != 0 → surface error" stays accurate;
+# the slash command's "non-zero exit → stop and report" gates only on
+# INFRA_FAIL now. The full 3-way outcome lives in progress.baseline_outcome
+# for downstream readers (post_bash, dashboard, stop_save).
 _EXIT_FOR = {
     EvalOutcome.OK: 0,
-    EvalOutcome.KERNEL_FAIL: 3,
+    EvalOutcome.KERNEL_FAIL: 0,
     EvalOutcome.INFRA_FAIL: 4,
 }
 

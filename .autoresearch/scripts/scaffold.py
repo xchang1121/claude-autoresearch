@@ -378,10 +378,10 @@ def main():
         if args.worker_url:
             baseline_cmd.extend(["--worker-url", args.worker_url])
         rc = subprocess.run(baseline_cmd).returncode
-        # baseline exit codes (workflow.baseline._EXIT_FOR):
-        #   4 INFRA_FAIL · 3 KERNEL_FAIL · 0 OK
-        # rc=4 is the stuck case — no plan->edit hint; rc=3 activates the
-        # task so the hook can route to PLAN.
+        # baseline exit codes are binary now (workflow.baseline._EXIT_FOR):
+        #   0 = task activatable (OK or KERNEL_FAIL — hook routes to PLAN)
+        #   4 = task NOT activatable (INFRA_FAIL — operator must intervene)
+        # Anything else here is an unexpected baseline crash.
         if rc == 4:
             try:
                 with open(os.path.join(task_dir, ".ar_state",
@@ -410,17 +410,17 @@ def main():
             }))
             sys.exit(4)
         if rc != 0:
-            # KERNEL_FAIL — task activates, hook routes to PLAN.
+            # Unexpected baseline crash (not the 0/4 we know about).
             print(json.dumps({
                 "status": "error",
                 "task_dir": task_dir,
-                "error": (f"baseline eval failed (exit {rc}); "
+                "error": (f"baseline crashed unexpectedly (exit {rc}); "
                           f"see [baseline]/[eval] stderr above"),
-                "hint": ("Seed kernel failed baseline. Activate the task "
-                         "(export AR_TASK_DIR=...) and proceed via the "
-                         "standard plan->edit loop."),
+                "hint": ("This is not a classified outcome. Inspect the "
+                         "baseline / eval stderr above and file a bug if "
+                         "the exit code isn't in _EXIT_FOR."),
             }))
-            sys.exit(3)
+            sys.exit(rc)
 
     # Output
     print(json.dumps({"task_dir": task_dir, "status": "ok"}))
