@@ -9,7 +9,7 @@ Usage:
     python .autoresearch/scripts/batch/run.py <batch_dir> \\
         [--dsl triton_ascend] \\
         [--devices N | --worker-url host:port] \\
-        [--max-rounds 30] [--eval-timeout 120] [--timeout-min 180] \\
+        [--max-rounds 30] [--eval-timeout 300] [--timeout-min 180] \\
         [--only op1,op2] [--limit N] [--retry-errored] [--cooldown-sec 5]
 """
 from __future__ import annotations
@@ -475,7 +475,7 @@ def main() -> int:
                     help="autoresearch worker URL; default 127.0.0.1:9111 if "
                          "neither --devices nor --worker-url is given")
     ap.add_argument("--max-rounds", type=int, default=30)
-    ap.add_argument("--eval-timeout", type=int, default=120)
+    ap.add_argument("--eval-timeout", type=int, default=300)
     ap.add_argument("--timeout-min", type=int, default=180,
                     help="hard wall-clock cap per op in minutes")
     ap.add_argument("--only", default="", help="comma-separated op names")

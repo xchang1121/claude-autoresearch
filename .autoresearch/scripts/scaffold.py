@@ -61,7 +61,7 @@ def scaffold_task_dir(
     devices: list | None = None,
     worker_urls: list | None = None,
     max_rounds: int = 20,
-    eval_timeout: int = 120,
+    eval_timeout: int = 300,
     output_dir: str | None = None,
     editable_filename: str = "kernel.py",
     code_checker_enabled: bool = True,
@@ -198,7 +198,7 @@ def _make_arg_parser() -> argparse.ArgumentParser:
                              "package to a worker; localhost is fine. "
                              "Mutually exclusive with --devices.")
     parser.add_argument("--max-rounds", type=int, default=20)
-    parser.add_argument("--eval-timeout", type=int, default=120)
+    parser.add_argument("--eval-timeout", type=int, default=300)
     parser.add_argument("--output-dir", default=None,
                         help="Parent directory for the task (default: ./ar_tasks/)")
     parser.add_argument("--run-baseline", action="store_true",

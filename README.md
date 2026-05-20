@@ -55,7 +55,7 @@ python .autoresearch/scripts/dashboard.py
 | `--worker-url <host:port>` | ✅/XOR | 远端 worker daemon，和 `--devices` 二选一 |
 | `--framework` |  | `torch` / `mindspore` / `numpy`，默认 `torch` |
 | `--max-rounds N` |  | 优化总轮数预算，默认 20 |
-| `--eval-timeout S` |  | 单次 eval 超时（秒），默认 120 |
+| `--eval-timeout S` |  | 单次 eval 超时（秒），默认 300 |
 | `--no-code-checker` |  | 关闭静态 CodeChecker。当前规则只覆盖 `triton_*`，其他 DSL 建议加 |
 
 派生项（用户不写）：`backend` 由 DSL 决定；`arch` 由 `--devices` 本地探测（`npu-smi` / `nvidia-smi`）

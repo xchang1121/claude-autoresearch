@@ -331,7 +331,7 @@ for k, v in prog['cases'].items():
 
 透传给 /autoresearch：
   --max-rounds 30          每个 op 最多多少轮
-  --eval-timeout 120       单次 eval 超时（秒）
+  --eval-timeout 300       单次 eval 超时（秒）
 
 batch 自己的兜底：
   --timeout-min 180        单 op 整体 wall-clock 上限（分钟），超时标 error 下一个
