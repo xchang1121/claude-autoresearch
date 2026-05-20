@@ -80,8 +80,8 @@ _CANONICAL_AR_RE = re.compile(
     r'python(?:\d+(?:\.\d+)?)?(?:\s+(?:' + _COMMON_PY_FLAGS + r'))*'
     r')'
     r'\s+(?:\S*?/)?\.autoresearch/scripts/'      # script (with optional path prefix)
-    r'(?:engine/)?'                              # optional engine/ subdir
-    r'([A-Za-z_]\w*\.py)\b'                      #   group 1 = basename
+    r'(engine/)?'                                # group 1: engine/ presence
+    r'([A-Za-z_]\w*\.py)\b'                      # group 2 = basename
     r'(?:\s+(?:'                                 # script args
     # Quoted strings: backtick and `$(` are forbidden (caught by the
     # pre-check in `classify`); `$VAR`/`${VAR}` are still fine.
@@ -92,6 +92,29 @@ _CANONICAL_AR_RE = re.compile(
     r'))*'
     r'\s*\Z'
 )
+
+# Canonical location per script. Used by classify to reject AR
+# invocations that match the regex shape but point at the wrong
+# directory (e.g., `python .autoresearch/scripts/pipeline.py` —
+# regex-OK but pipeline.py lives at engine/pipeline.py, so the bash
+# would 404 and post_bash would still announce "Pipeline complete").
+# The classifier rejects the wrong location before that can happen.
+_CANONICAL_LOCATION = {
+    # engine/ — AR scripts (subprocess pipeline) and parse_args lifecycle.
+    "baseline.py":     "engine",
+    "create_plan.py":  "engine",
+    "eval_kernel.py":  "engine",
+    "eval_wrapper.py": "engine",
+    "parse_args.py":   "engine",
+    "pipeline.py":     "engine",
+    "quick_check.py":  "engine",
+    "settle.py":       "engine",
+    # scripts/ root — LIFECYCLE scripts.
+    "dashboard.py": "root",
+    "report.py":    "root",
+    "resume.py":    "root",
+    "scaffold.py":  "root",
+}
 
 # READONLY check: a small tokenizer + per-command argspec.
 #
@@ -283,9 +306,16 @@ def classify(command: str) -> CommandShape:
 
     m = _CANONICAL_AR_RE.match(normalized)
     if m:
-        name = m.group(1)
-        klass = "LIFECYCLE" if name in _LIFECYCLE_SCRIPTS else "AR"
-        return CommandShape(klass, name)
+        has_engine = m.group(1) is not None
+        name = m.group(2)
+        canonical = _CANONICAL_LOCATION.get(name)
+        # Location must match the canonical mapping. Unknown basenames
+        # AND wrong-directory invocations fall through to the AR-mention
+        # non-canonical → OTHER path below, where check_bash rejects with
+        # the canonical-form message.
+        if canonical is not None and (canonical == "engine") == has_engine:
+            klass = "LIFECYCLE" if name in _LIFECYCLE_SCRIPTS else "AR"
+            return CommandShape(klass, name)
 
     segments = [s for s in _split_chain(command) if s.strip()]
     if segments and all(_is_readonly_segment(s) for s in segments):
@@ -487,20 +517,21 @@ def check_edit(phase: str, rel_path: str, editable_files,
             if phase in (PLAN, REPLAN):
                 return True, ""
             if phase == DIAGNOSE:
-                # NEED_DIAGNOSIS = subagent hasn't validated yet; allowing
-                # plan_items.xml here lets the agent skip diagnosis.
-                # READY / MANUAL_FALLBACK both legitimately want the plan
-                # input written.
-                if diagnose_action == "NEED_DIAGNOSIS":
-                    return False, (
-                        f".ar_state/{PLAN_ITEMS_FILE} is locked while "
-                        f"DIAGNOSE awaits a valid diagnosis artifact. "
-                        f"Issue Task with subagent_type='ar-diagnosis' "
-                        f"first; once the artifact validates (or the "
-                        f"attempt cap relaxes the gate) plan_items.xml "
-                        f"becomes writable."
-                    )
-                return True, ""
+                # Fail-closed: only the two affirmative states pass.
+                # NEED_DIAGNOSIS (subagent hasn't validated) and None
+                # (caller didn't compute action) both reject — caller is
+                # required to pass a valid action to unlock the gate.
+                # See validators.diagnose_state for the constants.
+                if diagnose_action in ("DIAGNOSIS_READY", "MANUAL_FALLBACK"):
+                    return True, ""
+                return False, (
+                    f".ar_state/{PLAN_ITEMS_FILE} is locked in DIAGNOSE "
+                    f"until the diagnosis artifact validates. Issue Task "
+                    f"with subagent_type='ar-diagnosis' first; once the "
+                    f"artifact passes (or the attempt cap relaxes the "
+                    f"gate to MANUAL_FALLBACK) plan_items.xml becomes "
+                    f"writable. (current diagnose_action={diagnose_action!r})"
+                )
             if phase == EDIT and pending_settle:
                 # settle.py crashed mid-round; create_plan.py is allowed
                 # as recovery, so plan_items.xml input is too.

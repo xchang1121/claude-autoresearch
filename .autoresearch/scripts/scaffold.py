@@ -422,8 +422,19 @@ def main():
             }))
             sys.exit(rc)
 
-    # Output
-    print(json.dumps({"task_dir": task_dir, "status": "ok"}))
+    # Surface baseline_outcome so callers can distinguish OK from
+    # KERNEL_FAIL without re-reading progress.json. Both are activatable
+    # (status=ok, rc=0); the difference is whether the seed kernel
+    # produced valid timings or the first PLAN cycle has to rewrite it.
+    outcome = None
+    try:
+        with open(os.path.join(task_dir, ".ar_state",
+                               "progress.json")) as _f:
+            outcome = json.load(_f).get("baseline_outcome")
+    except (OSError, ValueError):
+        pass
+    print(json.dumps({"task_dir": task_dir, "status": "ok",
+                      "baseline_outcome": outcome}))
 
 
 if __name__ == "__main__":

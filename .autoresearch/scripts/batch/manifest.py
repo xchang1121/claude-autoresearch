@@ -295,9 +295,10 @@ def parse_scaffold_created_line(line: str) -> Path | None:
 def parse_scaffold_result_line(line: str) -> Path | None:
     """Identity-bound task_dir: a scaffold result JSON in THIS claude
     subprocess's stdout names the dir scaffold created for THIS run.
-    Accepts both ok and error shapes (error still carries task_dir for
-    kernel_fail / infra_fail). Done/error verdict is
-    decided downstream from .phase + rc."""
+    Accepts both ok and error shapes — ok is OK / KERNEL_FAIL (both
+    activatable, rc=0); error is INFRA_FAIL (rc=4) which still carries
+    task_dir for inspection. Done/error verdict is decided downstream
+    from .phase + rc."""
     s = line.strip()
     if not (s.startswith("{") and s.endswith("}")):
         return None
