@@ -39,6 +39,12 @@ class TaskConfig:
 
     # Eval params
     eval_timeout: int = 600
+    # profiler iteration counts. Defaults match the previous hardcoded
+    # values in _gen_eval_script (warmup=10, repeats=100). Configurable
+    # via task.yaml eval.warmup_times / eval.run_times for ops where
+    # the defaults are too noisy or too expensive.
+    warmup_times: int = 10
+    run_times: int = 100
 
     # Metric
     primary_metric: str = "score"
@@ -137,6 +143,8 @@ def load_task_config(task_dir: str) -> Optional[TaskConfig]:
         editable_files=raw.get("editable_files", []),
         ref_file=agent_block.get("ref_file") or "reference.py",
         eval_timeout=eval_block.get("timeout", 600),
+        warmup_times=int(eval_block.get("warmup_times", 10)),
+        run_times=int(eval_block.get("run_times", 100)),
         primary_metric=metric_block.get("primary", "score"),
         lower_is_better=metric_block.get("lower_is_better", True),
         improvement_threshold=metric_block.get("improvement_threshold", 0.0),

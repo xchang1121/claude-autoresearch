@@ -60,65 +60,102 @@ def _get_dsl_adapter(dsl: Optional[str]):
     return get_dsl_adapter(dsl or "triton_ascend")
 
 
-def _adapter_benchmark_body(adapter, config: TaskConfig, mode: str,
-                            warmup: int, repeats: int) -> tuple[str, str]:
-    """Return (indented benchmark code, source label) for one mode.
+def _gen_benchmark_body(adapter, config: TaskConfig,
+                        warmup: int, repeats: int) -> tuple[str, str]:
+    """Kernel benchmark body. Goes through the DSL adapter so DSL-specific
+    setup (triton autotune trigger, tilelang compile, ...) gets included,
+    then the adapter calls profiler_npu under the hood for NPU backends.
 
-    mode='base' force-routes through the adapter's else-branch
-    (triton.testing.do_bench) by passing backend="" — the if-branch uses
-    profiler_npu with a triton L2-cache-clear kernel that corrupts NPU
-    state when run against the PyTorch reference (next aclnnArange
-    aborts with an aivec error). mode='gen' keeps the real backend so
-    kernel timing uses profiler_npu (more accurate; filters
-    L2-cache-clear ops out of the timing).
+    `clear_l2_cache=False` is forced so kernel timing is directly
+    comparable to the ref measurement below (which can't use the
+    triton_ascend L2-clear kernel — it corrupts aclnnArange state).
+    Both measurements now reflect warm-cache steady-state behavior, the
+    same as akg-hitl's default.
+
+    framework_model="impl_model" — adapter templates reference
+    {framework_model} verbatim; tilelang_npuir / swft would otherwise
+    emit `return None(*inputs)` or a call to an undefined name.
+
+    case_idx="{case_idx}" — adapters that bake the index into a filename
+    or output directory (triton_ascend's autotune_info_case_{case_idx}.json,
+    pypto's prof_generation_output_case{case_idx}) embed `{case_idx}`
+    inside an f-string LITERAL in their template. The literal string
+    "{case_idx}" makes the outer f-string emit `{case_idx}` verbatim
+    into the inner f-string slot — resolved at runtime against the
+    `case_idx` parameter our `_bench_*` functions receive from the
+    `_run_profile` per-case loop.
     """
-    backend = "" if mode == "base" else (config.backend or "")
-    # framework_model="impl_model" — adapter templates reference {framework_model}
-    # verbatim; tilelang_npuir / swft would otherwise emit `return None(*inputs)`
-    # or a call to the undefined name `framework_model`.
-    #
-    # case_idx="{case_idx}" — adapters that bake the index into a filename or
-    # output directory (triton_ascend.autotune_info_case_{case_idx}.json,
-    # pypto.prof_generation_output_case{case_idx}) embed `{case_idx}` inside
-    # an f-string LITERAL in their template. Passing the literal string
-    # "{case_idx}" makes the outer adapter f-string emit `{case_idx}` verbatim
-    # into the inner f-string slot — the generated code becomes
-    # `f"...case_{case_idx}.json"`, which resolves at runtime against the
-    # `case_idx` parameter our `_bench_*` functions receive from the
-    # `_run_profile` per-case loop. For DSLs that ignore case_idx the
-    # placeholder is harmless. Was hardcoded to 0 before: triton_ascend
-    # autotune metadata got clobbered across shapes; pypto reused the same
-    # persistent output dir across shapes, a real measurement risk per its
-    # own template comment.
-    raw = adapter.benchmark_impl(
+    import inspect
+    kwargs: dict = dict(
         impl_func_name="TargetModel", inputs="inputs",
         warmup=warmup, runs=repeats,
-        backend=backend, op_name=config.name,
+        backend=config.backend or "", op_name=config.name,
         case_idx="{case_idx}", device_id=0,
         framework_model="impl_model",
     )
+    # Only the triton_ascend / tilelang_npuir adapters take clear_l2_cache.
+    # Other DSL adapters reject unknown kwargs — feed it conditionally.
+    sig = inspect.signature(adapter.benchmark_impl)
+    if "clear_l2_cache" in sig.parameters:
+        kwargs["clear_l2_cache"] = False
+    raw = adapter.benchmark_impl(**kwargs)
     if raw and raw.strip():
-        body = textwrap.indent(textwrap.dedent(raw), "    ")
-        label = f"adapter ({type(adapter).__name__})"
-    else:
-        body = textwrap.indent(textwrap.dedent(f"""\
-            import triton.testing
-            def _bench():
+        return (textwrap.indent(textwrap.dedent(raw), "    "),
+                f"adapter ({type(adapter).__name__})")
+    # Adapter has no benchmark_impl — fall back to direct profiler_npu /
+    # do_bench depending on backend. Same body as _base_benchmark_body.
+    return _base_benchmark_body(warmup, repeats)
+
+
+def _base_benchmark_body(warmup: int, repeats: int) -> tuple[str, str]:
+    """Reference benchmark body. Bypasses the DSL adapter and goes
+    directly to `profiler_npu` (for NPU) or `triton.testing.do_bench`
+    (other backends) — semantically matched to akg-hitl's
+    `profiler_npu_core` so ref and kernel timings can be divided to
+    produce an honest speedup.
+
+    No L2-cache-clear: triton_ascend's clear kernel corrupts the next
+    aclnnArange dispatch, and clearing for ref alone would bias the
+    ratio. Kernel measurement is also called with clear_l2_cache=False
+    above for symmetry.
+    """
+    body = textwrap.indent(textwrap.dedent(f"""\
+        if device_type == "npu":
+            from ar_vendored.op.verifier.profiler import profiler_npu
+            def _ref_bench():
                 with torch.no_grad():
-                    return impl_model(*inputs)
+                    impl_model(*inputs)
+            execution_time_us = profiler_npu(
+                _ref_bench,
+                warmup={warmup}, active={repeats},
+                prof_dir_name=f"prof_base_case_{{case_idx}}",
+                keep_res=False, suppress_warnings=True,
+                clear_l2_cache=False, dsl="other",
+            )
+            execution_time_ms = execution_time_us / 1000
+            method = "profiler_npu_base"
+        else:
+            import triton.testing
+            def _ref_bench():
+                with torch.no_grad():
+                    impl_model(*inputs)
             execution_time_ms = triton.testing.do_bench(
-                _bench, warmup={warmup}, rep={repeats}, return_mode="min")
+                _ref_bench, warmup={warmup}, rep={repeats},
+                return_mode="min")
             execution_time_us = execution_time_ms * 1000
-            method = "triton_do_bench (adapter has no benchmark_impl)"
-        """), "    ")
-        label = "fallback-do_bench"
-    return body, label
+            method = "do_bench_base"
+    """), "    ")
+    return body, "profiler_npu_base / do_bench"
 
 
-def _gen_eval_script(config: TaskConfig,
-                     warmup: int = 10, repeats: int = 100) -> str:
+def _gen_eval_script(config: TaskConfig) -> str:
     """Generate `eval_<op>.py` — verify + profile_gen + profile_base in one
     Python process, with a single `eval_result.json` sidecar.
+
+    Iteration counts come from `config.warmup_times` and `config.run_times`
+    (task.yaml `eval.warmup_times` / `eval.run_times`), defaulting to
+    10/100. ref and kernel use the same counts so their timings are
+    directly comparable.
 
     Phase layout (all caught independently; partial results still land in
     the sidecar):
@@ -128,13 +165,15 @@ def _gen_eval_script(config: TaskConfig,
       Phase C — verify (Model vs ModelNew, per-case)
                 first-failing case decides error_source
       Phase D — profile_gen (ModelNew under adapter benchmark_impl)
-      Phase E — profile_base (Model under do_bench fallback)
+      Phase E — profile_base (Model under profiler_npu, matching akg-hitl)
                 skipped when AR_OVERRIDE_BASE_TIME_US env is set
 
     Profile D uses the warm JIT/autotune state populated by verify — no
     autotune exploration during warmup, so the measured shape timing
     reflects the actual best config rather than mid-exploration cost.
     """
+    warmup = config.warmup_times
+    repeats = config.run_times
     device = _detect_device_type(config)
     kernel_file = config.editable_files[0].replace(".py", "")
     ref_file = config.ref_file.replace(".py", "")
@@ -144,10 +183,10 @@ def _gen_eval_script(config: TaskConfig,
     dsl_setup = (adapter.get_special_setup_code()
                  if hasattr(adapter, "get_special_setup_code") else "")
 
-    bench_gen_body, bench_gen_label = _adapter_benchmark_body(
-        adapter, config, mode="gen", warmup=warmup, repeats=repeats)
-    bench_base_body, bench_base_label = _adapter_benchmark_body(
-        adapter, config, mode="base", warmup=warmup, repeats=repeats)
+    bench_gen_body, bench_gen_label = _gen_benchmark_body(
+        adapter, config, warmup=warmup, repeats=repeats)
+    bench_base_body, bench_base_label = _base_benchmark_body(
+        warmup=warmup, repeats=repeats)
 
     return f'''\
 #!/usr/bin/env python3
@@ -389,9 +428,11 @@ _empty_cache()
 
 
 # === Benchmark helpers ===================================================
-# Two adapter-derived bodies; gen uses real backend (profiler_npu / do_bench),
-# base force-routes through do_bench so profiler_npu's L2-cache-clear
-# kernel doesn't corrupt the PyTorch Model state.
+# kernel (gen) goes through the DSL adapter (autotune setup + profiler_npu);
+# ref (base) goes through profiler_npu directly with dsl="other" so
+# triton_ascend's L2-clear kernel — which corrupts the next aclnnArange
+# in the ref Model — never runs. Both have clear_l2_cache=False for
+# symmetric warm-cache measurement, matching akg-hitl's default.
 #
 # `case_idx` is the per-shape index from the enclosing for-loop. Adapter
 # templates that bake the index into output dirs / filenames (pypto's
