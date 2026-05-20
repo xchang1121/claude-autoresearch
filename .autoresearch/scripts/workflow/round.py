@@ -37,11 +37,11 @@ def record_round(task_dir: str, eval_data: dict,
     raw_outcome = eval_data.get("outcome")
     if raw_outcome is None:
         raw_outcome = (EvalOutcome.OK.value if eval_data.get("correctness")
-                       else EvalOutcome.KERNEL_VERIFY_FAIL.value)
+                       else EvalOutcome.KERNEL_FAIL.value)
     try:
         result_outcome = EvalOutcome(raw_outcome)
     except ValueError:
-        result_outcome = EvalOutcome.FRAMEWORK_ERROR
+        result_outcome = EvalOutcome.INFRA_FAIL
     eval_result = EvalResult(
         outcome=result_outcome,
         metrics=eval_data.get("metrics", {}),

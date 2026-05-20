@@ -232,35 +232,29 @@ def render(task_dir, history_offset=0, history_window=None):
     lines.append(f"  {BOLD}Status:{RESET}   {status_color}{status}{RESET}  (plan v{plan_ver})")
     lines.append(f"  {BOLD}Updated:{RESET}  {DIM}{updated}{RESET}")
 
-    # Task-level abort banner. Fires only for outcomes the agent cannot
-    # fix from inside the optimisation loop — REF_FAIL (broken source
-    # file) and FRAMEWORK_ERROR (eval pipeline crashed). Distinct from
-    # the per-component Seed / Baseline lines below: those describe
-    # whether each artefact was measurable; the banner says the WHOLE
-    # task is stuck and points at the recovery action.
+    # Task-level abort banner. Fires only for INFRA_FAIL (agent can't fix
+    # from EDIT). The error_source axis picks ref-broken vs other.
     outcome = progress.get("baseline_outcome")
     err_src = progress.get("baseline_error_source") or ""
-    if outcome == "ref_fail":
+    if outcome == "infra_fail":
         lines.append("")
-        suffix = f" (error_source={err_src})" if err_src else ""
-        lines.append(f"  {BOLD}{RED}ABORTED:{RESET}  {RED}REF BROKEN{RESET}  "
-                     f"reference.py is invalid{suffix}.")
-        lines.append(f"           {DIM}Fix the source --ref file and re-run "
-                     f"/autoresearch from scratch.{RESET}")
-    elif outcome == "framework_error":
-        lines.append("")
-        lines.append(f"  {BOLD}{YELLOW}ABORTED:{RESET}  "
-                     f"{YELLOW}EVAL FRAMEWORK CRASHED{RESET}  "
-                     f"no per-shape data produced.")
-        lines.append(f"           {DIM}Check worker / OOM / eval.timeout, then "
-                     f"retry baseline.py.{RESET}")
+        if err_src == "ref":
+            lines.append(f"  {BOLD}{RED}ABORTED:{RESET}  {RED}REF BROKEN{RESET}"
+                         f"  reference.py is invalid.")
+            lines.append(f"           {DIM}Fix the source --ref file and "
+                         f"re-run /autoresearch from scratch.{RESET}")
+        else:
+            lines.append(f"  {BOLD}{YELLOW}ABORTED:{RESET}  "
+                         f"{YELLOW}EVAL PIPELINE BROKEN{RESET}  "
+                         f"no per-shape data produced.")
+            lines.append(f"           {DIM}Check worker / device / "
+                         f"eval.timeout, then retry baseline.py.{RESET}")
 
     lines.append("")
     lines.append(f"  {BOLD}Budget:{RESET}   {budget_color}{budget_bar} {rounds}/{max_rounds}{RESET}")
 
     # Baseline (PyTorch reference timing). Can be missing when the eval
-    # framework crashed before ref was measured (framework_error) or
-    # when the reference itself was broken (ref_fail).
+    # pipeline broke (infra_fail) — either ref invalid or worker down.
     baseline_tags = {
         "ref": f"{DIM}(PyTorch reference){RESET}",
         "seed_fallback": f"{YELLOW}(fallback: seed — ref not measured by worker){RESET}",
@@ -272,24 +266,17 @@ def render(task_dir, history_offset=0, history_window=None):
                                           f"{DIM}(source unknown){RESET}")
         lines.append(f"  {BOLD}Baseline:{RESET} {baseline}  {baseline_tag}")
 
-    # Seed (initial kernel timing). This line reports on the SEED KERNEL
-    # specifically — was its forward pass measured? — not on task-level
-    # health. Task-level aborts (ref_fail, framework_error) already
-    # surface in the banner above; here they collapse to "not measured".
+    # Seed (initial kernel timing). Task-level INFRA_FAIL aborts surface
+    # in the banner above; here they collapse to "not measured".
     seed = progress.get("seed_metric")
     if seed is not None:
         if seed != baseline:
             lines.append(f"  {BOLD}Seed:{RESET}     {seed}  {DIM}(initial kernel){RESET}")
         # else: redundant with Baseline line (seed_fallback path), suppress
-    elif outcome == "kernel_verify_fail":
+    elif outcome == "kernel_fail":
         lines.append(f"  {BOLD}Seed:{RESET}     {RED}FAILED{RESET}  "
-                     f"{DIM}(kernel output != reference; timing dropped){RESET}")
-    elif outcome == "kernel_profile_crash":
-        lines.append(f"  {BOLD}Seed:{RESET}     {RED}FAILED{RESET}  "
-                     f"{DIM}(kernel crashed during profile phase){RESET}")
+                     f"{DIM}(kernel verify or profile failed; timing dropped){RESET}")
     elif outcome in STUCK_BASELINE_OUTCOMES:
-        # Seed never got a chance to be measured cleanly; the banner
-        # above explains why. Don't repeat the cause here.
         lines.append(f"  {BOLD}Seed:{RESET}     {DIM}— (not measured; see ABORTED above){RESET}")
     else:
         # Legacy progress without baseline_outcome, or some other

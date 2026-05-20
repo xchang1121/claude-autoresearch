@@ -29,13 +29,13 @@ class PhaseController:
         return self._write(BASELINE)
 
     def on_baseline_settled(self) -> str:
-        """ok/kernel_* → PLAN; STUCK_BASELINE_OUTCOMES (ref_fail,
-        framework_error) → no write. Missing outcome (legacy progress) is
-        treated as kernel_verify_fail so the agent gets pushed through PLAN."""
+        """ok / kernel_fail → PLAN; STUCK_BASELINE_OUTCOMES (infra_fail)
+        → leave phase as-is. Missing outcome (legacy progress) is treated
+        as kernel_fail so the agent gets pushed through PLAN."""
         progress = load_progress(self.task_dir)
         if progress is None:
             return read_phase(self.task_dir)
-        outcome = progress.baseline_outcome or "kernel_verify_fail"
+        outcome = progress.baseline_outcome or "kernel_fail"
         if outcome in STUCK_BASELINE_OUTCOMES:
             return read_phase(self.task_dir)
         return self._write(PLAN)

@@ -36,7 +36,7 @@ def main():
     config = load_task_config(task_dir)
     if config is None:
         print(json.dumps({
-            "outcome": "framework_error",
+            "outcome": "infra_fail",
             "correctness": False,
             "metrics": {},
             "error": f"task.yaml not found in {task_dir}",

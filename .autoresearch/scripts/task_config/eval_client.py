@@ -7,7 +7,7 @@ worker_urls=None) -> EvalResult`. Routing:
      worker (`/api/v1/run`).
   2. Else `device_id` / `config.devices[0]` → direct local subprocess
      (`utils.local_worker.local_eval`).
-  3. Else → EvalResult with FRAMEWORK_ERROR explaining what's missing.
+  3. Else → EvalResult with INFRA_FAIL explaining what's missing.
 
 Both transports run the SAME generated `eval_<op>.py` script in one
 Python process and return the same dict:
@@ -231,22 +231,19 @@ def _assemble_eval_result(resp: dict) -> EvalResult:
         if per_gen is not None else []
     )
 
-    # Outcome — error_source="ref" supersedes; FRAMEWORK_ERROR when both
-    # verify failed AND profile produced no per-shape data (sidecar
-    # missing or the script crashed before Phase D).
+    # Outcome — only two non-OK paths:
+    #   error_source == "ref" or sidecar missing  → INFRA_FAIL (operator only).
+    #   anything else failing                      → KERNEL_FAIL (PLAN-recoverable).
+    # Pure transport failures (worker unreachable / no NPU) set INFRA_FAIL
+    # in run_eval before we ever call _assemble.
     if error_source == "ref":
-        outcome = EvalOutcome.REF_FAIL
+        outcome = EvalOutcome.INFRA_FAIL
     elif not eval_result:
-        # No sidecar — script crashed before writing it.
-        outcome = EvalOutcome.FRAMEWORK_ERROR
-    elif per_gen is None and not verify_ok:
-        outcome = EvalOutcome.FRAMEWORK_ERROR
-    elif not verify_ok:
-        outcome = EvalOutcome.KERNEL_VERIFY_FAIL
-    elif crashed_shapes:
-        outcome = EvalOutcome.KERNEL_PROFILE_CRASH
-    else:
+        outcome = EvalOutcome.INFRA_FAIL
+    elif verify_ok and not crashed_shapes:
         outcome = EvalOutcome.OK
+    else:
+        outcome = EvalOutcome.KERNEL_FAIL
 
     metrics: dict = {}
     if _finite(gen_time):
@@ -302,20 +299,20 @@ def _assemble_eval_result(resp: dict) -> EvalResult:
 
     if outcome == EvalOutcome.OK:
         error = None
-    elif outcome == EvalOutcome.REF_FAIL:
-        error = (f"reference.py failed: "
-                 f"{verify.get('error') or '(no detail)'}")
-    elif outcome == EvalOutcome.KERNEL_PROFILE_CRASH:
-        error = (f"kernel crashed during profile on {len(crashed_shapes)} of "
-                 f"{len(per_gen)} shapes")
-    elif outcome == EvalOutcome.FRAMEWORK_ERROR:
-        if not eval_result:
+    elif outcome == EvalOutcome.INFRA_FAIL:
+        if error_source == "ref":
+            error = (f"reference.py failed: "
+                     f"{verify.get('error') or '(no detail)'}")
+        elif not eval_result:
             error = (f"eval script crashed before writing sidecar "
                      f"(rc={resp.get('returncode')})")
         else:
             error = "eval framework produced no per-shape data"
-    else:
+    elif not verify_ok:
         error = verify.get("error") or "kernel output != reference"
+    else:
+        error = (f"kernel crashed during profile on {len(crashed_shapes)} of "
+                 f"{len(per_gen)} shapes")
 
     return EvalResult(
         outcome=outcome,
@@ -337,7 +334,7 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
     worker_url = _select_worker(urls)
     if worker_url is None:
         return EvalResult(
-            outcome=EvalOutcome.FRAMEWORK_ERROR,
+            outcome=EvalOutcome.INFRA_FAIL,
             error=f"no reachable worker from: {urls}",
         )
 
@@ -354,7 +351,7 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
     try:
         package = _build_package(task_dir, config)
     except Exception as e:
-        return EvalResult(outcome=EvalOutcome.FRAMEWORK_ERROR,
+        return EvalResult(outcome=EvalOutcome.INFRA_FAIL,
                           error=f"failed to build package: {e}")
 
     override = _override_base_from_progress(task_dir)
@@ -366,7 +363,7 @@ def run_remote_eval(task_dir: str, config: TaskConfig,
         resp = _worker_run(worker_url, package, task_id, config.name,
                            eff_timeout, override_base_us=override)
     except Exception as e:
-        return EvalResult(outcome=EvalOutcome.FRAMEWORK_ERROR,
+        return EvalResult(outcome=EvalOutcome.INFRA_FAIL,
                           error=f"worker /run failed: {e}")
 
     return _assemble_eval_result(resp)
@@ -387,7 +384,7 @@ def run_local_eval(task_dir: str, config: TaskConfig,
     try:
         package = _build_package(task_dir, config)
     except Exception as e:
-        return EvalResult(outcome=EvalOutcome.FRAMEWORK_ERROR,
+        return EvalResult(outcome=EvalOutcome.INFRA_FAIL,
                           error=f"failed to build package: {e}")
 
     num_cases = _count_ref_cases(task_dir, config)
@@ -418,7 +415,7 @@ def run_eval(task_dir: str, config: TaskConfig,
 
       1. CLI `worker_urls` or `config.worker_urls` non-empty → remote.
       2. Else, with a device id available (arg or config) → local subprocess.
-      3. Else → FRAMEWORK_ERROR explaining the missing input.
+      3. Else → INFRA_FAIL explaining the missing input.
     """
     urls = worker_urls or config.worker_urls
     if urls:
@@ -428,7 +425,7 @@ def run_eval(task_dir: str, config: TaskConfig,
         return run_local_eval(task_dir, config, device_id=device_id)
 
     return EvalResult(
-        outcome=EvalOutcome.FRAMEWORK_ERROR,
+        outcome=EvalOutcome.INFRA_FAIL,
         error=("no execution transport: pass --worker-url (HTTP worker) "
                "or --devices N / `devices: [N]` in task.yaml (local "
                "subprocess)."),

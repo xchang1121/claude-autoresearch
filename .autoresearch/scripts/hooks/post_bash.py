@@ -9,7 +9,7 @@ directly via the Bash tool:
                                 reference.py and kernel.py are guaranteed
                                 present because /autoresearch requires both)
   - `baseline.py`             → PLAN on success or on seed failure;
-                                framework_error leaves phase untouched
+                                infra_fail leaves phase untouched
   - `pipeline.py`             → whatever phase pipeline.py itself wrote
   - `create_plan.py`          → EDIT on plan validation pass
                                 (called from PLAN / DIAGNOSE / REPLAN)
@@ -113,29 +113,20 @@ def _fresh_start(task_dir: str):
     emit_status(f"[AR] Fresh start. Phase -> BASELINE. {get_guidance(task_dir)}")
 
 
-_BASELINE_DEMOTE_REASON = {
-    "kernel_verify_fail": "kernel output != reference",
-    "kernel_profile_crash": "kernel crashed at runtime during profile",
-}
-
-
 def _baseline_message(outcome, new_phase, progress, guidance):
-    if outcome == "framework_error":
-        return ("[AR] Baseline FRAMEWORK_ERROR: eval produced no per-shape "
-                "data. Seed kernel NOT evaluated — do NOT edit kernel.py. "
-                "Re-run baseline.py after fixing framework (eval.timeout, "
-                "device/worker availability, eval stderr).")
-    if outcome == "ref_fail":
-        err_src = getattr(progress, "baseline_error_source", None) or "ref"
-        return (f"[AR] Baseline REF_FAIL ({err_src}): reference.py is broken. "
-                f"Fix the source file passed via --ref and re-run "
-                f"/autoresearch from scratch. The agent CANNOT fix this from "
-                f"EDIT — reference is treated as ground truth and is not "
-                f"editable. Phase stays at BASELINE.")
+    if outcome == "infra_fail":
+        if getattr(progress, "baseline_error_source", None) == "ref":
+            return ("[AR] Baseline INFRA_FAIL (ref): reference.py is broken. "
+                    "Fix the source file passed via --ref and re-run "
+                    "/autoresearch from scratch — reference.py is not "
+                    "editable from EDIT. Phase stays at BASELINE.")
+        return ("[AR] Baseline INFRA_FAIL: eval pipeline broken (no per-shape "
+                "data). Do NOT edit kernel.py. Fix worker / env / device / "
+                "eval.timeout and re-run baseline.py.")
     if outcome != "ok":
-        reason = _BASELINE_DEMOTE_REASON.get(outcome) or (
-            "seed kernel produced no timing" if progress.seed_metric is None
-            else "seed kernel failed correctness check")
+        reason = ("seed kernel produced no timing"
+                  if progress.seed_metric is None
+                  else "seed kernel failed correctness / profile")
         return (f"[AR] Baseline failed: {reason}. Phase -> PLAN. Plan a "
                 f"kernel fix/rewrite via the standard plan->edit loop. "
                 f"{guidance}")

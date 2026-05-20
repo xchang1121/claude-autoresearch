@@ -463,13 +463,12 @@ def get_guidance(task_dir: str) -> str:
         # failure detail and steer the agent toward that goal.
         seed_failed_section = ""
         target_file = editable[0] if editable else "kernel.py"
-        # SEED FAILED fires for kernel-side baseline failures: no timing,
-        # or wrong output / profile crash. The STUCK_BASELINE_OUTCOMES
-        # (ref_fail / framework_error) never reach PLAN.
+        # SEED FAILED fires for kernel-side baseline failures (kernel_fail);
+        # STUCK_BASELINE_OUTCOMES (infra_fail) never reach PLAN.
         outcome = progress.get("baseline_outcome") if progress else None
         seed_failed = bool(progress) and (
             progress.get("seed_metric") is None
-            or outcome in ("kernel_verify_fail", "kernel_profile_crash")
+            or outcome == "kernel_fail"
         )
         if seed_failed:
             seed_reason = (
@@ -478,7 +477,7 @@ def get_guidance(task_dir: str) -> str:
                 else "seed kernel ran but failed correctness vs reference"
             )
             failed_shapes_block = ""
-            if outcome in ("kernel_verify_fail", "kernel_profile_crash"):
+            if outcome == "kernel_fail":
                 fail_metrics = _last_failure_metrics(task_dir)
                 block = _failed_shapes_block(fail_metrics, progress)
                 if block:

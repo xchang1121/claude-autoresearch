@@ -22,15 +22,11 @@ from .transition import PhaseController
 
 # Outcome → exit code. on_baseline_settled reads `baseline_outcome` from
 # progress and dispatches phase independently — exit codes are kept for
-# scaffold.py's "rc != 0 → surface error" check. REF_FAIL gets its own
-# exit code (5) so scaffold can distinguish "reference broken; user must
-# fix --ref source" from "kernel broken; PLAN will rewrite".
+# scaffold.py's "rc != 0 → surface error" check.
 _EXIT_FOR = {
     EvalOutcome.OK: 0,
-    EvalOutcome.REF_FAIL: 5,
-    EvalOutcome.KERNEL_VERIFY_FAIL: 3,
-    EvalOutcome.KERNEL_PROFILE_CRASH: 3,
-    EvalOutcome.FRAMEWORK_ERROR: 4,
+    EvalOutcome.KERNEL_FAIL: 3,
+    EvalOutcome.INFRA_FAIL: 4,
 }
 
 
@@ -41,11 +37,11 @@ def _read_outcome(eval_data: dict) -> EvalOutcome:
     s = eval_data.get("outcome")
     if s is None:
         s = (EvalOutcome.OK.value if eval_data.get("correctness")
-             else EvalOutcome.KERNEL_VERIFY_FAIL.value)
+             else EvalOutcome.KERNEL_FAIL.value)
     try:
         return EvalOutcome(s)
     except ValueError:
-        return EvalOutcome.FRAMEWORK_ERROR
+        return EvalOutcome.INFRA_FAIL
 
 
 def _valid(v) -> bool:
@@ -169,24 +165,15 @@ def run_baseline_init(task_dir: str, eval_json: str) -> int:
         "commit": baseline_commit,
     })
 
-    if outcome == EvalOutcome.REF_FAIL:
-        # Reference is broken — the whole task is invalid. Scaffold reads
-        # this exit code (5) and surfaces "fix --ref source" to the user
-        # without activating the task. Don't advance phase here either.
-        print(f"[baseline] REF_FAIL: {eval_data.get('error') or '(no detail)'}",
-              file=sys.stderr)
-        print(f"[baseline] reference.py is broken — fix the source file "
-              f"passed via --ref and re-run /autoresearch.", file=sys.stderr)
-        return _EXIT_FOR[outcome]
-
     if outcome != EvalOutcome.OK:
-        # Phase transition (PLAN for kernel_* failures, untouched for
-        # framework_error / ref_fail) is owned by on_baseline_settled,
-        # which dispatches on the `baseline_outcome` we just persisted.
-        # Calling it here keeps non-hook callers (notebook re-runs,
-        # tests) on the same code path as the Bash-hook flow.
+        # Phase transition (PLAN for kernel_fail, untouched for infra_fail)
+        # is owned by on_baseline_settled, which dispatches on the
+        # `baseline_outcome` we just persisted. Calling it here keeps
+        # non-hook callers (notebook re-runs, tests) on the same code
+        # path as the Bash-hook flow.
         PhaseController(task_dir).on_baseline_settled()
-        print(f"[baseline] {outcome.value}: {eval_data.get('error') or '(no detail)'}",
+        print(f"[baseline] {outcome.value}: "
+              f"{eval_data.get('error') or '(no detail)'}",
               file=sys.stderr)
         return _EXIT_FOR[outcome]
 

@@ -7,8 +7,7 @@ local subprocess) writes into; downstream consumers
 
 What lives here:
   - `EvalOutcome`          — classification enum, single source of truth for
-                             what happened (OK / kernel verify fail / kernel
-                             profile crash / framework error).
+                             what happened (OK / kernel fail / infra fail).
   - `EvalResult`           — the result dataclass.
   - `is_improvement`       — current-vs-best comparison with relative-%
                              threshold and direction (`lower_is_better`).
@@ -30,49 +29,31 @@ from typing import Optional
 
 
 class EvalOutcome(str, Enum):
-    """Single source of truth for what just happened in eval.
-
-    KERNEL_* vs REF_FAIL: the verify script splits ref setup / ref forward /
-    kernel forward into separate try/excepts and emits `error_source` in
-    its JSON tail. REF_FAIL fires when the broken side is the reference
-    (the file passed to /autoresearch via --ref) — scaffold rejects the
-    task and asks the user to fix the source file. KERNEL_* failures are
-    still recoverable through PLAN -> EDIT rewrite.
-
-    The boundary between KERNEL_* and FRAMEWORK_ERROR is "did we get any
-    per-shape data" — without it the kernel wasn't meaningfully exercised.
-    """
+    """What happened in eval. KERNEL_FAIL = agent can fix via PLAN→EDIT;
+    INFRA_FAIL = operator only (broken --ref, missing env, transport down)."""
     OK = "ok"
-    REF_FAIL = "ref_fail"                          # reference broken (setup or forward)
-    KERNEL_VERIFY_FAIL = "kernel_verify_fail"      # output != ref
-    KERNEL_PROFILE_CRASH = "kernel_profile_crash"  # verify ok, profile crashed
-    FRAMEWORK_ERROR = "framework_error"            # no per-shape data at all
+    KERNEL_FAIL = "kernel_fail"
+    INFRA_FAIL = "infra_fail"
 
 
-# Baseline outcomes the agent CANNOT recover from inside the EDIT loop:
-#   ref_fail        — reference.py is broken; only the user can fix it
-#   framework_error — eval framework crashed (worker/timeout/OOM); needs
-#                     operator intervention, not a kernel rewrite
+# Baseline outcomes the agent CANNOT recover from inside the EDIT loop.
 # Single source of truth for the "stuck" carve-out used by
 # PhaseController.on_baseline_settled, compute_resume_phase,
 # hooks/stop_save (early-Stop carve-out), hooks/post_bash (message
-# selection), and dashboard.py (banner choice). Adding a 6th stuck
-# outcome later only needs an edit here.
+# selection), and dashboard.py (banner choice).
 STUCK_BASELINE_OUTCOMES = frozenset({
-    EvalOutcome.REF_FAIL.value,
-    EvalOutcome.FRAMEWORK_ERROR.value,
+    EvalOutcome.INFRA_FAIL.value,
 })
 
 
 @dataclass
 class EvalResult:
-    outcome: EvalOutcome = EvalOutcome.FRAMEWORK_ERROR
+    outcome: EvalOutcome = EvalOutcome.INFRA_FAIL
     metrics: dict = field(default_factory=dict)
     error: Optional[str] = None
     raw_output: str = ""
-    # error_source: "ref" | "kernel" | None. Mirrors the verify script's
-    # tagged failure so scaffold and PLAN guidance can attribute blame
-    # without re-parsing tracebacks. None on success.
+    # "ref" → broken --ref file (the only sub-flavor of INFRA_FAIL the
+    # downstream messages distinguish). None on success or other failures.
     error_source: Optional[str] = None
 
     @property

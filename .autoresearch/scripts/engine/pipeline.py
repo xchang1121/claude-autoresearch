@@ -276,12 +276,12 @@ def main():
     metrics = eval_json.get("metrics", {})
     print(f"[PIPELINE] Eval: correctness={correctness}, metrics={metrics}", flush=True)
 
-    # framework_error: eval framework failed before kernel was exercised.
-    # Roll back and skip the round — recording a FAIL here would mislead
-    # later DIAGNOSE / KEEP / DISCARD.
-    if eval_json.get("outcome") == "framework_error":
+    # infra_fail: eval pipeline broke before kernel was meaningfully
+    # exercised. Roll back and skip the round — recording a FAIL here
+    # would mislead later DIAGNOSE / KEEP / DISCARD.
+    if eval_json.get("outcome") == "infra_fail":
         auto_rollback(task_dir)
-        print(f"[PIPELINE] FRAMEWORK_ERROR: {eval_json.get('error', 'no data')}. "
+        print(f"[PIPELINE] INFRA_FAIL: {eval_json.get('error', 'no data')}. "
               f"Rolled back, not recording round.", flush=True)
         sys.exit(0)
 

@@ -379,38 +379,38 @@ def main():
             baseline_cmd.extend(["--worker-url", args.worker_url])
         rc = subprocess.run(baseline_cmd).returncode
         # baseline exit codes (workflow.baseline._EXIT_FOR):
-        #   5 REF_FAIL · 4 FRAMEWORK_ERROR · 3 KERNEL_* · 0 OK
-        # 5 and 4 are STUCK_BASELINE_OUTCOMES → no plan->edit hint.
-        if rc == 5:
-            print(json.dumps({
-                "status": "error",
-                "task_dir": task_dir,
-                "error": ("reference.py failed during baseline — see "
-                          "[baseline]/[eval] stderr above"),
-                "hint": ("The file passed via --ref is broken (import / "
-                         "forward / device-only bug). Fix the SOURCE file "
-                         "and re-run /autoresearch from scratch. The task "
-                         "directory is left in place for inspection but "
-                         "MUST NOT be activated — reference.py is treated "
-                         "as ground truth and the agent cannot fix it."),
-            }))
-            sys.exit(5)
+        #   4 INFRA_FAIL · 3 KERNEL_FAIL · 0 OK
+        # rc=4 is the stuck case — no plan->edit hint; rc=3 activates the
+        # task so the hook can route to PLAN.
         if rc == 4:
+            try:
+                with open(os.path.join(task_dir, ".ar_state",
+                                       "progress.json")) as _f:
+                    err_source = json.load(_f).get("baseline_error_source")
+            except (OSError, ValueError):
+                err_source = None
+            if err_source == "ref":
+                hint = ("The file passed via --ref is broken (import / "
+                        "forward / device-only bug). Fix the SOURCE file "
+                        "and re-run /autoresearch from scratch. The task "
+                        "directory is left for inspection but MUST NOT be "
+                        "activated — reference.py is not editable.")
+            else:
+                hint = ("INFRA_FAIL: no per-shape data — the seed kernel "
+                        "wasn't meaningfully exercised. Fix env (timeout / "
+                        "worker / device / OOM) and re-run "
+                        "`/autoresearch --resume <task_dir>`. Phase stays "
+                        "at BASELINE.")
             print(json.dumps({
                 "status": "error",
                 "task_dir": task_dir,
-                "error": ("eval framework crashed during baseline — see "
+                "error": ("eval pipeline broken during baseline — see "
                           "[baseline]/[eval] stderr above"),
-                "hint": ("FRAMEWORK_ERROR: no per-shape data — the seed "
-                         "kernel wasn't meaningfully exercised. Fix the "
-                         "eval framework (timeout / worker / device / OOM) "
-                         "and re-run `/autoresearch --resume <task_dir>`. "
-                         "Phase stays at BASELINE until kernel- or OK-."),
+                "hint": hint,
             }))
             sys.exit(4)
         if rc != 0:
-            # KERNEL_VERIFY_FAIL / KERNEL_PROFILE_CRASH — task activates,
-            # hook routes to PLAN.
+            # KERNEL_FAIL — task activates, hook routes to PLAN.
             print(json.dumps({
                 "status": "error",
                 "task_dir": task_dir,
