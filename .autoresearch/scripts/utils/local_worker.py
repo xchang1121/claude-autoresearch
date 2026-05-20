@@ -19,7 +19,7 @@ from typing import Optional
 
 from .eval_runner import (
     build_response, env_for, merge_sidecars, num_cases_from_kernel_payload,
-    read_sidecar, safe_extract, synth_sticky_ref_payload, write_merged_sidecar,
+    read_sidecar, safe_extract, synth_sticky_ref_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,8 +102,6 @@ def local_eval(package_bytes: bytes, op_name: str, timeout: int,
         else:
             ref_env = env_for(
                 device_id,
-                override_base_us=override_base_us,
-                override_base_per_shape_us=override_base_per_shape_us,
                 phase="ref_only",
                 sidecar_path=os.path.join(tmp, "eval_result_ref.json"),
             )
@@ -115,8 +113,6 @@ def local_eval(package_bytes: bytes, op_name: str, timeout: int,
         # kernel-side returncode as authoritative for round outcomes.
         kernel_env = env_for(
             device_id,
-            override_base_us=override_base_us,
-            override_base_per_shape_us=override_base_per_shape_us,
             phase="kernel_only",
             sidecar_path=os.path.join(tmp, "eval_result_kernel.json"),
         )
@@ -135,6 +131,5 @@ def local_eval(package_bytes: bytes, op_name: str, timeout: int,
             )
 
         merged = merge_sidecars(ref_payload, kernel_payload)
-        write_merged_sidecar(tmp, merged)
         log = "\n".join(s for s in (ref_log, kernel_log) if s).strip()
         return build_response(device_id, rc, log, merged)

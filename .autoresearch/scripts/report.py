@@ -398,7 +398,7 @@ def render_report(task_dir: str) -> str:
     # what coverage the metric numbers represent. Single-shape tasks skip
     # the section entirely. Pulled from the first history record whose
     # metrics carry per_shape_descs (the SEED round, populated by
-    # eval_client._assemble_eval_result).
+    # task_config.eval_assemble.assemble_eval_result).
     case_descs: list = []
     for rec in history:
         d = (rec.get("metrics", {}) or {}).get("per_shape_descs")

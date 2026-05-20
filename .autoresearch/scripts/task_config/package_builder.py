@@ -166,7 +166,6 @@ def _gen_eval_script(config: TaskConfig) -> str:
                 first-failing case decides error_source
       Phase D — profile_gen (ModelNew under adapter benchmark_impl)
       Phase E — profile_base (Model under profiler_npu, matching akg-hitl)
-                skipped when AR_OVERRIDE_BASE_TIME_US env is set
 
     `AR_EVAL_PHASE` env selects which subset runs:
       "ref_only"     — Phase A + E only (no kernel import; immune to
@@ -239,9 +238,8 @@ SIDECAR_PATH = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "{EVAL_SIDECAR}"),
 )
 # Phase selector — production callers spawn TWO subprocesses per round
-# (ref_only then kernel_only) so a kernel UB overflow / device fault in
-# the kernel pass can't take down ref data from the ref pass. "all" is
-# the legacy single-process behavior, kept for ad-hoc reproducer use.
+# (ref_only then kernel_only). "all" is the legacy single-process
+# behavior, kept for ad-hoc reproducer use.
 PHASE = os.environ.get("AR_EVAL_PHASE", "all")
 if PHASE not in ("all", "ref_only", "kernel_only"):
     print(f"[eval] WARN: unknown AR_EVAL_PHASE={{PHASE!r}}, defaulting to 'all'",
@@ -249,24 +247,6 @@ if PHASE not in ("all", "ref_only", "kernel_only"):
     PHASE = "all"
 DO_KERNEL_PHASES = PHASE in ("all", "kernel_only")
 DO_REF_PHASE = PHASE in ("all", "ref_only")
-OVERRIDE_BASE_US = float(os.environ["AR_OVERRIDE_BASE_TIME_US"]) \\
-    if os.environ.get("AR_OVERRIDE_BASE_TIME_US") else None
-# Sticky per-shape ref baseline (JSON list). Paired with
-# OVERRIDE_BASE_US so speedup_vs_ref stays a geomean of per-shape
-# ratios instead of falling back to scalar after the first round.
-_override_ps_raw = os.environ.get("AR_OVERRIDE_BASE_PER_SHAPE_US")
-if _override_ps_raw:
-    try:
-        OVERRIDE_BASE_PER_SHAPE_US = [
-            float(v) for v in json.loads(_override_ps_raw)
-            if isinstance(v, (int, float)) and 0 < v < float("inf")
-        ]
-        if not OVERRIDE_BASE_PER_SHAPE_US:
-            OVERRIDE_BASE_PER_SHAPE_US = None
-    except Exception:
-        OVERRIDE_BASE_PER_SHAPE_US = None
-else:
-    OVERRIDE_BASE_PER_SHAPE_US = None
 
 result = {{
     "verify": None,
@@ -588,52 +568,21 @@ if kernel_imported and verify_error_source != "ref":
 
 
 # === Phase E: profile_base (PyTorch reference) ==========================
-# Sticky baseline: AR_OVERRIDE_BASE_TIME_US env (set by eval_client from
-# progress.json baseline_metric) lets us skip this — base timing of the
-# PyTorch reference doesn't change round-to-round.
-# Phase E is skipped entirely in kernel_only mode (DO_REF_PHASE=False);
-# the ref subprocess from the two-pass runner owns ref measurement.
+# Skipped in kernel_only mode (DO_REF_PHASE=False); the ref subprocess
+# from the two-pass runner owns ref measurement. Sticky baseline reuse
+# is handled by the runner (utils.eval_runner.synth_sticky_ref_payload),
+# which builds the ref payload externally so this script never has to
+# materialise anything when ref doesn't need re-measuring.
 if DO_REF_PHASE:
-    if OVERRIDE_BASE_US is not None and OVERRIDE_BASE_US > 0:
-        print(f"[eval] sticky baseline override = {{OVERRIDE_BASE_US:.2f}} us; "
-              f"skipping profile_base", file=sys.stderr)
-        # When per-shape ref was captured at SEED time
-        # (progress.baseline_per_shape_us), eval_client passes it through
-        # AR_OVERRIDE_BASE_PER_SHAPE_US so we can materialise per_shape
-        # here. speedup_vs_ref then stays a geomean of per-shape ratios
-        # across sticky rounds. Without per-shape data (legacy progress
-        # or partial measurement), omit per_shape and let eval_client
-        # fall back to the scalar base/gen ratio for this round.
-        base_block = {{
-            "avg_time_us": OVERRIDE_BASE_US,
-            "execution_time_us": OVERRIDE_BASE_US,
-            "execution_time_ms": OVERRIDE_BASE_US / 1000,
-            "warmup_times": 0, "run_times": 0,
-            "num_cases": num_cases,
-            "sticky": True,
-        }}
-        if (OVERRIDE_BASE_PER_SHAPE_US is not None
-                and len(OVERRIDE_BASE_PER_SHAPE_US) == num_cases):
-            base_block["per_shape"] = [
-                {{"avg_time_us": v, "method": "sticky"}}
-                for v in OVERRIDE_BASE_PER_SHAPE_US
-            ]
-        elif OVERRIDE_BASE_PER_SHAPE_US is not None:
-            print(f"[eval] WARN: sticky per_shape length "
-                  f"{{len(OVERRIDE_BASE_PER_SHAPE_US)}} != num_cases "
-                  f"{{num_cases}}; skipping per_shape override",
-                  file=sys.stderr)
-        result["profile_base"] = base_block
-    else:
-        try:
-            result["profile_base"] = _run_profile(Model, _bench_base, "base")
-        except Exception as e:
-            traceback.print_exc()
-            result["ok"] = False
-            result["errors"].append({{
-                "phase": "profile_base",
-                "type": type(e).__name__, "msg": str(e),
-            }})
+    try:
+        result["profile_base"] = _run_profile(Model, _bench_base, "base")
+    except Exception as e:
+        traceback.print_exc()
+        result["ok"] = False
+        result["errors"].append({{
+            "phase": "profile_base",
+            "type": type(e).__name__, "msg": str(e),
+        }})
 
 _write_and_exit(0 if verify_ok else 1)
 '''

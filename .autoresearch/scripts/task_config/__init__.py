@@ -1,4 +1,4 @@
-"""task_config package — facade over four single-concern submodules.
+"""task_config package — facade over single-concern submodules.
 
 Layout:
 
@@ -7,7 +7,10 @@ Layout:
                     check_constraints / format_result_summary.
     package_builder DSL-adapter resolution, verify/profile script
                     generation, tar.gz assembly.
-    eval_client     Worker URL discovery, HTTP transport, run_eval.
+    eval_request    Case-count, timeout, sticky-baseline request building.
+    eval_transport  Raw HTTP/local execution.
+    eval_assemble   Raw response -> EvalResult metric semantics.
+    eval_client     Public run_eval routing facade.
 
 Only names imported from outside the package are re-exported here;
 submodule helpers stay private.

@@ -230,13 +230,13 @@ def main():
 
     # === Step 2: Eval ===
     # Multi-shape: scale the eval_wrapper subprocess wall-clock cap by
-    # num_cases. eval_client._effective_timeout already scales the
+    # num_cases. eval_request.effective_timeout already scales the
     # WORKER-side budget (HTTP timeout / local subprocess kill); this
     # is the OUTER cap that wraps the eval_wrapper run. Use the same
     # per-shape multiplier + 300s buffer for IPC / package transfer.
     try:
-        from task_config.eval_client import _count_ref_cases
-        probed_cases = _count_ref_cases(task_dir, config)
+        from task_config.eval_request import count_ref_cases
+        probed_cases = count_ref_cases(task_dir, config)
     except Exception:
         probed_cases = 1
     progress_for_count = load_progress(task_dir) or {}

@@ -38,7 +38,6 @@ class Progress:
     # Sticky pytorch baseline (anchors speedup display; pinned by the first
     # baseline_init that captured ref_latency_us).
     baseline_metric: Optional[float] = None
-    baseline_commit: Optional[str] = None
     baseline_source: Optional[str] = None      # "ref" | "seed_fallback"
     baseline_outcome: Optional[str] = None     # task_config.EvalOutcome value
     # error_source: "ref" | "kernel" | None. Set by verify script's tagged

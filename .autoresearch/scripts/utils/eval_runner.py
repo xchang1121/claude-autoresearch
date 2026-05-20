@@ -2,32 +2,34 @@
 
 Both transports (worker HTTP server and local subprocess) extract the
 same tar.gz produced by `package_builder._build_package`, export the
-same env, write per-phase sidecar JSON, and merge them the same way.
-They differ only in how they spawn the python subprocess (asyncio vs
-plain subprocess). This module owns the parts they share so the two
-sides can't drift on path-safety, env vars, or sidecar shape.
+same env, and merge per-phase sidecars the same way. They differ only
+in how they spawn the python subprocess (asyncio vs plain subprocess).
+This module owns the parts they share so the two sides can't drift on
+path-safety, env vars, or sidecar shape.
 
-Two-pass execution (post fix for kernel-induced subprocess death):
-each round runs the generated eval_<op>.py TWICE — once with
-AR_EVAL_PHASE=ref_only (writes profile_base only) and once with
-AR_EVAL_PHASE=kernel_only (writes verify + profile_gen). Per-phase
-sidecars are merged into eval_result.json at the end. A kernel
+Two-pass execution: each round runs the generated eval_<op>.py TWICE —
+once with AR_EVAL_PHASE=ref_only (writes profile_base only) and once
+with AR_EVAL_PHASE=kernel_only (writes verify + profile_gen). A kernel
 SIGKILL / device hang in pass 2 cannot erase ref data that pass 1
 already wrote. When override_base_us is supplied (sticky baseline),
-pass 1 is skipped — ref doesn't need re-measuring this round.
+pass 1 is skipped — the runner calls `synth_sticky_ref_payload` to
+build the ref side in-memory from progress.json.
 
 Public surface:
 
     safe_extract(package_bytes, dst)
         Reject absolute paths and `..` components; raise on traversal.
-    env_for(device_id, override_base_us=None, ..., phase=None,
-            sidecar_path=None)
+    env_for(device_id, phase=None, sidecar_path=None)
         Build the env dict the generated eval_<op>.py expects.
         `phase` ∈ {"ref_only", "kernel_only", None}; None ⇒ legacy
         "all" behavior. `sidecar_path` overrides AR_EVAL_SIDECAR so
         the two passes can write to distinct files.
     read_sidecar(workdir, name="eval_result.json")
         Parse <workdir>/<name> or return None on miss.
+    synth_sticky_ref_payload(...)
+        Build a ref-side payload from sticky progress.json data so
+        the runner can skip the ref subprocess when no re-measure
+        is needed.
     merge_sidecars(ref, kernel)
         Combine per-phase sidecars into one canonical eval_result dict.
     build_response(device_id, returncode, log, eval_result)
@@ -83,22 +85,16 @@ def safe_extract(package_bytes: bytes, dst: str) -> None:
 
 
 def env_for(device_id: int,
-            override_base_us: Optional[float] = None,
-            override_base_per_shape_us: Optional[list] = None,
             phase: Optional[str] = None,
             sidecar_path: Optional[str] = None) -> dict:
     """Env vars the generated eval_<op>.py reads.
 
     DEVICE_ID selects which NPU/GPU to bind.
-    AR_OVERRIDE_BASE_TIME_US, when set, tells the script to skip
-    profile_base and reuse the caller-supplied aggregate baseline.
-    AR_OVERRIDE_BASE_PER_SHAPE_US, when set (JSON list of floats),
-    additionally populates `profile_base.per_shape` so speedup_vs_ref
-    keeps computing as a geomean of per-shape ratios — sticky rounds
-    aggregate the same way the SEED round did.
     AR_EVAL_PHASE ∈ {"ref_only", "kernel_only"} restricts which phases
     of the generated script run; omit / None for the legacy all-phases
-    behavior (kept for ad-hoc reproducer use).
+    behavior (kept for ad-hoc reproducer use). Sticky baseline is
+    handled in the runner via `synth_sticky_ref_payload`; the script
+    itself no longer reads any override env.
     AR_EVAL_SIDECAR overrides the canonical eval_result.json path so
     the two-pass runner can keep ref and kernel sidecars distinct.
     """
@@ -109,12 +105,6 @@ def env_for(device_id: int,
     env["CUDA_VISIBLE_DEVICES"] = str(device_id)
     # Windows libiomp5 double-load workaround (no-op on Linux).
     env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-    if override_base_us is not None and override_base_us > 0:
-        env["AR_OVERRIDE_BASE_TIME_US"] = f"{override_base_us:.6f}"
-    if (isinstance(override_base_per_shape_us, list)
-            and override_base_per_shape_us):
-        env["AR_OVERRIDE_BASE_PER_SHAPE_US"] = json.dumps(
-            [float(v) for v in override_base_per_shape_us])
     if phase in ("ref_only", "kernel_only"):
         env["AR_EVAL_PHASE"] = phase
     if sidecar_path:
@@ -190,7 +180,7 @@ def merge_sidecars(ref: Optional[dict],
     `kernel` (from AR_EVAL_PHASE=kernel_only) contributes `verify`
     and `profile_gen`. `errors` is union; `ok` is AND of both sides.
     Missing sidecars (subprocess SIGKILL'd before write) are tolerated
-    — downstream `_assemble_eval_result` treats None blocks as failure.
+    — downstream `assemble_eval_result` treats None blocks as failure.
     """
     if ref is None and kernel is None:
         return None
@@ -209,24 +199,10 @@ def merge_sidecars(ref: Optional[dict],
     }
 
 
-def write_merged_sidecar(workdir: str, merged: Optional[dict]) -> None:
-    """Persist the merged eval_result.json so ad-hoc inspectors / tests
-    looking at the canonical path still see one combined artifact."""
-    if merged is None:
-        return
-    path = os.path.join(workdir, EVAL_SIDECAR)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(merged, f, default=str)
-    except Exception as e:
-        logger.warning("eval_runner: cannot write merged sidecar %s: %s",
-                       path, e)
-
-
 def build_response(device_id: int, returncode: int, log: str,
                    eval_result: Optional[dict]) -> dict:
     """Both transports return the same dict shape; centralise it here so
-    `eval_client._assemble_eval_result` is transport-agnostic."""
+    `task_config.eval_assemble` is transport-agnostic."""
     return {
         "device_id": device_id,
         "returncode": returncode,

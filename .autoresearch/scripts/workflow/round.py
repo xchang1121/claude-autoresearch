@@ -18,6 +18,8 @@ from task_config import (  # noqa: E402
 )
 from utils.git_utils import commit_in_task, current_head_short  # noqa: E402
 
+from .progress_reducer import eval_result_from_data, reduce_round_progress
+
 
 def record_round(task_dir: str, eval_data: dict,
                  description: str = "optimization round",
@@ -31,23 +33,7 @@ def record_round(task_dir: str, eval_data: dict,
         return {"decision": "ERROR", "error": "task.yaml not found"}
 
     progress = load_progress(task_dir) or Progress()
-    # eval_wrapper emits outcome (authoritative) + correctness (legacy
-    # bool). Map outcome string back to the enum; correctness becomes
-    # a derived property on EvalResult.
-    raw_outcome = eval_data.get("outcome")
-    if raw_outcome is None:
-        raw_outcome = (EvalOutcome.OK.value if eval_data.get("correctness")
-                       else EvalOutcome.KERNEL_FAIL.value)
-    try:
-        result_outcome = EvalOutcome(raw_outcome)
-    except ValueError:
-        result_outcome = EvalOutcome.INFRA_FAIL
-    eval_result = EvalResult(
-        outcome=result_outcome,
-        metrics=eval_data.get("metrics", {}),
-        error=eval_data.get("error"),
-        error_source=eval_data.get("error_source"),
-    )
+    eval_result = eval_result_from_data(eval_data)
 
     round_num = progress.eval_rounds + 1
     decision = "DISCARD"
@@ -145,48 +131,19 @@ def record_round(task_dir: str, eval_data: dict,
         print(f"[keep_or_discard] {decision}: rolled back editable files",
               file=sys.stderr)
 
-    # Backfill baseline_metric when SEED couldn't record it (kernel_fail
-    # at R0 dropped ref_latency_us out of metrics, leaving baseline=None
-    # forever). Any later round that produces a valid ref_latency_us is
-    # the ref's first honest measurement — adopt it as the anchor. Stays
-    # sticky after that: subsequent rounds don't overwrite.
-    new_baseline_metric = progress.baseline_metric
-    new_baseline_source = progress.baseline_source
-    new_baseline_per_shape = progress.baseline_per_shape_us
-    new_baseline_fp = progress.baseline_fingerprint
-    if new_baseline_metric is None:
-        ref_us = eval_result.metrics.get("ref_latency_us")
-        if (isinstance(ref_us, (int, float))
-                and 0 < ref_us < float("inf")):
-            new_baseline_metric = float(ref_us)
-            new_baseline_source = "ref"
-            # Capture per-shape ref alongside the aggregate so future
-            # sticky-baseline rounds compute the same geomean speedup
-            # the SEED round would have.
-            psb = eval_result.metrics.get("per_shape_base_us")
-            if (isinstance(psb, list) and psb
-                    and all(isinstance(v, (int, float))
-                            and 0 < v < float("inf") for v in psb)):
-                new_baseline_per_shape = [float(v) for v in psb]
-            new_baseline_fp = {
-                "warmup_times": int(getattr(config, "warmup_times", 10)),
-                "run_times": int(getattr(config, "run_times", 100)),
-                "num_cases": int(eval_result.metrics.get("num_cases") or 1),
-            }
-            print(f"[keep_or_discard] backfilling baseline_metric="
-                  f"{new_baseline_metric:.2f}us (source=ref) from R{round_num}",
-                  file=sys.stderr)
-
-    progress = progress.apply(
-        eval_rounds=round_num,
+    # Keep baseline ownership centralized with baseline_init. This covers
+    # missing anchors, seed_fallback upgrades, and fingerprint re-anchors.
+    reduction = reduce_round_progress(
+        progress, config, eval_result, round_num,
         consecutive_failures=new_failures,
         best_metric=new_best_metric,
         best_commit=new_best_commit,
-        baseline_metric=new_baseline_metric,
-        baseline_source=new_baseline_source,
-        baseline_per_shape_us=new_baseline_per_shape,
-        baseline_fingerprint=new_baseline_fp,
     )
+    if reduction.anchor.changed and reduction.anchor.message:
+        print(f"[keep_or_discard] {reduction.anchor.message} from R{round_num}",
+              file=sys.stderr)
+
+    progress = reduction.progress
     save_progress(task_dir, progress)
 
     hist: dict[str, Any] = {
