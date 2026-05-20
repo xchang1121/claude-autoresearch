@@ -505,7 +505,9 @@ def check_bash(phase: str, command: str) -> tuple:
         return False, _CANONICAL_FORM_REJECTION
 
     return False, (f"phase {phase}: only AR scripts, lifecycle scripts, "
-                   f"and read-only commands are allowed")
+                   f"and read-only commands are allowed. Use the Edit / "
+                   f"Write tool (gated by phase) for file changes, or an "
+                   f"AR script for state changes — never ad-hoc bash.")
 
 
 _DIAGNOSE_ARTIFACT_RE = re.compile(r"^\.ar_state/diagnose_v\d+\.md$")

@@ -145,11 +145,30 @@ def record_round(task_dir: str, eval_data: dict,
         print(f"[keep_or_discard] {decision}: rolled back editable files",
               file=sys.stderr)
 
+    # Backfill baseline_metric when SEED couldn't record it (kernel_fail
+    # at R0 dropped ref_latency_us out of metrics, leaving baseline=None
+    # forever). Any later round that produces a valid ref_latency_us is
+    # the ref's first honest measurement — adopt it as the anchor. Stays
+    # sticky after that: subsequent rounds don't overwrite.
+    new_baseline_metric = progress.baseline_metric
+    new_baseline_source = progress.baseline_source
+    if new_baseline_metric is None:
+        ref_us = eval_result.metrics.get("ref_latency_us")
+        if (isinstance(ref_us, (int, float))
+                and 0 < ref_us < float("inf")):
+            new_baseline_metric = float(ref_us)
+            new_baseline_source = "ref"
+            print(f"[keep_or_discard] backfilling baseline_metric="
+                  f"{new_baseline_metric:.2f}us (source=ref) from R{round_num}",
+                  file=sys.stderr)
+
     progress = progress.apply(
         eval_rounds=round_num,
         consecutive_failures=new_failures,
         best_metric=new_best_metric,
         best_commit=new_best_commit,
+        baseline_metric=new_baseline_metric,
+        baseline_source=new_baseline_source,
     )
     save_progress(task_dir, progress)
 
