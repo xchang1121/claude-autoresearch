@@ -238,6 +238,12 @@ def run_one(batch_dir: Path, case: dict, args: argparse.Namespace,
     pre_task_dirs = mf.snapshot_task_dirs()
     bound_task_dir: Path | None = None
 
+    # Clear stale .active_task left by a prior op / batch / interactive
+    # session. The activation hook reads this file on claude startup and
+    # silently resumes the pointed task, bypassing /autoresearch's
+    # scaffold dispatch. Reset so parse_args -> scaffold is the only entry.
+    (repo_root / ".autoresearch" / ".active_task").unlink(missing_ok=True)
+
     header = (f"\n{'=' * 72}\n"
               f"[run {datetime.now().isoformat(timespec='seconds')}] op={op} "
               f"{hw_arg} rounds={args.max_rounds}\n"
