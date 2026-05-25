@@ -82,10 +82,6 @@ Tier 1 静态检查（每个 op 独立 subprocess，秒级）：
 
 ### Step 3 — Worker daemon
 
-`--backend` / `--arch` / `--devices` 三者**全部必填**（旧版的 `auto` 已去除——
-一来 npu-smi/nvidia-smi 推断的 backend/arch 在 daemon 重启之间可能漂，二来
-bug report 时 "auto" 含糊不清反而难复现）。
-
 ```bash
 python .autoresearch/scripts/ar_cli.py worker --start \
     --backend ascend --arch ascend910b3 --devices 0 \
@@ -95,8 +91,8 @@ python .autoresearch/scripts/ar_cli.py worker --status --port 9111
 python .autoresearch/scripts/ar_cli.py worker --stop   --port 9111
 ```
 
-挑卡技巧：`npu-smi info` / `nvidia-smi` 看一眼 HBM 占用，挑闲卡传 `--devices N`。
-CPU backend 用 `--backend cpu`。
+`--backend` / `--arch` / `--devices` 必填。挑卡：`npu-smi info` / `nvidia-smi`
+看 HBM 占用，闲卡编号传给 `--devices`。
 
 > 不传 `--devices` 也不传 `--worker-url` 时，`run.py` 默认 `--worker-url 127.0.0.1:9111`
 > 并启动时强制 health check，daemon 没起会立即报错并打印怎么起，不会埋在第一个

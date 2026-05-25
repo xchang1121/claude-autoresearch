@@ -10,10 +10,7 @@ Canonical invocation (from project root):
     python .autoresearch/scripts/ar_cli.py worker --status --port 9111
     python .autoresearch/scripts/ar_cli.py worker --stop   --port 9111
 
-``--backend`` / ``--arch`` / ``--devices`` are all required — pass them
-explicitly. (The previous ``auto`` modes hid which card / arch was in
-use, which made bug reports harder and made the daemon pick a
-different card across restarts on a busy host.)
+``--backend`` / ``--arch`` / ``--devices`` are all required.
 
 Platform support:
   - `worker --start` (foreground) and `worker --status` work on POSIX
@@ -318,14 +315,11 @@ def _add_worker_subcommand(sub: argparse._SubParsersAction) -> None:
 
     p.add_argument("--backend", required=True,
                    choices=["ascend", "cuda", "cpu"],
-                   help="Hardware backend. Pass explicitly — there is no "
-                        "auto mode.")
+                   help="Hardware backend.")
     p.add_argument("--arch", required=True,
-                   help="Arch string, e.g. ascend910b3 / a100 / x86_64. "
-                        "Pass explicitly — there is no auto mode.")
+                   help="Arch string, e.g. ascend910b3 / a100 / x86_64.")
     p.add_argument("--devices", required=True,
-                   help="Comma-separated device IDs, e.g. '2,5'. Pass "
-                        "explicitly — there is no auto mode.")
+                   help="Comma-separated device IDs, e.g. '2,5'.")
     p.add_argument("--host", default=None,
                    help="Bind / probe address. Defaults to 0.0.0.0 for "
                         "--start (all interfaces) and 127.0.0.1 for "

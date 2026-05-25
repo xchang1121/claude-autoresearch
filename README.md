@@ -144,8 +144,8 @@ curl http://127.0.0.1:9111/api/v1/status
 # {"status":"ready","backend":"ascend","arch":"ascend910b3","devices":[0]}
 ```
 
-`--backend` / `--arch` / `--devices` 都需要显式传 —— 不再支持 auto。
-`ar_cli.py worker` 还支持 `--stop` / `--status` / 前台模式，详见 `--help`。
+`--backend` / `--arch` / `--devices` 必填。`ar_cli.py worker` 还支持
+`--stop` / `--status` / 前台模式，详见 `--help`。
 
 ## 精度
 
