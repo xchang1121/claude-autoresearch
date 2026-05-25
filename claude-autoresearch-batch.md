@@ -82,25 +82,21 @@ Tier 1 静态检查（每个 op 独立 subprocess，秒级）：
 
 ### Step 3 — Worker daemon
 
-`backend` / `arch` / `devices` 默认 `auto`：
-
-| flag | auto 规则 |
-|------|-----------|
-| `--backend auto` | `npu-smi` 在 PATH 且 `nvidia-smi` 不在 → `ascend`；反之 `cuda`；两个都在/都不在 → 报错让人显式传 |
-| `--devices auto` | 滤掉 HBM > 1 GiB 或利用率 > 5% 的卡，剩下取编号最小（确定性，多次启动落同一张卡） |
-| `--arch auto` | 用 `npu-smi info` Name 列 / `nvidia-smi --query-gpu=name` 按选中的卡推 |
+`--backend` / `--arch` / `--devices` 三者**全部必填**（旧版的 `auto` 已去除——
+一来 npu-smi/nvidia-smi 推断的 backend/arch 在 daemon 重启之间可能漂，二来
+bug report 时 "auto" 含糊不清反而难复现）。
 
 ```bash
-python .autoresearch/scripts/ar_cli.py worker --start --port 9111 --bg              # 全 auto
-python .autoresearch/scripts/ar_cli.py worker --start --devices 3 --port 9111 --bg  # 钉死卡
-python .autoresearch/scripts/ar_cli.py worker --start --backend ascend --arch ascend910b3 --devices 0 --port 9111 --bg
+python .autoresearch/scripts/ar_cli.py worker --start \
+    --backend ascend --arch ascend910b3 --devices 0 \
+    --port 9111 --bg
 
 python .autoresearch/scripts/ar_cli.py worker --status --port 9111
 python .autoresearch/scripts/ar_cli.py worker --stop   --port 9111
 ```
 
-CPU 永远不会被 auto 选中（要 CPU backend 必须显式 `--backend cpu`）。所有卡都被占时
-auto 直接报错、**不**驱逐别人的进程。
+挑卡技巧：`npu-smi info` / `nvidia-smi` 看一眼 HBM 占用，挑闲卡传 `--devices N`。
+CPU backend 用 `--backend cpu`。
 
 > 不传 `--devices` 也不传 `--worker-url` 时，`run.py` 默认 `--worker-url 127.0.0.1:9111`
 > 并启动时强制 health check，daemon 没起会立即报错并打印怎么起，不会埋在第一个
