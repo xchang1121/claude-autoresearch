@@ -324,7 +324,7 @@ def patch_driver_benchmarker():
     try:
         from triton.runtime import driver
 
-        if hasattr(driver.active.get_benchmarker, '_ar_vendored_patched'):
+        if hasattr(driver.active.get_benchmarker, '_ar_patched'):
             return True
 
         original_get_benchmarker = driver.active.get_benchmarker
@@ -334,7 +334,7 @@ def patch_driver_benchmarker():
                 fn_to_profile = _wrap_kernel_call_with_restore(kernel_call, _restore_info)
 
                 try:
-                    from ar_vendored.op.verifier.profiler import profiler_npu
+                    from verifier.profiler import profiler_npu
 
                     time_us = profiler_npu(
                         fn_to_profile,
@@ -342,7 +342,7 @@ def patch_driver_benchmarker():
                         active=30,
                         suppress_warnings=True,
                         clear_l2_cache=True,
-                        dsl="triton_ascend",
+                        l2_clear_kernel_name="AR_l2cache_clear",
                         filter_restore_copy=(_restore_info is not None),
                     )
                     return [time_us] * 3
@@ -354,7 +354,7 @@ def patch_driver_benchmarker():
             return custom_benchmarker
 
         driver.active.get_benchmarker = patched_get_benchmarker
-        driver.active.get_benchmarker._ar_vendored_patched = True
+        driver.active.get_benchmarker._ar_patched = True
         return True
 
     except ImportError:

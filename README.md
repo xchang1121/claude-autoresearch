@@ -127,7 +127,7 @@ python .autoresearch/scripts/batch/monitor.py $BATCH_DIR
 ## 远程 Worker
 
 远端 NPU / CUDA 通过 SSH tunnel 接入，eval 提交到远端跑。HTTP server 自带
-（[ar_vendored/worker/](.autoresearch/scripts/ar_vendored/worker/)），worker 端依赖：
+（[worker/](.autoresearch/scripts/worker/)），worker 端依赖：
 `fastapi` + `uvicorn`、`torch`（+ `torch_npu` / CUDA runtime）、按 DSL 追加
 `triton` / `pandas` / `msprof` / `nsys`。
 
@@ -144,8 +144,8 @@ curl http://127.0.0.1:9111/api/v1/status
 # {"status":"ready","backend":"ascend","arch":"ascend910b3","devices":[0]}
 ```
 
-`backend` / `arch` / `devices` 默认都是 `auto`（按 `npu-smi` / `nvidia-smi` 自动检），
-显式传值永远优先。`ar_cli.py worker` 还支持 `--stop` / `--status` / 前台模式，详见 `--help`。
+`--backend` / `--arch` / `--devices` 都需要显式传 —— 不再支持 auto。
+`ar_cli.py worker` 还支持 `--stop` / `--status` / 前台模式，详见 `--help`。
 
 ## 精度
 
@@ -231,8 +231,8 @@ PLAN 阶段 hook 会提示 Claude `Glob("skills/<dsl>/**/*.md")`，把命中的 
 | Phase 流转规则 / Bash gate | [phase_machine/phase_policy.py](.autoresearch/scripts/phase_machine/phase_policy.py) |
 | Hook 接线 | [.claude/settings.json](.claude/settings.json) + [hooks/](.autoresearch/scripts/hooks/) |
 | Plan / history / progress 写入 | [phase_machine/state_store.py](.autoresearch/scripts/phase_machine/state_store.py) |
-| DSL adapter（profiler / autotune） | [ar_vendored/op/verifier/adapters/factory.py](.autoresearch/scripts/ar_vendored/op/verifier/adapters/factory.py) |
-| 本地 vs 远端执行路由 | [utils/local_worker.py](.autoresearch/scripts/utils/local_worker.py) / [ar_vendored/worker/server.py](.autoresearch/scripts/ar_vendored/worker/server.py) |
+| DSL adapter（profiler / autotune） | [verifier/adapters/factory.py](.autoresearch/scripts/verifier/adapters/factory.py) |
+| 本地 vs 远端执行路由 | [utils/local_worker.py](.autoresearch/scripts/utils/local_worker.py) / [worker/server.py](.autoresearch/scripts/worker/server.py) |
 | CodeChecker 规则 | [utils/code_checker.py](.autoresearch/scripts/utils/code_checker.py) + `.autoresearch/code_checker.yaml` |
 | 不变量（plan 权威态 / pid 单调 / DIAGNOSE 契约 / 等） | [CLAUDE.md](CLAUDE.md) |
 | 子代理 prompt（DIAGNOSE 用） | [.claude/agents/ar-diagnosis.md](.claude/agents/ar-diagnosis.md) |

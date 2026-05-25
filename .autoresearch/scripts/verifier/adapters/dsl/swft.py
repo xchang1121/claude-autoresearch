@@ -12,33 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Triton CUDA DSL adapter - 支持 ModelNew (KernelBench) 格式."""
+"""SWFT DSL adapter."""
 
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
-from .base import DSLAdapter
+from .base import DSLAdapter, register_dsl
 
 
-class DSLAdapterTritonCuda(DSLAdapter):
-    """Adapter for Triton CUDA DSL."""
+@register_dsl("swft")
+class DSLAdapterSwft(DSLAdapter):
+    """Adapter for SWFT DSL."""
+
+    def default_backend(self) -> str:
+        return "ascend"
     
     def get_import_statements(self, framework: str) -> str:
-        """Return Triton import statements."""
-        if framework == "mindspore":
-            return "import torch\nimport triton\nimport triton.language as tl\n"
-        elif framework == "torch":
-            return "import triton\nimport triton.language as tl\n"
-        elif framework == "numpy":
-            return "import numpy as np\nimport triton\nimport triton.language as tl\n"
-        else:
-            return "import triton\nimport triton.language as tl\n"
+        """Return SWFT import statements."""
+        return "from swft.core import *\nfrom swft.api import *\nimport numpy as np\n"
     
     def get_impl_import(self, op_name: str, impl_func_name: str) -> str:
-        """Return implementation function import.
-        
-        统一使用 ModelNew 类格式（KernelBench 风格）。
-        """
-        return f"from {op_name}_triton_cuda_impl import ModelNew\n"
+        """Return implementation function import."""
+        return f"from {op_name}_swft_impl import ModelNew\n"
     
     def create_impl_module(self, framework: str,
                           framework_adapter: Any, 
@@ -56,27 +50,41 @@ class DSLAdapterTritonCuda(DSLAdapter):
             str: Code string to create impl_model
         """
         code = f"impl_model = ModelNew(*{init_params_var})\n"
-        if framework == "torch":
-            code += f"impl_model = impl_model.to({device_var})\n"
-        
         return code
     
     def call_impl(self, impl_func_name: str, inputs: str, device_id: int,
                   framework_adapter: Any, op_name: str, 
                   data_dir: Optional[str] = None, 
                   framework_output: Optional[str] = None) -> str:
-        """Return code string to call Triton CUDA implementation function.
+        """Return code string to call SWFT implementation function.
         
-        调用已经实例化好的 impl_model（可以多次调用）。
+        SWFT requires binary I/O, so we need to generate bin files first.
         """
-        return f"impl_output = impl_model(*{inputs})\n"
+        if data_dir is None:
+            data_dir = "os.path.dirname(__file__)"
+        if framework_output is None:
+            framework_output = "framework_output"
+        
+        code = f"""        # 运行SWFT实现
+        data_dir = os.path.dirname(__file__)
+        
+        # 生成二进制数据文件
+        gen_binary_data({inputs}, {framework_output}, data_dir)
+        
+        # 运行SWFT实现
+        impl_model(*{inputs})
+        
+        # 加载SWFT输出
+        impl_output = load_binary_data(data_dir, {framework_output})
+"""
+        return code
     
     def needs_binary_io(self) -> bool:
-        """Triton CUDA doesn't need binary I/O."""
-        return False
+        """SWFT needs binary I/O."""
+        return True
     
     def needs_compilation(self) -> bool:
-        """Triton CUDA doesn't need compilation."""
+        """SWFT doesn't need compilation."""
         return False
     
     def benchmark_impl(self, impl_func_name: str, inputs: str, 
@@ -84,24 +92,28 @@ class DSLAdapterTritonCuda(DSLAdapter):
                       case_idx: int = 0, framework_model: Optional[str] = None,
                       framework_adapter: Optional[Any] = None,
                       device_id: Optional[int] = None) -> str:
-        """Return code string to benchmark Triton CUDA implementation.
+        """Return code string to benchmark SWFT implementation."""
+        if framework_model is None:
+            framework_model = "framework_model"
+        if device_id is None:
+            device_id = 0
         
-        使用已经实例化好的 impl_model 进行性能测试。
-        """
-        code = f"""        # 进行最终的性能测试
-        def triton_benchmark_fn():
-            result = impl_model(*{inputs})
-            return result
+        code = f"""        # 运行SWFT实现
+        data_dir = os.path.dirname(__file__)
         
-        import triton.testing
-        execution_time_ms = triton.testing.do_bench(
-            triton_benchmark_fn,
-            warmup={warmup},
-            rep={runs},
-            return_mode="median"
-        )
-        method = "triton_do_bench"
+        # 生成二进制数据文件
+        framework_output = {framework_model}(*{inputs})
+        gen_binary_data({inputs}, framework_output, data_dir)
+        
+        # 运行SWFT实现
+        import time
+        start_time = time.time()
+        for _ in range({warmup + runs}):
+            impl_model(*{inputs})
+        end_time = time.time()
+        execution_time_ms = (end_time - start_time) * 1000 / {warmup + runs}  # 转换为毫秒
+        method = "traditional_timing"
 """
         return code
-
+    
 

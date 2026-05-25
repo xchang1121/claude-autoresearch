@@ -16,11 +16,15 @@
 
 from typing import Any, Optional
 
-from .base import DSLAdapter
+from .base import DSLAdapter, register_dsl
 
 
+@register_dsl("tilelang_cuda")
 class DSLAdapterTilelangCuda(DSLAdapter):
     """Adapter for TileLang CUDA DSL."""
+
+    def default_backend(self) -> str:
+        return "cuda"
     
     def get_import_statements(self, framework: str) -> str:
         """Return TileLang CUDA import statements."""

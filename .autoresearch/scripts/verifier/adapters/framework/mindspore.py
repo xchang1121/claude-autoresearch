@@ -12,92 +12,152 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NumPy framework adapter."""
+"""MindSpore framework adapter."""
 
+import os
 from typing import Any, Optional
+import mindspore as ms
+from mindspore.common import np_dtype
 import numpy as np
 
 from .base import FrameworkAdapter
+from ..precision import PrecisionSpec
 
 
-class FrameworkAdapterNumpy(FrameworkAdapter):
-    """Adapter for NumPy framework."""
+class FrameworkAdapterMindSpore(FrameworkAdapter):
+    """Adapter for MindSpore framework."""
     
     def get_import_statements(self) -> str:
-        """Return NumPy import statements."""
-        return "import numpy as np\n"
+        """Return MindSpore import statements."""
+        return "import mindspore as ms\nfrom mindspore.common import np_dtype\n"
     
     def get_framework_import(self, op_name: str, is_dynamic_shape: bool) -> str:
         """Return framework model and input function imports."""
         if is_dynamic_shape:
-            return f"from {op_name}_numpy import Model as FrameworkModel, get_init_inputs, get_inputs_dyn_list\n"
+            return f"from {op_name}_mindspore import Model as FrameworkModel, get_init_inputs, get_inputs_dyn_list\n"
         else:
-            return f"from {op_name}_numpy import Model as FrameworkModel, get_init_inputs, get_inputs\n"
+            return f"from {op_name}_mindspore import Model as FrameworkModel, get_init_inputs, get_inputs\n"
     
     def setup_device(self, backend: str, arch: str, device_id: int) -> Any:
-        """Setup device (NumPy doesn't need device)."""
-        return None
+        """Setup MindSpore device."""
+        os.environ['DEVICE_ID'] = str(device_id)
+        if backend == "ascend":
+            device = "Ascend"
+            supported_ascend_archs = [
+                "ascend910b1", "ascend910b2", "ascend910b2c",
+                "ascend910b3", "ascend910b4", "ascend310p3",
+                "ascend910_9362", "ascend910_9372", "ascend910_9381",
+                "ascend910_9382", "ascend910_9391", "ascend910_9392",
+                "ascend950dt_95a",
+                "ascend950pr_950z", "ascend950pr_9572", "ascend950pr_9574", "ascend950pr_9575",
+                "ascend950pr_9576", "ascend950pr_9577", "ascend950pr_9578", "ascend950pr_9579",
+                "ascend950pr_957b", "ascend950pr_957d", "ascend950pr_9581", "ascend950pr_9582",
+                "ascend950pr_9584", "ascend950pr_9587", "ascend950pr_9588", "ascend950pr_9589",
+                "ascend950pr_958a", "ascend950pr_958b", "ascend950pr_9591", "ascend950pr_9592",
+                "ascend950pr_9599",
+            ]
+            if arch not in supported_ascend_archs:
+                raise ValueError(f"不支持的ascend架构: {arch}，支持的架构: {supported_ascend_archs}")
+            return device
+        elif backend == "cpu":
+            return "CPU"
+        else:
+            raise ValueError(f"MindSpore不支持的后端: {backend}")
     
     def process_input(self, x: Any, device: Any) -> Any:
-        """Process input (NumPy doesn't need device movement)."""
+        """Process input (MindSpore doesn't need device movement)."""
         return x
     
     def convert_to_numpy(self, tensor: Any) -> np.ndarray:
-        """Convert to numpy (already numpy)."""
+        """Convert MindSpore tensor to numpy."""
+        if isinstance(tensor, ms.Tensor):
+            return tensor.flatten().asnumpy()
         return tensor.flatten() if hasattr(tensor, 'flatten') else tensor
     
-    def get_limit(self, dtype: Any) -> float:
-        """Get precision limit for dtype."""
-        if dtype == np.float16:
-            return 0.004
-        elif dtype == np.int8:
-            return 0.01
+    def get_precision_spec(self, dtype: Any) -> PrecisionSpec:
+        if dtype == ms.float16:
+            return PrecisionSpec(rtol=0.004)
+        elif dtype == ms.bfloat16:
+            return PrecisionSpec(rtol=0.03)
+        elif dtype == ms.int8:
+            return PrecisionSpec(rtol=0.01)
         else:
-            return 0.004
+            return PrecisionSpec(rtol=0.004)
     
     def save_tensor(self, tensor: Any, bin_path: str) -> None:
-        """Save NumPy array to binary file."""
-        uint8_view = tensor.view(np.uint8)
-        uint8_view.tofile(bin_path)
+        """Save MindSpore tensor to binary file."""
+        tensor_np = tensor.asnumpy()
+        uint8_view = tensor_np.view(np.uint8)
+        with open(bin_path, 'wb') as f:
+            f.write(uint8_view.tobytes())
     
     def load_tensor(self, bin_path: str, reference_tensor: Any) -> Any:
-        """Load NumPy array from binary file."""
-        uint8_array = np.fromfile(bin_path, dtype=np.uint8)
-        arr = uint8_array.view(reference_tensor.dtype).reshape(reference_tensor.shape)
-        return arr.astype(reference_tensor.dtype)
+        """Load MindSpore tensor from binary file."""
+        with open(bin_path, 'rb') as f:
+            data = f.read()
+            uint8_array = np.frombuffer(data, dtype=np.uint8)
+            numpy_dtype = self.get_dtype_mapping().get(reference_tensor.dtype)
+            if numpy_dtype is None:
+                raise ValueError(f"不支持的数据类型: {reference_tensor.dtype}")
+            numpy_tensor = uint8_array.view(numpy_dtype).reshape(reference_tensor.shape)
+            return ms.Tensor(numpy_tensor, dtype=reference_tensor.dtype)
     
     def set_seed(self, backend: Optional[str] = None) -> None:
         """Set random seed."""
-        np.random.seed(0)
+        ms.set_seed(0)
     
     def move_model_to_device(self, model: Any, device: Any) -> Any:
-        """Move model to device (NumPy doesn't need device)."""
+        """Move model to device (MindSpore doesn't need explicit move)."""
         return model
     
     def get_tensor_type(self) -> type:
-        """Get NumPy array type."""
-        return np.ndarray
+        """Get MindSpore tensor type."""
+        return ms.Tensor
     
     def get_tensor_type_name(self) -> str:
-        """Get NumPy array type name as string (full path)."""
-        return "np.ndarray"
+        """Get MindSpore tensor type name as string (full path)."""
+        return "ms.Tensor"
+    
+    def get_dtype_mapping(self) -> dict:
+        """Get MindSpore to NumPy dtype mapping."""
+        return {
+            ms.float32: np.float32,
+            ms.float16: np.float16,
+            ms.bfloat16: np_dtype.bfloat16,
+            ms.int8: np.int8,
+            ms.int16: np.int16,
+            ms.int32: np.int32,
+            ms.int64: np.int64,
+            ms.uint8: np.uint8,
+            ms.uint16: np.uint16,
+            ms.uint32: np.uint32,
+            ms.uint64: np.uint64,
+            ms.bool_: np.bool_,
+        }
     
     def _get_save_tensor_code(self, tensor_type: str) -> str:
-        """Get save_tensor function code for NumPy."""
+        """Get save_tensor function code for MindSpore."""
         return """def save_tensor(tensor: TensorType, bin_path: str):
-    \"\"\"将numpy数组保存为二进制文件\"\"\"
-    uint8_view = tensor.view(np.uint8)
-    uint8_view.tofile(bin_path)
+    \"\"\"将MindSpore张量保存为二进制文件\"\"\"
+    tensor_np = tensor.asnumpy()
+    uint8_view = tensor_np.view(np.uint8)
+    with open(bin_path, 'wb') as f:
+        f.write(uint8_view.tobytes())
 
 """
     
     def _get_load_tensor_code(self, tensor_type: str) -> str:
-        """Get load_tensor function code for NumPy."""
+        """Get load_tensor function code for MindSpore."""
         return """def load_tensor(bin_path: str, expect_tensor: TensorType) -> TensorType:
-    \"\"\"从二进制文件加载numpy数组\"\"\"
-    uint8_array = np.fromfile(bin_path, dtype=np.uint8)
-    arr = uint8_array.view(expect_tensor.dtype).reshape(expect_tensor.shape)
-    return arr.astype(expect_tensor.dtype)
+    \"\"\"从二进制文件加载MindSpore张量\"\"\"
+    with open(bin_path, 'rb') as f:
+        data = f.read()
+        uint8_array = np.frombuffer(data, dtype=np.uint8)
+        numpy_dtype = MS_TO_NP_DTYPE_MAP.get(expect_tensor.dtype)
+        if numpy_dtype is None:
+            raise ValueError(f"不支持的数据类型: {expect_tensor.dtype}")
+        numpy_tensor = uint8_array.view(numpy_dtype).reshape(expect_tensor.shape)
+        return ms.Tensor(numpy_tensor, dtype=expect_tensor.dtype)
 
 """
     
@@ -174,50 +234,85 @@ class FrameworkAdapterNumpy(FrameworkAdapter):
 """
     
     def get_device_setup_code(self, backend: str, arch: str, device_id: int) -> str:
-        """Get device setup code for NumPy (no-op)."""
-        return ""
+        """Get device setup code for MindSpore."""
+        code = f"""    os.environ['DEVICE_ID'] = str({device_id})
+"""
+        if backend == "ascend":
+            supported_ascend_archs = [
+                "ascend910b1", "ascend910b2", "ascend910b2c",
+                "ascend910b3", "ascend910b4", "ascend310p3",
+                "ascend910_9362", "ascend910_9372", "ascend910_9381",
+                "ascend910_9382", "ascend910_9391", "ascend910_9392",
+                "ascend950dt_95a",
+                "ascend950pr_950z", "ascend950pr_9572", "ascend950pr_9574", "ascend950pr_9575",
+                "ascend950pr_9576", "ascend950pr_9577", "ascend950pr_9578", "ascend950pr_9579",
+                "ascend950pr_957b", "ascend950pr_957d", "ascend950pr_9581", "ascend950pr_9582",
+                "ascend950pr_9584", "ascend950pr_9587", "ascend950pr_9588", "ascend950pr_9589",
+                "ascend950pr_958a", "ascend950pr_958b", "ascend950pr_9591", "ascend950pr_9592",
+                "ascend950pr_9599",
+            ]
+            if arch not in supported_ascend_archs:
+                raise ValueError(f"不支持的ascend架构: {arch}，支持的架构: {supported_ascend_archs}")
+            code += """    device = "Ascend"
+"""
+        elif backend == "cpu":
+            code += """    device = "CPU"
+"""
+        return code
     
     def get_process_input_code(self, backend: str, dsl: str) -> str:
-        """Get process_input function code for NumPy."""
+        """Get process_input function code for MindSpore."""
         return """    def process_input(x):
         \"\"\"处理输入数据\"\"\"
         return x
 """
     
     def get_set_seed_code(self, backend: str) -> str:
-        """Get set seed code for NumPy.
+        """Get set seed code for MindSpore.
         
         Note: Returns code without indentation, template will handle indentation.
         """
-        return """np.random.seed(0)
+        return """ms.set_seed(0)
 """
     
     def get_compare_code(self) -> str:
-        """Get compare function code using pure NumPy operations."""
+        """Get compare function code using pure MindSpore operations."""
         return '''def get_limit(data_type):
     """Get precision limit for data type"""
-    if data_type == np.float16:
+    if data_type == ms.float16:
         return 0.004
-    elif data_type == np.int8:
+    elif data_type == ms.bfloat16:
+        return 0.03
+    elif data_type == ms.int8:
         return 0.01
     else:
         return 0.004
 
 def compare(fw_out, impl_out, limit, data_type):
-    """Compare framework output and implementation output using pure NumPy"""
-    # Flatten arrays
+    """Compare framework output and implementation output using MindSpore"""
+    import mindspore.ops as ops
+    
+    # Flatten tensors
     fw_flat = fw_out.flatten()
     impl_flat = impl_out.flatten()
+    if isinstance(impl_flat, ms.Tensor):
+        pass
+    else:
+        impl_flat = ms.Tensor(impl_flat, dtype=fw_flat.dtype)
     
-    size = len(fw_flat)
+    size = fw_flat.size
     
     # 1. 检查形状一致性
     if fw_flat.shape != impl_flat.shape:
         raise AssertionError(f"验证失败，输出形状不一致: framework={fw_flat.shape}, impl={impl_flat.shape}")
     
+    # 转换为numpy进行NaN和Inf检查（MindSpore的isnan/isinf支持有限）
+    fw_np = fw_flat.asnumpy()
+    impl_np = impl_flat.asnumpy()
+    
     # 2. 检查NaN值 - 只有当两边NaN位置都匹配时才允许
-    fw_nan_mask = np.isnan(fw_flat)
-    impl_nan_mask = np.isnan(impl_flat)
+    fw_nan_mask = np.isnan(fw_np)
+    impl_nan_mask = np.isnan(impl_np)
     
     # 检查NaN位置是否匹配
     if not np.array_equal(fw_nan_mask, impl_nan_mask):
@@ -231,8 +326,8 @@ def compare(fw_out, impl_out, limit, data_type):
         print(f"检测到NaN值: {nan_count}/{size} (位置一致，继续验证)")
     
     # 3. 检查Inf值 - 只有当两边Inf位置和符号都匹配时才允许
-    fw_inf_mask = np.isinf(fw_flat)
-    impl_inf_mask = np.isinf(impl_flat)
+    fw_inf_mask = np.isinf(fw_np)
+    impl_inf_mask = np.isinf(impl_np)
     
     # 检查Inf位置是否匹配
     if not np.array_equal(fw_inf_mask, impl_inf_mask):
@@ -243,14 +338,14 @@ def compare(fw_out, impl_out, limit, data_type):
     # 检查Inf符号是否匹配
     if np.sum(fw_inf_mask) > 0:
         inf_sign_match = np.array_equal(
-            np.sign(fw_flat[fw_inf_mask]), 
-            np.sign(impl_flat[impl_inf_mask])
+            np.sign(fw_np[fw_inf_mask]), 
+            np.sign(impl_np[impl_inf_mask])
         )
         if not inf_sign_match:
             raise AssertionError(f"验证失败，Inf符号不匹配")
     
     # 4. 对有限值进行精度比较
-    finite_mask = np.isfinite(fw_flat) & np.isfinite(impl_flat)
+    finite_mask = np.isfinite(fw_np) & np.isfinite(impl_np)
     finite_count = np.sum(finite_mask)
     
     if finite_count == 0:
@@ -258,8 +353,8 @@ def compare(fw_out, impl_out, limit, data_type):
         return
     
     # 提取有限值
-    fw_finite = fw_flat[finite_mask]
-    impl_finite = impl_flat[finite_mask]
+    fw_finite = fw_np[finite_mask]
+    impl_finite = impl_np[finite_mask]
     
     # 检查是否为布尔类型
     if fw_finite.dtype == bool or impl_finite.dtype == bool:
@@ -296,8 +391,8 @@ def compare(fw_out, impl_out, limit, data_type):
         error_msg += f"前 {num_to_show} 个不一致的值:\\n"
         for i in range(num_to_show):
             idx = mismatch_indices[i]
-            error_msg += f"  位置[{idx}]: framework={fw_flat[idx]:.6e}, "
-            error_msg += f"impl={impl_flat[idx]:.6e}, "
+            error_msg += f"  位置[{idx}]: framework={fw_np[idx]:.6e}, "
+            error_msg += f"impl={impl_np[idx]:.6e}, "
             error_msg += f"相对误差={relative_error[idx]:.6e}\\n"
         
         raise AssertionError(error_msg)

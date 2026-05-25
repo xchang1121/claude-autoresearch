@@ -17,6 +17,8 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Union
 
+from ..precision import PrecisionSpec
+
 
 class FrameworkAdapter(ABC):
     """Abstract base class for framework adapters.
@@ -88,14 +90,11 @@ class FrameworkAdapter(ABC):
         pass
     
     @abstractmethod
-    def get_limit(self, dtype: Any) -> float:
-        """Get precision limit for the given dtype.
-        
-        Args:
-            dtype: Data type
-            
-        Returns:
-            float: Precision limit
+    def get_precision_spec(self, dtype: Any) -> PrecisionSpec:
+        """返回该 dtype 的精度容差描述符。
+
+        ``PrecisionSpec.rtol`` 与历史 ``get_limit()`` 单值语义等价；
+        ``atol``/``extra`` 留作 mixed-precision / 量化场景扩展。
         """
         pass
     

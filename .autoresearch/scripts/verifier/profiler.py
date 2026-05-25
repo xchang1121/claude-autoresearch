@@ -27,14 +27,13 @@ import contextlib
 import re
 import shutil
 import time
-from typing import Callable, Tuple, Optional, Literal
+from typing import Callable, Tuple, Optional
 import torch
 import torch_npu
 import pandas as pd
 
 # 导入 L2 cache 清除相关功能
 from .l2_cache_clear import (
-    DslType,
     L2_CACHE_CLEAR_KERNEL_NAME,
     clear_l2_cache,
     get_l2_cache_warnings,
@@ -42,7 +41,7 @@ from .l2_cache_clear import (
 )
 
 try:
-    from ar_vendored.op.utils.triton_autotune_patch import AR_RESTORE_COPY_KERNEL_NAME
+    from patches.triton_autotune_patch import AR_RESTORE_COPY_KERNEL_NAME
 except ImportError:
     AR_RESTORE_COPY_KERNEL_NAME = "AR_restore_copy"
 
@@ -134,27 +133,27 @@ def suppress_output():
     return output_suppressor()
 
 
-def profiler_npu_core(fn: Callable, warmup: int = 25, active: int = 100, 
+def profiler_npu_core(fn: Callable, warmup: int = 25, active: int = 100,
                       prof_dir_name: Optional[str] = None,
                       clear_l2_cache_flag: bool = False,
-                      dsl: DslType = "other",
+                      l2_clear_kernel_name: Optional[str] = None,
                       filter_restore_copy: bool = False) -> Tuple[float, str]:
-    """
-    NPU profiler 核心函数。
-    
+    """NPU profiler 核心函数。
+
     Args:
         fn: 要 profile 的函数
         warmup: warmup 次数
         active: 有效测量次数
         prof_dir_name: profile 结果目录名
         clear_l2_cache_flag: 是否在每次迭代前清除 L2 cache
-        dsl: DSL 类型，决定 L2 cache 清除方式
-             - "triton_ascend": 使用专用 triton kernel（推荐，可精确过滤）
-             - 其他: 使用 tensor.zero_()（fallback，有误判风险）
-    
+        l2_clear_kernel_name: 专用 L2 clear kernel 名（profiler 按名过滤）。
+            非 None → 用 triton kernel；None → 用 tensor.zero_() 并按
+            ``ZerosLike`` 过滤。来自 ``DSLAdapter.l2_clear_kernel_name()``。
+
     Returns:
         Tuple[float, str]: (执行时间(微秒), profile结果目录路径)
     """
+    use_triton_clear = l2_clear_kernel_name is not None
     fn()
     torch.npu.synchronize()
 
@@ -182,7 +181,7 @@ def profiler_npu_core(fn: Callable, warmup: int = 25, active: int = 100,
     # 预初始化 L2 cache buffer（如果需要清除）
     if clear_l2_cache_flag:
         # 预热 L2 cache 清除操作
-        clear_l2_cache(dsl)
+        clear_l2_cache(use_triton=use_triton_clear)
 
     with torch_npu.profiler.profile(
         activities=[
@@ -200,22 +199,25 @@ def profiler_npu_core(fn: Callable, warmup: int = 25, active: int = 100,
     ) as prof:
         for _ in range(total):
             if clear_l2_cache_flag:
-                clear_l2_cache(dsl)
+                clear_l2_cache(use_triton=use_triton_clear)
             fn()
             prof.step()
             torch.npu.synchronize()
 
-    exec_time = collect_time(profile_path, active, clear_l2_cache_flag=clear_l2_cache_flag,
-                             dsl=dsl, filter_restore_copy=filter_restore_copy)
+    exec_time = collect_time(profile_path, active,
+                             clear_l2_cache_flag=clear_l2_cache_flag,
+                             l2_clear_kernel_name=l2_clear_kernel_name,
+                             filter_restore_copy=filter_restore_copy)
     return exec_time, profile_path
 
 
-def profiler_npu(fn: Callable, warmup: int = 25, active: int = 100, prof_dir_name: Optional[str] = None,
+def profiler_npu(fn: Callable, warmup: int = 25, active: int = 100,
+                 prof_dir_name: Optional[str] = None,
                  keep_res: bool = False, suppress_warnings: bool = True,
-                 clear_l2_cache: bool = False, dsl: DslType = "other",
+                 clear_l2_cache: bool = False,
+                 l2_clear_kernel_name: Optional[str] = None,
                  filter_restore_copy: bool = False) -> float:
-    """
-    NPU profiler 主函数。
+    """NPU profiler 主函数。
 
     Args:
         fn: 要 profile 的函数
@@ -225,27 +227,29 @@ def profiler_npu(fn: Callable, warmup: int = 25, active: int = 100, prof_dir_nam
         keep_res: 是否保留结果文件
         suppress_warnings: 是否抑制 WARNING/INFO 输出
         clear_l2_cache: 是否在每次迭代前清除 L2 cache
-        dsl: DSL 类型，决定 L2 cache 清除方式
-             - "triton_ascend": 使用专用 triton kernel（推荐，可精确过滤）
-             - 其他: 使用 tensor.zero_()（fallback，有误判风险）
-    
+        l2_clear_kernel_name: 专用 L2 clear kernel 名。非 None → 用 triton
+            kernel 并按该名过滤；None → 用 ``tensor.zero_()`` 并按 ``ZerosLike``
+            过滤。一般直接来自 ``DSLAdapter.l2_clear_kernel_name()``。
+
     Returns:
         float: 平均执行时间（微秒）
     """
     # 清空之前的警告消息
     clear_l2_cache_warnings()
-    
+
     if suppress_warnings:
         with suppress_output():
             exec_time, profile_path = profiler_npu_core(
-                fn, warmup, active, prof_dir_name, 
-                clear_l2_cache_flag=clear_l2_cache, dsl=dsl,
+                fn, warmup, active, prof_dir_name,
+                clear_l2_cache_flag=clear_l2_cache,
+                l2_clear_kernel_name=l2_clear_kernel_name,
                 filter_restore_copy=filter_restore_copy,
             )
     else:
         exec_time, profile_path = profiler_npu_core(
             fn, warmup, active, prof_dir_name,
-            clear_l2_cache_flag=clear_l2_cache, dsl=dsl,
+            clear_l2_cache_flag=clear_l2_cache,
+            l2_clear_kernel_name=l2_clear_kernel_name,
             filter_restore_copy=filter_restore_copy,
         )
     
@@ -264,17 +268,16 @@ def profiler_npu(fn: Callable, warmup: int = 25, active: int = 100, prof_dir_nam
 
 
 def collect_time(base_dir: str, active: int, clear_l2_cache_flag: bool = False,
-                 dsl: DslType = "other", filter_restore_copy: bool = False) -> float:
-    """
-    从 profiling 结果中收集时间信息。
+                 l2_clear_kernel_name: Optional[str] = None,
+                 filter_restore_copy: bool = False) -> float:
+    """从 profiling 结果中收集时间信息。
 
     Args:
         base_dir: profiling 结果目录
         active: 有效测量次数
         clear_l2_cache_flag: 是否启用了 L2 cache 清除
-        dsl: DSL 类型，决定如何过滤 L2 cache 清除操作
-             - "triton_ascend": 过滤名为 "AR_l2cache_clear" 的 kernel
-             - 其他: 过滤 "ZerosLike" 类型的操作
+        l2_clear_kernel_name: 非 None → 按该 kernel 名精确过滤；
+            None → 按 ``ZerosLike`` 类型过滤（fallback）。
 
     Returns:
         float: 平均执行时间(微秒)，失败时返回 float('inf')
@@ -304,8 +307,9 @@ def collect_time(base_dir: str, active: int, clear_l2_cache_flag: bool = False,
             # 过滤有效操作
             try:
                 if clear_l2_cache_flag or filter_restore_copy:
-                    df = _filter_l2_cache_clear_ops(df, dsl,
-                                                    filter_restore_copy=filter_restore_copy)
+                    df = _filter_l2_cache_clear_ops(
+                        df, l2_clear_kernel_name,
+                        filter_restore_copy=filter_restore_copy)
                 
                 valid_ops = df[df['Count'] % active == 0].copy()
 
@@ -329,54 +333,44 @@ def collect_time(base_dir: str, active: int, clear_l2_cache_flag: bool = False,
     return float('inf')
 
 
-def _filter_l2_cache_clear_ops(df: pd.DataFrame, dsl: DslType,
-                                filter_restore_copy: bool = False) -> pd.DataFrame:
-    """
-    从 profiling 结果中过滤掉 框架内部操作。
+def _filter_l2_cache_clear_ops(df: pd.DataFrame,
+                               l2_clear_kernel_name: Optional[str],
+                               filter_restore_copy: bool = False) -> pd.DataFrame:
+    """从 profiling 结果中过滤掉框架内部操作。
 
     过滤内容：
-      - L2 cache 清除 kernel（AR_l2cache_clear / ZerosLike）
-      - restore_value 的 copy kernel（filter_restore_copy=True 时，
-        按 kernel 名字 AR_restore_copy 精确过滤，与 l2_cache_clear 同一模式）
+      - L2 cache 清除 kernel：``l2_clear_kernel_name`` 非 None 时按该名
+        精确过滤；为 None 时按 ``ZerosLike`` 类型过滤（fallback）。
+      - restore_value 的 copy kernel：``filter_restore_copy=True`` 时按
+        kernel 名字 ``AR_restore_copy`` 精确过滤。
 
     Args:
         df: profiling 数据 DataFrame
-        dsl: DSL 类型
+        l2_clear_kernel_name: 调用方传入的 kernel 名（来自 DSL adapter）
         filter_restore_copy: 是否过滤 restore_value 产生的 copy 操作。
              仅在 autotune benchmark 阶段开启，最终 profiling 不开。
 
     Returns:
         pd.DataFrame: 过滤后的 DataFrame
     """
-    if dsl == "triton_ascend":
-        col = None
-        if 'OP Type' in df.columns:
-            col = 'OP Type'
-        elif 'Name' in df.columns:
-            col = 'Name'
+    col = None
+    if 'OP Type' in df.columns:
+        col = 'OP Type'
+    elif 'Type' in df.columns:
+        col = 'Type'
+    elif 'Name' in df.columns:
+        col = 'Name'
+    if col is None:
+        return df
 
-        if col is not None:
-            keep = pd.Series(True, index=df.index)
-            keep &= ~df[col].str.contains(
-                L2_CACHE_CLEAR_KERNEL_NAME, case=False, na=False, regex=False)
-            if filter_restore_copy:
-                keep &= ~df[col].str.contains(
-                    AR_RESTORE_COPY_KERNEL_NAME, case=False, na=False, regex=False)
-            filtered_df = df[keep]
-        else:
-            filtered_df = df
+    keep = pd.Series(True, index=df.index)
+    if l2_clear_kernel_name:
+        keep &= ~df[col].str.contains(
+            l2_clear_kernel_name, case=False, na=False, regex=False)
     else:
-        if 'OP Type' in df.columns:
-            filter_cond = ~df['OP Type'].str.contains(
-                r'^ZerosLike$', case=False, na=False, regex=True
-            )
-            filtered_df = df[filter_cond]
-        elif 'Type' in df.columns:
-            filter_cond = ~df['Type'].str.contains(
-                r'^ZerosLike$', case=False, na=False, regex=True
-            )
-            filtered_df = df[filter_cond]
-        else:
-            filtered_df = df
-
-    return filtered_df
+        keep &= ~df[col].str.contains(
+            r'^ZerosLike$', case=False, na=False, regex=True)
+    if filter_restore_copy:
+        keep &= ~df[col].str.contains(
+            AR_RESTORE_COPY_KERNEL_NAME, case=False, na=False, regex=False)
+    return df[keep]

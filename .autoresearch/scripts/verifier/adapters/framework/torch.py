@@ -20,6 +20,7 @@ import torch
 import numpy as np
 
 from .base import FrameworkAdapter
+from ..precision import PrecisionSpec
 
 
 class FrameworkAdapterTorch(FrameworkAdapter):
@@ -81,16 +82,15 @@ class FrameworkAdapterTorch(FrameworkAdapter):
             return tensor.flatten().detach().cpu().numpy()
         return tensor.flatten() if hasattr(tensor, 'flatten') else tensor
     
-    def get_limit(self, dtype: Any) -> float:
-        """Get precision limit for dtype."""
+    def get_precision_spec(self, dtype: Any) -> PrecisionSpec:
         if dtype == torch.float16:
-            return 0.004
+            return PrecisionSpec(rtol=0.004)
         elif dtype == torch.bfloat16:
-            return 0.03
+            return PrecisionSpec(rtol=0.03)
         elif dtype == torch.int8:
-            return 0.01
+            return PrecisionSpec(rtol=0.01)
         else:
-            return 0.02
+            return PrecisionSpec(rtol=0.02)
     
     def save_tensor(self, tensor: Any, bin_path: str) -> None:
         """Save PyTorch tensor to binary file."""

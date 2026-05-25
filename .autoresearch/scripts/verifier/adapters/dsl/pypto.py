@@ -17,15 +17,19 @@
 from typing import Any, Optional
 import re
 
-from .base import DSLAdapter
+from .base import DSLAdapter, register_dsl
 
 
+@register_dsl("pypto")
 class DSLAdapterPypto(DSLAdapter):
     """Adapter for PyPTO DSL.
-    
+
     PyPTO 是一种用于生成 NPU 算子的新语言，使用 @pypto.jit 装饰器和切片语法。
     与 Triton 不同，PyPTO 使用 tensor[start:end] 语法而非 tl.load/store。
     """
+
+    def default_backend(self) -> str:
+        return "ascend"
     
     def get_import_statements(self, framework: str) -> str:
         """Return PyPTO import statements."""
@@ -149,18 +153,6 @@ class DSLAdapterPypto(DSLAdapter):
             return result
         
         def _calc_trace_span_us(trace_path):
-            try:
-                from ar_vendored import get_project_root
-                proj_root = Path(get_project_root()).parent.parent
-                script = proj_root / "python" / "ar_vendored" / "op" / "tools" / "calc_trace_span.py"
-                if script.exists():
-                    out = subprocess.check_output(
-                        [sys.executable, str(script), str(trace_path)],
-                        text=True
-                    )
-                    return float(out.strip())
-            except Exception:
-                pass
             with open(trace_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             events = [e for e in data.get("traceEvents", []) if e.get("ph") == "X"]

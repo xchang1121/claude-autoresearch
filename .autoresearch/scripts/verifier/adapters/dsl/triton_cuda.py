@@ -12,47 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-PyTorch DSL adapter - 用于 Kernel → PyTorch 转换场景
+"""Triton CUDA DSL adapter - 支持 ModelNew (KernelBench) 格式."""
 
-支持 ModelNew (KernelBench) 格式，生成的代码是纯 PyTorch 实现（不使用任何自定义 Kernel）。
-验证时会将生成的 PyTorch 代码与原始 Kernel 实现（Triton/CUDA C/其他）的输出进行对比。
+from typing import Any, Optional, Tuple
 
-使用方式：
-    - dsl="torch": 目标是纯 PyTorch 实现
-    - framework="torch": 输入框架（Triton/CUDA C 代码都是通过 PyTorch 运行的）
-"""
-
-from typing import Any, Optional
-
-from .base import DSLAdapter
+from .base import DSLAdapter, register_dsl
 
 
-class DSLAdapterTorch(DSLAdapter):
-    """Adapter for PyTorch DSL (Kernel → PyTorch conversion, supports Triton/CUDA C/etc.)."""
+@register_dsl("triton_cuda")
+class DSLAdapterTritonCuda(DSLAdapter):
+    """Adapter for Triton CUDA DSL."""
+
+    def default_backend(self) -> str:
+        return "cuda"
     
     def get_import_statements(self, framework: str) -> str:
-        """Return PyTorch import statements.
-        
-        注意：这里不需要 import triton，因为生成的代码是纯 PyTorch。
-        """
-        if framework == "torch":
-            return "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n"
-        elif framework == "mindspore":
-            # MindSpore 场景下也使用 torch 进行验证（如果需要）
-            return "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n"
+        """Return Triton import statements."""
+        if framework == "mindspore":
+            return "import torch\nimport triton\nimport triton.language as tl\n"
+        elif framework == "torch":
+            return "import triton\nimport triton.language as tl\n"
         elif framework == "numpy":
-            return "import torch\nimport torch.nn as nn\nimport numpy as np\n"
+            return "import numpy as np\nimport triton\nimport triton.language as tl\n"
         else:
-            return "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n"
+            return "import triton\nimport triton.language as tl\n"
     
     def get_impl_import(self, op_name: str, impl_func_name: str) -> str:
         """Return implementation function import.
         
         统一使用 ModelNew 类格式（KernelBench 风格）。
-        注意：使用 _impl 后缀避免与 framework 文件冲突
         """
-        return f"from {op_name}_torch_impl import ModelNew\n"
+        return f"from {op_name}_triton_cuda_impl import ModelNew\n"
     
     def create_impl_module(self, framework: str,
                           framework_adapter: Any, 
@@ -72,7 +62,6 @@ class DSLAdapterTorch(DSLAdapter):
         code = f"impl_model = ModelNew(*{init_params_var})\n"
         if framework == "torch":
             code += f"impl_model = impl_model.to({device_var})\n"
-        code += "impl_model.eval()\n"
         
         return code
     
@@ -80,18 +69,18 @@ class DSLAdapterTorch(DSLAdapter):
                   framework_adapter: Any, op_name: str, 
                   data_dir: Optional[str] = None, 
                   framework_output: Optional[str] = None) -> str:
-        """Return code string to call PyTorch implementation function.
+        """Return code string to call Triton CUDA implementation function.
         
         调用已经实例化好的 impl_model（可以多次调用）。
         """
         return f"impl_output = impl_model(*{inputs})\n"
     
     def needs_binary_io(self) -> bool:
-        """PyTorch doesn't need binary I/O."""
+        """Triton CUDA doesn't need binary I/O."""
         return False
     
     def needs_compilation(self) -> bool:
-        """PyTorch doesn't need compilation."""
+        """Triton CUDA doesn't need compilation."""
         return False
     
     def benchmark_impl(self, impl_func_name: str, inputs: str, 
@@ -99,42 +88,24 @@ class DSLAdapterTorch(DSLAdapter):
                       case_idx: int = 0, framework_model: Optional[str] = None,
                       framework_adapter: Optional[Any] = None,
                       device_id: Optional[int] = None) -> str:
-        """Return code string to benchmark PyTorch implementation.
+        """Return code string to benchmark Triton CUDA implementation.
         
         使用已经实例化好的 impl_model 进行性能测试。
         """
-        # 根据 backend 选择同步方法
-        if backend == "cuda":
-            sync_code = "torch.cuda.synchronize()"
-        elif backend == "ascend":
-            sync_code = "torch.npu.synchronize()"
-        else:
-            sync_code = "pass  # CPU, no sync needed"
-        
-        code = f"""        # PyTorch 原生实现性能测试
-        import time
-        
-        def torch_benchmark_fn():
+        code = f"""        # 进行最终的性能测试
+        def triton_benchmark_fn():
             result = impl_model(*{inputs})
             return result
         
-        # 预热
-        for _ in range({warmup}):
-            _ = torch_benchmark_fn()
-            {sync_code}
-        
-        # 计时
-        start_time = time.time()
-        for _ in range({runs}):
-            _ = torch_benchmark_fn()
-            {sync_code}
-        end_time = time.time()
-        
-        execution_time_ms = (end_time - start_time) * 1000 / {runs}
-        method = "pytorch_loop_timer"
+        import triton.testing
+        execution_time_ms = triton.testing.do_bench(
+            triton_benchmark_fn,
+            warmup={warmup},
+            rep={runs},
+            return_mode="median"
+        )
+        method = "triton_do_bench"
 """
         return code
-    
-    def get_special_setup_code(self) -> str:
-        """Return special setup code (not needed for PyTorch)."""
-        return ""
+
+

@@ -40,14 +40,16 @@ EVAL_SIDECAR = "eval_result.json"
 # ---------------------------------------------------------------------------
 
 def _detect_device_type(config: TaskConfig) -> str:
-    """torch.device prefix ('npu' / 'cuda' / 'cpu'). Derived from DSL via
-    hw_detect (DSL → backend → device_type)."""
+    """torch.device prefix ('npu' / 'cuda' / 'cpu'). Derived from DSL:
+    DSL adapter declares its backend, hw_detect maps backend → device_type."""
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
-    from utils.hw_detect import device_type_for_dsl
+    from utils.hw_detect import device_type_for_backend
+    from verifier.adapters.factory import get_dsl_adapter
     try:
-        return device_type_for_dsl(config.dsl or "")
+        backend = get_dsl_adapter(config.dsl or "").default_backend()
+        return device_type_for_backend(backend)
     except Exception:
         return "cpu"
 
@@ -56,7 +58,7 @@ def _get_dsl_adapter(dsl: Optional[str]):
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
-    from ar_vendored.op.verifier.adapters.factory import get_dsl_adapter
+    from verifier.adapters.factory import get_dsl_adapter
     return get_dsl_adapter(dsl or "triton_ascend")
 
 
@@ -121,7 +123,7 @@ def _base_benchmark_body(warmup: int, repeats: int) -> tuple[str, str]:
     """
     body = textwrap.indent(textwrap.dedent(f"""\
         if device_type == "npu":
-            from ar_vendored.op.verifier.profiler import profiler_npu
+            from verifier.profiler import profiler_npu
             def _ref_bench():
                 with torch.no_grad():
                     impl_model(*inputs)
@@ -130,7 +132,7 @@ def _base_benchmark_body(warmup: int, repeats: int) -> tuple[str, str]:
                 warmup={warmup}, active={repeats},
                 prof_dir_name=f"prof_base_case_{{case_idx}}",
                 keep_res=False, suppress_warnings=True,
-                clear_l2_cache=False, dsl="other",
+                clear_l2_cache=False,
             )
             execution_time_ms = execution_time_us / 1000
             method = "profiler_npu_base"
@@ -460,7 +462,7 @@ if kernel_imported:
 
 # === Benchmark helpers ===================================================
 # kernel (gen) goes through the DSL adapter (autotune setup + profiler_npu);
-# ref (base) goes through profiler_npu directly with dsl="other" so
+# ref (base) goes through profiler_npu directly without an l2 clear kernel so
 # triton_ascend's L2-clear kernel — which corrupts the next aclnnArange
 # in the ref Model — never runs. Both have clear_l2_cache=False for
 # symmetric warm-cache measurement, matching akg-hitl's default.
@@ -607,7 +609,8 @@ def _build_package(task_dir: str, config: TaskConfig) -> bytes:
       - kernel.py / reference.py / other .py support files from task_dir
       - eval_<op>.py (phase-gated orchestrator; runner spawns twice)
       - correctness.py + input_groups.py (lib modules at tarball root)
-      - ar_vendored/ (DSL adapters + profiler_npu + patches)
+      - verifier/ (DSL adapters + profiler_npu)
+      - patches/ (triton autotune / tilelang compile patches)
 
     Device id is NOT baked in — the worker / local runner exports
     DEVICE_ID at run time and the generated script picks it up.
@@ -652,9 +655,9 @@ def _build_package(task_dir: str, config: TaskConfig) -> bytes:
         _add_script(f"eval_{op_name}.py", _gen_eval_script(config))
 
         script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        vendored_root = os.path.join(script_dir, "ar_vendored")
-        if os.path.isdir(vendored_root):
-            tar.add(vendored_root, arcname="ar_vendored",
-                    filter=_exclude_pycache)
+        for pkg in ("verifier", "patches"):
+            pkg_root = os.path.join(script_dir, pkg)
+            if os.path.isdir(pkg_root):
+                tar.add(pkg_root, arcname=pkg, filter=_exclude_pycache)
 
     return buf.getvalue()

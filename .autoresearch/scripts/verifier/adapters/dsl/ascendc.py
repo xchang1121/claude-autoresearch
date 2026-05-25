@@ -16,11 +16,15 @@
 
 from typing import Any, Optional
 
-from .base import DSLAdapter
+from .base import DSLAdapter, register_dsl
 
 
+@register_dsl("ascendc")
 class DSLAdapterAscendC(DSLAdapter):
     """Adapter for AscendC DSL."""
+
+    def default_backend(self) -> str:
+        return "ascend"
     
     def get_import_statements(self, framework: str) -> str:
         """Return AscendC import statements."""

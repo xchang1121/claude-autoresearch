@@ -16,18 +16,22 @@
 
 from typing import Any, Optional
 
-from .base import DSLAdapter
+from .base import DSLAdapter, register_dsl
 
 
+@register_dsl("tilelang_npuir")
 class DSLAdapterTilelangNpuir(DSLAdapter):
     """Adapter for TileLang NPUIR DSL."""
+
+    def default_backend(self) -> str:
+        return "ascend"
     
     def get_import_statements(self, framework: str) -> str:
         """Return TileLang NPUIR import statements."""
         code = """import tilelang
 tilelang.cache.clear_cache()
 try:
-    from ar_vendored.op.utils.tilelang_compile_patch import apply_tilelang_patches
+    from patches.tilelang_compile_patch import apply_tilelang_patches
     apply_tilelang_patches()
 except ImportError:
     pass
@@ -80,7 +84,7 @@ except ImportError:
             # 使用 profiler_npu 进行性能测试，支持 L2 cache 清除
             code = f"""        # dsl：tilelang_npuir
         try:
-            from ar_vendored.op.verifier.profiler import profiler_npu
+            from verifier.profiler import profiler_npu
             patch_imported = True
         except ImportError:
             patch_imported = False
@@ -99,7 +103,6 @@ except ImportError:
                 keep_res=False,
                 suppress_warnings=True,
                 clear_l2_cache={clear_l2_cache},
-                dsl="other"
             )
             execution_time_ms = execution_time_us / 1000
             method = "profiler_npu"
@@ -133,7 +136,7 @@ except ImportError:
         return """import tilelang
 tilelang.cache.clear_cache()
 try:
-    from ar_vendored.op.utils.tilelang_compile_patch import apply_tilelang_patches
+    from patches.tilelang_compile_patch import apply_tilelang_patches
     apply_tilelang_patches()
 except ImportError:
     pass

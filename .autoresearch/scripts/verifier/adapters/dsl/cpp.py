@@ -16,11 +16,15 @@
 
 from typing import Any, Optional
 
-from .base import DSLAdapter
+from .base import DSLAdapter, register_dsl
 
 
+@register_dsl("cpp")
 class DSLAdapterCpp(DSLAdapter):
     """Adapter for C++ DSL."""
+
+    def default_backend(self) -> str:
+        return "cpu"
     
     def get_import_statements(self, framework: str) -> str:
         """Return C++ import statements."""

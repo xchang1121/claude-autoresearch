@@ -178,12 +178,12 @@ def _make_arg_parser() -> argparse.ArgumentParser:
     # DSL = primary pivot. backend is a pure function of DSL; arch is
     # derived from hardware (local: npu-smi on --devices; remote: worker
     # /api/v1/status). Neither needs to be user-facing.
-    # Pull the canonical DSL list from hw_detect at construction time so
-    # the help string can't drift from _DSL_BACKEND.
+    # Pull the canonical DSL list from the adapter registry so the help
+    # string can't drift from what `factory.get_dsl_adapter` actually accepts.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from utils.hw_detect import list_supported_dsls
+    from verifier.adapters.factory import list_dsls
     parser.add_argument("--dsl", default=None,
-                        help=f"DSL name (one of: {', '.join(list_supported_dsls())}). "
+                        help=f"DSL name (one of: {', '.join(list_dsls())}). "
                              f"Defaults to config.yaml:default_dsl.")
     parser.add_argument("--framework", default="torch",
                         choices=["torch", "mindspore", "numpy"],
@@ -223,26 +223,20 @@ def main():
     # Resolve DSL (and via it, backend).
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from utils.settings import default_dsl
-    from utils.hw_detect import (
-        backend_for_dsl, derive_arch, fetch_worker_hardware,
-    )
-    from ar_vendored.op.verifier.adapters.factory import (
+    from utils.hw_detect import derive_arch, fetch_worker_hardware
+    from verifier.adapters.factory import (
         get_dsl_adapter, get_framework_adapter,
     )
 
     args.dsl = (args.dsl or default_dsl()).lower()
     try:
-        get_dsl_adapter(args.dsl)
+        dsl_adapter = get_dsl_adapter(args.dsl)
     except Exception as e:
         print(json.dumps({"status": "error",
                           "error": f"unsupported --dsl {args.dsl!r}: {e}"}))
         sys.exit(1)
 
-    try:
-        args.backend = backend_for_dsl(args.dsl)
-    except ValueError as e:
-        print(json.dumps({"status": "error", "error": str(e)}))
-        sys.exit(1)
+    args.backend = dsl_adapter.default_backend()
 
     try:
         get_framework_adapter(args.framework)

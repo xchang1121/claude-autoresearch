@@ -34,10 +34,10 @@ from typing import Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 import uvicorn
 
-# ar_vendored/worker/server.py → .autoresearch/scripts/ is two parents up.
+# worker/server.py → .autoresearch/scripts/ is one parent up.
 # Insert that on sys.path so we can import the shared runner helpers; the
 # worker may launch from any cwd (foreground, daemon, tmux).
-_SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent.parent)
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 

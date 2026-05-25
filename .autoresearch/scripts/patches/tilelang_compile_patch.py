@@ -29,7 +29,7 @@ def patch_tilelang_compiler():
     compiler_class = jit_npu.compiler_npu
 
     # 检查是否已经被补丁过了
-    if hasattr(compiler_class._npuir_to_bin_enable_npu_compile, '_ar_vendored_patched'):
+    if hasattr(compiler_class._npuir_to_bin_enable_npu_compile, '_ar_patched'):
         return True
 
     original_compile_method = compiler_class._npuir_to_bin_enable_npu_compile
@@ -76,7 +76,7 @@ def patch_tilelang_compiler():
     try:
         compiler_class._npuir_to_bin_enable_npu_compile = patched_npuir_to_bin_enable_npu_compile
         # 标记已经被补丁过了
-        compiler_class._npuir_to_bin_enable_npu_compile._ar_vendored_patched = True
+        compiler_class._npuir_to_bin_enable_npu_compile._ar_patched = True
         return True
     except (AttributeError, TypeError) as e:
         print(f"Warning: Failed to patch TileLang compiler: {e}")

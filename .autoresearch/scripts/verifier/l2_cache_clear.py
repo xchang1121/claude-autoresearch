@@ -17,12 +17,15 @@ L2 Cache 清除模块。
 
 提供 NPU L2 cache 清除功能，用于性能测试时确保测量结果不受缓存影响。
 
-支持两种清除方式：
-1. triton_ascend: 使用专用 triton kernel（推荐，可精确过滤）
-2. 其他 DSL: 使用 tensor.zero_()（fallback，有误判风险）
+两种清除方式：
+1. 专用 triton kernel ``AR_l2cache_clear``（推荐，profiler 按 kernel 名精确过滤）
+2. ``tensor.zero_()`` fallback（profiler 按 ``ZerosLike`` 过滤，有误判风险）
+
+调用方传入 ``use_triton=True`` 选择 kernel 方式；DSL adapter 通过
+``l2_clear_kernel_name()`` capability 声明自己是否拥有专用 kernel。
 """
 
-from typing import Literal, List
+from typing import List
 import torch
 import torch_npu
 
@@ -37,9 +40,6 @@ except ImportError:
 # L2 cache 清除相关常量
 L2_CACHE_SIZE_DEFAULT = 192 * 1024 * 1024  # 192MB 默认值
 L2_CACHE_CLEAR_KERNEL_NAME = "AR_l2cache_clear"  # 专用 kernel 名称，用于过滤
-
-# DSL 类型定义
-DslType = Literal["triton_ascend", "triton_cuda", "torch", "tilelang_npuir", "ascendc", "other"]
 
 # ============================================================================
 # L2 Cache 警告消息收集（绕过 suppress_output）
@@ -251,42 +251,35 @@ def clear_l2_cache_zero():
     torch.npu.synchronize()
 
 
-def clear_l2_cache(dsl: DslType = "other"):
+_zero_fallback_warned = False
+
+
+def clear_l2_cache(use_triton: bool = False):
+    """清除 L2 cache。
+
+    ``use_triton=True``  → ``AR_l2cache_clear`` triton kernel（精确过滤）。
+                          失败时自动降级到 ``zero_()``。
+    ``use_triton=False`` → ``tensor.zero_()``；首次调用时打印一次警告，
+                          提醒 profiler 按 ``ZerosLike`` 过滤可能有误判。
     """
-    清除 L2 cache 的统一入口函数。
-    
-    Args:
-        dsl: DSL 类型，决定使用哪种清除方式
-             - "triton_ascend": 使用专用 triton kernel（推荐）
-             - 其他: 使用 tensor.zero_()（fallback）
-    
-    Returns:
-        None
-    """
-    if dsl == "triton_ascend":
+    global _zero_fallback_warned
+
+    if use_triton:
         try:
             clear_l2_cache_triton()
+            return
         except Exception as e:
-            # triton kernel 失败，fallback 到 zero_()
             _add_l2_cache_warning(
                 f"[L2 Cache] Triton kernel call failed ({e}), falling back to zero_() method. "
                 "Results may have false positive filtering risk."
             )
-            clear_l2_cache_zero()
-    else:
-        # 非 triton_ascend DSL，使用 zero_() 方式
-        # 每个 DSL 只警告一次
-        if not hasattr(clear_l2_cache, '_warned_for_dsl'):
-            clear_l2_cache._warned_for_dsl = set()
-        
-        if dsl not in clear_l2_cache._warned_for_dsl:
-            _add_l2_cache_warning(
-                f"[L2 Cache] Current DSL ({dsl}) has no dedicated L2 cache clear method. "
-                "Using tensor.zero_() for clearing. "
-                "Note: This will be recorded as 'ZerosLike' type in profiler. "
-                "If the target operator also uses zeros_like/zero_(), timing may be inaccurate. "
-                "For precise results, please analyze the specific operator manually."
-            )
-            clear_l2_cache._warned_for_dsl.add(dsl)
-        
-        clear_l2_cache_zero()
+
+    if not _zero_fallback_warned:
+        _add_l2_cache_warning(
+            "[L2 Cache] Using tensor.zero_() fallback. "
+            "Profiler filters this as 'ZerosLike'; if the target kernel also uses "
+            "zeros_like/zero_(), timing may be inaccurate."
+        )
+        _zero_fallback_warned = True
+
+    clear_l2_cache_zero()

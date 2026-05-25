@@ -16,11 +16,18 @@
 
 from typing import Any, Optional
 
-from .base import DSLAdapter
+from .base import DSLAdapter, register_dsl
 
 
+@register_dsl("triton_ascend")
 class DSLAdapterTritonAscend(DSLAdapter):
     """Adapter for Triton Ascend DSL."""
+
+    def default_backend(self) -> str:
+        return "ascend"
+
+    def l2_clear_kernel_name(self) -> Optional[str]:
+        return "AR_l2cache_clear"
     
     def get_import_statements(self, framework: str) -> str:
         """Return Triton Ascend import statements."""
@@ -28,7 +35,7 @@ class DSLAdapterTritonAscend(DSLAdapter):
         if framework == "mindspore":
             code += "import torch\n"
         code += """try:
-    from ar_vendored.op.utils.triton_autotune_patch import apply_triton_patches
+    from patches.triton_autotune_patch import apply_triton_patches
     apply_triton_patches()
 except ImportError:
     pass
@@ -113,8 +120,8 @@ except ImportError:
             clear_l2_cache: 是否在每次迭代前清除 L2 cache（默认 True）
         """
         code = f"""        try:
-            from ar_vendored.op.verifier.profiler import profiler_npu
-            from ar_vendored.op.utils.triton_autotune_patch import get_collected_config_timings, clear_collected_config_timings
+            from verifier.profiler import profiler_npu
+            from patches.triton_autotune_patch import get_collected_config_timings, clear_collected_config_timings
             # 清除之前的配置信息
             clear_collected_config_timings()
             patch_imported = True
@@ -159,7 +166,7 @@ except ImportError:
                 keep_res=False,
                 suppress_warnings=True,
                 clear_l2_cache={clear_l2_cache},
-                dsl="triton_ascend"
+                l2_clear_kernel_name="AR_l2cache_clear",
             )
             execution_time_ms = execution_time_us / 1000
             method = "profiler_npu"
@@ -179,7 +186,7 @@ except ImportError:
     def get_special_setup_code(self) -> str:
         """Return special setup code for triton_ascend."""
         return """try:
-    from ar_vendored.op.utils.triton_autotune_patch import apply_triton_patches
+    from patches.triton_autotune_patch import apply_triton_patches
     apply_triton_patches()
 except ImportError:
     pass

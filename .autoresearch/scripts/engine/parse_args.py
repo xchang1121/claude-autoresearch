@@ -35,9 +35,9 @@ import shlex
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.hw_detect import list_supported_dsls
+from verifier.adapters.factory import list_dsls
 
-_SUPPORTED_DSLS_DOC = "|".join(list_supported_dsls())
+_SUPPORTED_DSLS_DOC = "|".join(list_dsls())
 
 
 def _emit(payload: dict) -> None:
