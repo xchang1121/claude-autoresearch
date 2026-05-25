@@ -205,8 +205,10 @@ ar_tasks/<op>_<ts>_<uuid>/
 `skills/triton-ascend/` / `skills/triton-cuda/` / `skills/cuda-c/` / `skills/cpp/` /
 `skills/tilelang-cuda/` / `skills/pypto/`。
 
-PLAN 阶段 hook 会提示 Claude `Glob("skills/<dsl>/**/*.md")`，把命中的 SKILL id
-写进 plan item rationale 里做溯源。
+PLAN 阶段 hook 会提示 Claude 用具体的 Glob 模式扫该 DSL 的 SKILL.md，
+把命中的 id 写进 plan item rationale 里做溯源。skills 根目录默认为 `skills/`，
+可通过 `AR_SKILLS_ROOT` 环境变量改写（接受相对或绝对路径，比如指向
+`akg_agents/python/akg_agents/op/resources/skills/` 共享一份知识库）。
 
 ## 依赖
 

@@ -36,8 +36,10 @@ worker:
 ## Skills Library
 
 `skills/` holds optimization knowledge organized by DSL/backend. During PLAN,
-`Glob("skills/<dsl>/**/*.md")` and Read SKILL.md files whose frontmatter
-matches your direction; cite SKILL ids in plan rationales.
+follow the `[AR Phase: …]` hint — it embeds the resolved Glob pattern (the
+skills root is `skills/` by default, overridable via `AR_SKILLS_ROOT`). Read
+SKILL.md files whose frontmatter matches your direction; cite SKILL ids in
+plan rationales.
 
 ## Invariants (hook-driven flow)
 

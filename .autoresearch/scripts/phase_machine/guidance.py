@@ -211,31 +211,31 @@ def _load_config_safe(task_dir: str):
         return None
 
 
+def _skills_root() -> str:
+    """Skills tree root. Override via ``AR_SKILLS_ROOT`` env var
+    (relative to project root, or absolute). Default ``skills``.
+    """
+    return os.environ.get("AR_SKILLS_ROOT", "skills")
+
+
 def _skill_dir_for_dsl(dsl) -> Optional[str]:
-    """Resolve the on-disk skills/<...> directory for `dsl`, or None if
-    no such directory exists.
+    """Resolve the skills subtree path for ``dsl`` (e.g.
+    ``skills/triton-ascend``), or None if the subtree doesn't exist.
 
-    The skills/ tree uses dash-separated names (`skills/triton-ascend/`,
-    `skills/cuda-c/`) while the canonical DSL strings use underscores
-    (`triton_ascend`, `cuda_c`). Without this translation, the prompts
-    that previously read `Glob skills/{dsl}/**/*.md` produced **zero**
-    matches at runtime — agents dutifully ran the Glob, got nothing back,
-    and silently skipped the skill-reading step. This was the original
-    "agent looks like it's reading skills but actually isn't" trap.
-
-    Returns the directory NAME (relative to skills/), not a full path —
-    callers want it for the prompt's Glob pattern. None when the DSL has
-    no skills tree at all (e.g. ascendc / swft / torch / tilelang_npuir),
-    in which case `_skills_hint` returns "" instead of pointing the agent
-    at a dead path.
+    DSL strings use underscores (``triton_ascend``); the on-disk tree
+    uses dashes (``triton-ascend``). The translation lives here so the
+    earlier "agent runs Glob, gets zero matches, silently skips skills"
+    trap can't reappear. Returns the path verbatim in the form callers
+    embed in prompts — Claude Code's Glob accepts both relative and
+    absolute.
     """
     if not dsl:
         return None
     candidate = dsl.lower().replace("_", "-")
-    if os.path.isdir(os.path.join(_PROJECT_ROOT, "skills", candidate)):
-        return candidate
-    # A few DSLs may legitimately not have a skills tree yet. Don't fall
-    # back to the underscore form — that's the broken historical path.
+    root = _skills_root()
+    abs_root = root if os.path.isabs(root) else os.path.join(_PROJECT_ROOT, root)
+    if os.path.isdir(os.path.join(abs_root, candidate)):
+        return f"{root.rstrip('/').rstrip(os.sep)}/{candidate}"
     return None
 
 
@@ -253,7 +253,7 @@ def _skills_hint(dsl) -> str:
     if not skill_dir:
         return ""
     return (
-        f"\nDSL skills: Glob skills/{skill_dir}/**/*.md, then Read 1-3 "
+        f"\nDSL skills: Glob {skill_dir}/**/*.md, then Read 1-3 "
         f"SKILL.md files whose frontmatter description / keywords match "
         f"a candidate plan-item direction. Citing the SKILL id in the "
         f"rationale is recommended for traceability but not enforced."
@@ -595,29 +595,25 @@ def get_guidance(task_dir: str) -> str:
         editable_paths = "\n".join(
             f"  - {task_dir}/{name}" for name in (editable or ["kernel.py"])
         )
-        # Resolve the on-disk skills/<...> dir name (dash form). May be
-        # None if this DSL has no curated skills tree, in which case the
-        # whole skills section is dropped from the subagent prompt.
+        # Resolve the skills subtree path. None when this DSL has no curated
+        # tree (ascendc / swft / torch / tilelang_npuir at time of writing) —
+        # in that case the whole skills section is dropped to avoid handing
+        # the subagent a Glob pattern that returns zero matches.
         skill_dir = _skill_dir_for_dsl(dsl)
 
-        # Skills section is conditional — `skill_dir` is None when this DSL
-        # has no curated skills tree (ascendc / swft / torch / tilelang_npuir
-        # at time of writing). Without the conditional we'd hand the agent a
-        # Glob pattern that returns zero matches, and they'd silently skip
-        # the skill-reading step — defeating the whole point of the section.
         if skill_dir:
             skills_block = (
                 f"Read DSL skills (curated {dsl} knowledge — use it to "
                 f"ground fix directions in known-good patterns for this "
                 f"hardware):\n"
-                f"  - Glob skills/{skill_dir}/**/*.md, then Read 1-3 "
+                f"  - Glob {skill_dir}/**/*.md, then Read 1-3 "
                 f"SKILL.md files whose frontmatter description / keywords "
                 f"match a candidate fix direction.\n"
                 f"  - Cite SKILL ids in the rationale of items you "
                 f"propose.\n\n"
             )
             scope_constraint = (
-                f"  - Glob / Grep ONLY under skills/{skill_dir}/. The 4 "
+                f"  - Glob / Grep ONLY under {skill_dir}/. The 4 "
                 f"task files plus that skills subtree are the entire scope.\n"
             )
             cite_clause = " Cite SKILL ids where relevant."
