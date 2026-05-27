@@ -586,7 +586,7 @@ def _autotune_bench_settings() -> dict:
 
     `method` chooses the benchmarker:
       - "sync_timer" (default): torch.npu.synchronize + time.perf_counter,
-        matches AscendOpGenAgent's autotune speed (no msprof overhead).
+        sub-second per trial (no msprof overhead).
       - "profiler_npu": route every autotune trial through profiler_npu
         for measurement-grade timing. Heavier per-trial; useful only
         when the lightweight bench misorders configs (rare for kernels
@@ -606,14 +606,13 @@ def _autotune_bench_settings() -> dict:
 
 
 def _sync_timer_bench(fn_to_profile, warmup: int, active: int) -> float:
-    """torch.npu.synchronize + time.perf_counter — the AscendOpGenAgent path.
+    """torch.npu.synchronize + time.perf_counter — the lightweight path.
 
     No msprof startup, no trace ingest. Autotune only needs the relative
     order of configs; a wall-clock mean over `active` iterations after
     `warmup` warm calls is sufficient to pick the winner. Per-trial cost
     on Ascend is ~ kernel_latency_us; vs profiler_npu's ~seconds setup
-    per call, this is 100×-1000× faster, restoring AscendOpGenAgent-like
-    autotune wallclock.
+    per call, this is 100×-1000× faster.
 
     Falls back to torch.cuda.synchronize for CUDA backends, and no-sync
     on CPU. `time.perf_counter` ticks are sub-microsecond on every
@@ -650,9 +649,9 @@ def patch_driver_benchmarker():
     selected by `autotune.benchmark_method` in .autoresearch/config.yaml:
 
       "sync_timer" (default): torch.npu.synchronize + time.perf_counter
-        — matches AscendOpGenAgent's autotune speed, no msprof overhead.
-        Per-trial cost ≈ kernel_latency_us. For pad (51 keys × 4 configs)
-        autotune drops from ~minutes (profiler_npu) to ~seconds.
+        — sub-second per trial, no msprof overhead. Per-trial cost ≈
+        kernel_latency_us. For pad (51 keys × 4 configs) autotune drops
+        from ~minutes (profiler_npu) to ~seconds.
 
       "profiler_npu": route through `verifier.profiler.profiler_npu` with
         configurable warmup / active / L2-clear. Measurement-grade timing,

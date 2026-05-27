@@ -71,8 +71,7 @@ def _gen_benchmark_body(adapter, config: TaskConfig,
     `clear_l2_cache=False` is forced so kernel timing is directly
     comparable to the ref measurement below (which can't use the
     triton_ascend L2-clear kernel — it corrupts aclnnArange state).
-    Both measurements now reflect warm-cache steady-state behavior, the
-    same as akg-hitl's default.
+    Both measurements now reflect warm-cache steady-state behavior.
 
     framework_model="impl_model" — adapter templates reference
     {framework_model} verbatim; tilelang_npuir / swft would otherwise
@@ -112,8 +111,7 @@ def _gen_benchmark_body(adapter, config: TaskConfig,
 def _base_benchmark_body(warmup: int, repeats: int) -> tuple[str, str]:
     """Reference benchmark body. Bypasses the DSL adapter and goes
     directly to `profiler_npu` (for NPU) or `triton.testing.do_bench`
-    (other backends) — semantically matched to akg-hitl's
-    `profiler_npu_core` so ref and kernel timings can be divided to
+    (other backends) — so ref and kernel timings can be divided to
     produce an honest speedup.
 
     No L2-cache-clear: triton_ascend's clear kernel corrupts the next
@@ -167,7 +165,7 @@ def _gen_eval_script(config: TaskConfig) -> str:
       Phase C — verify (Model vs ModelNew, per-case)
                 first-failing case decides error_source
       Phase D — profile_gen (ModelNew under adapter benchmark_impl)
-      Phase E — profile_base (Model under profiler_npu, matching akg-hitl)
+      Phase E — profile_base (Model under profiler_npu, ref-side timing)
 
     `AR_EVAL_PHASE` env selects which subset runs:
       "ref_only"     — Phase A + E only (no kernel import; immune to
@@ -462,7 +460,7 @@ if kernel_imported:
 # ref (base) goes through profiler_npu directly without an l2 clear kernel so
 # triton_ascend's L2-clear kernel — which corrupts the next aclnnArange
 # in the ref Model — never runs. Both have clear_l2_cache=False for
-# symmetric warm-cache measurement, matching akg-hitl's default.
+# symmetric warm-cache measurement, so gen/base latencies are comparable.
 #
 # `case_idx` is the per-shape index from the enclosing for-loop. Adapter
 # templates that bake the index into output dirs / filenames (pypto's

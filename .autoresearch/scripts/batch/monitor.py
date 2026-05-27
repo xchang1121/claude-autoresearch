@@ -147,8 +147,7 @@ def render(batch_dir: Path, progress: dict, active: dict | None,
 
     if active:
         # task_dir name already starts with `<op>_<ts>_<uuid>`, so the op name
-        # is on-screen without an explicit `op=` field — same line shape as
-        # akg's monitor (which uses the slot for `ref_mode=` instead).
+        # is on-screen without an explicit `op=` field.
         out.append(f"active  {Path(active['task_dir']).name}")
         out.append(f"        phase={active.get('phase', '?')}  "
                    f"rounds={active.get('eval_rounds', '?')}/{active.get('max_rounds', '?')}  "

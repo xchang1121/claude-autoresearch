@@ -378,9 +378,9 @@ def _add_worker_subcommand(sub: argparse._SubParsersAction) -> None:
 # verify subcommand
 # ---------------------------------------------------------------------------
 #
-# JSON-in / JSON-out wrapper around `task_config.run_eval`. Mirrors
-# `akg-verify` shape so external drivers can subprocess into us with a
-# stable contract that survives internal refactors.
+# JSON-in / JSON-out wrapper around `task_config.run_eval`. Stable
+# contract so external drivers can subprocess into us without coupling
+# to internal Python APIs that may change.
 
 _VERIFY_SENTINEL = "AR_VERIFY_RESULT:"
 
@@ -438,9 +438,9 @@ def _taskconfig_from_dict(cfg: dict) -> Any:
     cc_block = cfg.get("code_checker", {}) if isinstance(cfg.get("code_checker"), dict) else {}
     worker_block = cfg.get("worker", {}) if isinstance(cfg.get("worker"), dict) else {}
 
-    # Flat / inline aliases — accept the akg-verify-flavoured top-level
-    # keys (eval_timeout, warmup_times, run_times) alongside the nested
-    # task.yaml ones so JSON payloads stay terse.
+    # Flat / inline aliases — accept top-level eval_timeout /
+    # warmup_times / run_times alongside the nested task.yaml `eval`
+    # block so inline JSON payloads stay terse.
     eval_timeout = cfg.get("eval_timeout", eval_block.get("timeout", 600))
     warmup_times = cfg.get("warmup_times", eval_block.get("warmup_times", 10))
     run_times = cfg.get("run_times", eval_block.get("run_times", 100))
@@ -469,9 +469,9 @@ def _taskconfig_from_dict(cfg: dict) -> Any:
     # Default editable_files to `["kernel.py"]` when the caller didn't
     # declare one — `_gen_eval_script` indexes `editable_files[0]` to
     # decide which file to import the kernel symbol from, and a TaskConfig
-    # built straight from inline JSON (the akg-verify-style invocation
-    # path) wouldn't have it set otherwise. scaffold-built task.yaml
-    # always populates this; we mirror that contract here.
+    # built straight from inline JSON wouldn't have it set otherwise.
+    # scaffold-built task.yaml always populates this; we mirror that
+    # contract here.
     editable_files = cfg.get("editable_files") or ["kernel.py"]
 
     return TaskConfig(
@@ -548,8 +548,8 @@ def _materialize_task_dir(config: Any, impl_code: str, ref_code: str,
 
 def _filter_by_mode(eval_dict: dict, mode: str) -> dict:
     """Strip fields not requested by mode. Keeps the response schema
-    aligned with akg-verify's `verify-only` / `profile-only` modes even
-    though the underlying eval always runs both phases."""
+    matching the documented `verify-only` / `profile-only` semantics
+    even though the underlying eval always runs both phases."""
     if mode == "verify-only":
         eval_dict = dict(eval_dict)
         eval_dict["metrics"] = {}

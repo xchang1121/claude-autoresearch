@@ -90,10 +90,10 @@ _AUTOTUNE_DEFAULTS: Dict[str, Any] = {
 
 def autotune_settings() -> Dict[str, Any]:
     """Knobs for `patches/triton_autotune_patch.py`. Keys:
-      benchmark_method — `"sync_timer"` (default; AscendOpGenAgent-style,
-        sub-second per trial) or `"profiler_npu"` (msprof-grade,
-        seconds per trial — only worth it when sync_timer misorders
-        close-race configs).
+      benchmark_method — `"sync_timer"` (default; torch.npu.synchronize
+        + time.perf_counter, sub-second per trial) or `"profiler_npu"`
+        (msprof-grade, seconds per trial — only worth it when
+        sync_timer misorders close-race configs).
       benchmark_warmup / benchmark_active / benchmark_clear_l2 — passed
         into whichever bench method handles a trial. `clear_l2` is
         profiler_npu-only (sync_timer ignores it).
@@ -119,9 +119,9 @@ def autotune_settings() -> Dict[str, Any]:
 # precision — per-dtype layered tolerance
 # ---------------------------------------------------------------------
 
-# Fallbacks mirror akg_agents torch adapter _get_tolerance; if config.yaml
-# is missing or its `precision` block is incomplete, correctness.py still
-# gates kernels the same way.
+# Fallbacks match the CANN MARE/MERE-aligned defaults in correctness.py;
+# if config.yaml is missing or its `precision` block is incomplete, the
+# in-process compare still gates kernels the same way.
 _PRECISION_FALLBACK: Dict[str, Tuple[float, float, float, float, float]] = {
     "torch.float32":  (1.22e-4, 1.0e-5, 1.22e-3, 1.0e-4, 0.001),
     "torch.float16":  (9.77e-4, 1.0e-3, 9.77e-3, 1.0e-2, 0.005),

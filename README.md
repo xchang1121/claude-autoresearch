@@ -104,8 +104,8 @@ python .autoresearch/scripts/dashboard.py <task_dir> --watch 2
 
 所有 subprocess-接驳的入口都聚到 [ar_cli.py](.autoresearch/scripts/ar_cli.py) 一个文件下，
 JSON-in / JSON-out，结果行带 sentinel 前缀以免被 CANN / HCCL 的 stdout warning
-冲掉。`pipeline.py` / `baseline.py` / `batch/verify.py` Tier-2 全部走它，跟
-[akg_agents](../akg-hitl) 的 `akg-verify` / `akg-env` 模式同构。
+冲掉。`pipeline.py` / `baseline.py` / `batch/verify.py` Tier-2 全部走它，
+保证内外部调用方共一份稳定的 JSON 契约。
 
 | 子命令 | 用途 | sentinel |
 |--------|------|----------|
@@ -189,8 +189,7 @@ curl http://127.0.0.1:9111/api/v1/status
 ## 精度
 
 每轮 worker 端在 device 上重算 reference，按 case 跟 `ModelNew` 输出比对。
-精度标准对齐 [akg_agents/op/verifier/adapters/framework/torch.py](../akg-hitl/akg_agents/python/akg_agents/op/verifier/adapters/framework/torch.py)
-的 **dtype-驱动分层容差**（CANN MARE/MERE 约定）：
+精度走 **dtype-驱动分层容差**（对齐 CANN MARE/MERE 约定）：
 
 ```
 strict_tol  = atol         + rtol         * |ref|
@@ -242,12 +241,11 @@ getter，所有 consumer 都走它，不在 Python 模块里写表。
 
 **autotune 调优要点**：
 
-`benchmark_method` 默认 `sync_timer`（对齐 AscendOpGenAgent）：
-`torch.npu.synchronize` + `time.perf_counter`，每个 config 试一次只
-需 kernel_latency_us 量级，没有 msprof 启动/落 trace 的开销。
-`benchmark_method: profiler_npu` 是 legacy 路径，每次 trial 都走
-完整 profiler_npu (seconds/trial)，只在 sync_timer 把贴身竞赛的 config
-排错序时才需要。
+`benchmark_method` 默认 `sync_timer`：`torch.npu.synchronize` +
+`time.perf_counter`，每个 config 试一次只需 kernel_latency_us 量级，
+没有 msprof 启动/落 trace 的开销。`benchmark_method: profiler_npu`
+是 legacy 路径，每次 trial 都走完整 profiler_npu (seconds/trial)，
+只在 sync_timer 把贴身竞赛的 config 排错序时才需要。
 
 `benchmark_warmup` / `benchmark_active` / `benchmark_clear_l2` 是给两种
 bench 共用的迭代参数；`clear_l2` 只对 `profiler_npu` 有效，
@@ -257,7 +255,7 @@ pad（51 shapes × 4 configs）实测：
 | 配置 | cold round | warm round (disk cache hit) |
 |------|----------:|----:|
 | profiler_npu 重量级 (historical) | ~30 min | ~9 min |
-| sync_timer (new default) | ~10-15 min（与 AscendOpGenAgent 对齐） | ~3 min |
+| sync_timer (new default) | ~10-15 min | ~3 min |
 | sync_timer + disk_cache_enabled | 同上 | autotune 整段跳过 |
 
 ref 时延（用于 speedup 计算）和 kernel 时延都通过同一个 `eval_<op>.py`
@@ -300,7 +298,7 @@ ar_tasks/<op>_<ts>_<uuid>/
 PLAN 阶段 hook 会提示 Claude 用具体的 Glob 模式扫该 DSL 的 SKILL.md，
 把命中的 id 写进 plan item rationale 里做溯源。skills 根目录默认为 `skills/`，
 可通过 `AR_SKILLS_ROOT` 环境变量改写（接受相对或绝对路径，比如指向
-`akg_agents/python/akg_agents/op/resources/skills/` 共享一份知识库）。
+外部 skills 仓库共享一份知识库）。
 
 ## 依赖
 

@@ -243,8 +243,8 @@ python .autoresearch/scripts/batch/verify.py $BATCH_DIR --full --only opA,opB
 ```
 
 Tier 2 对每个 t1 全过的 op：加载 ref + kernel → 跑 `forward()` →
-`utils/correctness.py` 的 AND-of-maxima 检查（atol/rtol 锁死 1e-2，
-对齐 `akg/akg_agents` 标准，跟 `/autoresearch` 实跑同款）。
+`utils/correctness.py` 的分层 dtype 容差检查（per-dtype rtol/atol +
+outlier ratio，跟 `/autoresearch` 实跑同款 gate）。
 
 ---
 

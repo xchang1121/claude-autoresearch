@@ -1,4 +1,4 @@
-"""Layered tolerance output comparison — aligned with akg_agents torch adapter.
+"""Layered tolerance output comparison — CANN MARE/MERE-aligned.
 
 Single source of truth used by:
   - the generated eval script (`package_builder._gen_eval_script`) that
@@ -6,7 +6,7 @@ Single source of truth used by:
   - (formerly) the batch-time pre-flight verify; now routed through
     `ar_cli.py verify --mode verify-only` to share this gate end-to-end
 
-Semantics (ported from `akg_agents/op/verifier/adapters/framework/torch.py`):
+Semantics:
 
   Per-dtype tolerance table (rtol, atol, outlier_rtol, outlier_atol, outlier_ratio).
   Outlier thresholds = 10× strict; outlier_ratio caps how many elements
@@ -30,8 +30,7 @@ Semantics (ported from `akg_agents/op/verifier/adapters/framework/torch.py`):
 
 This is STRICTER than `torch.allclose(a, b, atol, rtol)` for the strict
 band but allows a small fraction of "outlier" elements within a relaxed
-10× band — matching CANN's MARE-threshold = 10× MERE-threshold convention
-so claude-autoresearch classifies a kernel the same way akg_agents would.
+10× band — matching CANN's MARE-threshold = 10× MERE-threshold convention.
 
 Dependency-light (only torch) so this module can be bundled into the
 eval-package tarball.
@@ -41,8 +40,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 
-# Tolerance table keyed by torch dtype. Mirrors akg-hitl
-# `akg_agents/op/verifier/adapters/framework/torch.py:_get_tolerance`.
+# Tolerance table keyed by torch dtype. CANN MARE/MERE-aligned.
 # (rtol, atol, outlier_rtol, outlier_atol, outlier_ratio).
 #
 # The hardcoded fallback below is the source of truth when this module
