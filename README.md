@@ -216,8 +216,35 @@ bool tensor 走精确相等；非 Tensor 输出和 NaN/Inf 位置不一致都直
 诊断里同时报 `mere = mean(|diff|/(|ref|+atol))` 和 `mare = max(...)`，跟
 CANN profiling 工具的输出对齐。
 
-调精度改这一个文件，eval-package 把 `correctness.py` 整个打进 tarball，
-batch Tier-2 和 worker runtime 共用同一份 gate，没法漂移。
+调精度改 [`.autoresearch/config.yaml:precision`](.autoresearch/config.yaml)
+（in-process 调用点经 `utils/settings.precision_table()` 读取）；
+[`utils/correctness.py`](.autoresearch/scripts/utils/correctness.py) 内置
+同样的表作为 tarball-embedded fallback。batch Tier-2 和 worker runtime
+共用同一份 gate，没法漂移。
+
+## 中央配置
+
+`.autoresearch/config.yaml` 是框架级参数的**唯一来源**，每一项都有
+fallback（删了该 section 框架照常起）。`utils/settings.py` 提供 typed
+getter，所有 consumer 都走它，不在 Python 模块里写表。
+
+| section | 字段 | 作用 |
+|---------|------|------|
+| `profiler` | `warmup_times` / `run_times` / `eval_timeout` | TaskConfig 默认（task.yaml 仍可单算子 override） |
+| `autotune` | `benchmark_warmup` / `benchmark_active` / `benchmark_clear_l2` | triton.autotune 内部「选 winner」时的 bench 设置；和 final 测量解耦 |
+| `autotune` | `disk_cache_enabled` | 把 autotune 选中的 config 落到 `~/.autoresearch_cache/autotune/<fn>_<src_hash>.json`，跨进程复用 |
+| `precision` | `float32` / `float16` / `bfloat16` 五元组 | dtype 分层容差 |
+| `worker` | `port` / `host` | `ar_cli.py worker --start` 默认 |
+| `batch_verify` | `tier1_timeout` / `tier2_timeout` | `batch/verify.py` 子进程超时 |
+| `default_dsl` | 字符串 | scaffold 无 `--dsl` 时的兜底 |
+| `worker_only_modules` | list | code checker 跳过的 import |
+| `hallucinated_scripts` | dict | hooks/guard_bash.py 重定向 |
+
+**autotune 调优要点**：默认 `benchmark_warmup=1, benchmark_active=3,
+benchmark_clear_l2=false`。historical 默认是 5/30+L2-clear，那是
+measurement-grade 设置，autotune 只需要 4 个 config 的相对排序，根本
+不用那么重。pad（51 cases × 4 configs）在改前 cold 跑 23-32min，改后
+冷启动预期 ~10min，热（命中 disk cache）预期 ~3min。
 
 ref 时延（用于 speedup 计算）和 kernel 时延都通过同一个 `eval_<op>.py`
 脚本测量，但 worker 端**起两个子进程**跑：先 `AR_EVAL_PHASE=ref_only`
