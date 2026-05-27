@@ -61,18 +61,35 @@ def _disk_cache_root() -> str:
 
 def _kernel_ident(autotuner) -> Optional[tuple]:
     """Return `(fn_name, src_hash_12)` keying the on-disk file, or None
-    when the underlying JITFunction doesn't expose `__name__`/source."""
-    fn = getattr(autotuner, 'base_fn', None) or getattr(autotuner, 'fn', None)
-    if fn is None:
-        return None
-    name = getattr(fn, '__name__', None)
-    src = getattr(fn, 'src', None) or ''
-    if not src:
-        inner = getattr(fn, 'fn', None)
-        if inner is not None:
-            src = getattr(inner, 'src', '') or ''
+    when the underlying JITFunction doesn't expose `__name__`/source.
+
+    Triton's Autotuner has two pointers to the user kernel:
+      - `.fn`      → the wrapping JITFunction (has `.src` — the actual
+                     decorated kernel body string we want to hash on)
+      - `.base_fn` → the raw Python function the user wrote (NO `.src`
+                     attribute; only `__name__` / `__code__` etc.)
+    Prefer `.fn` so the hash actually fingerprints the kernel content;
+    fall back to `inspect.getsource` on `.base_fn` if `.fn.src` is
+    missing (older / patched triton versions).
+    """
+    fn_obj = getattr(autotuner, 'fn', None)
+    base_fn = getattr(autotuner, 'base_fn', None)
+
+    # Name: either source carries it; prefer the JITFunction's recorded one.
+    name = (getattr(fn_obj, '__name__', None)
+            or getattr(base_fn, '__name__', None))
     if not name:
         return None
+
+    # Source: JITFunction.src is the canonical "kernel text" triton
+    # itself uses to key its compilation cache. Use the same string so
+    # our disk-cache invalidation aligns with triton's own.
+    src = getattr(fn_obj, 'src', None) or ''
+    if not src and base_fn is not None:
+        try:
+            src = inspect.getsource(base_fn)
+        except (OSError, TypeError):
+            src = ''
     try:
         src_bytes = src.encode("utf-8") if isinstance(src, str) else b''
     except Exception:
