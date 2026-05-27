@@ -12,10 +12,234 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
+import inspect
+import json
 import os
+import tempfile
+from typing import Optional
 
 # 全局变量存储配置信息
 _collected_config_timings = {}
+
+# ----------------------------------------------------------------------
+# autotune disk cache — persist `Autotuner.cache` (the winner-config
+# dict triton fills in by benchmarking) across process invocations.
+#
+# First run: triton benchmarks all configs, writes `self.cache[key] = best`.
+#            After the call returns, we serialize self.cache to
+#            `~/.autoresearch_cache/autotune/<fn_name>_<src_hash>.json`.
+# Next run: before calling original_autotuner_run, we read the file and
+#            populate `self.cache[key] = best` so the bench loop is
+#            short-circuited by triton's own cache-hit fast path.
+#
+# Invalidation: src_hash is computed from the kernel's `triton.jit`
+# source. Any kernel-source edit changes the hash → new cache file →
+# old entries naturally stop being read. No manual eviction needed.
+# ----------------------------------------------------------------------
+
+_DISK_CACHE_LOADED_FOR: set = set()    # id(autotuner) → already loaded once
+_DISK_CACHE_SAVED_FOR:  set = set()    # id(autotuner) → saw a save attempt (for logging dedup)
+
+
+def _autotune_disk_cache_enabled() -> bool:
+    try:
+        from utils.settings import autotune_settings  # type: ignore
+        return bool(autotune_settings().get("disk_cache_enabled", True))
+    except Exception:
+        return True
+
+
+def _disk_cache_root() -> str:
+    """Lives under `$HOME/.autoresearch_cache/autotune/` so eval-package
+    tempdir wipes don't lose state, and concurrent eval processes on
+    different devices share the same cache."""
+    base = os.path.join(os.path.expanduser("~"), ".autoresearch_cache", "autotune")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def _kernel_ident(autotuner) -> Optional[tuple]:
+    """Return `(fn_name, src_hash_12)` keying the on-disk file, or None
+    when the underlying JITFunction doesn't expose `__name__`/source."""
+    fn = getattr(autotuner, 'base_fn', None) or getattr(autotuner, 'fn', None)
+    if fn is None:
+        return None
+    name = getattr(fn, '__name__', None)
+    src = getattr(fn, 'src', None) or ''
+    if not src:
+        inner = getattr(fn, 'fn', None)
+        if inner is not None:
+            src = getattr(inner, 'src', '') or ''
+    if not name:
+        return None
+    try:
+        src_bytes = src.encode("utf-8") if isinstance(src, str) else b''
+    except Exception:
+        src_bytes = b''
+    h = hashlib.sha256(src_bytes).hexdigest()[:12]
+    return name, h
+
+
+def _disk_cache_path_for(autotuner) -> Optional[str]:
+    ident = _kernel_ident(autotuner)
+    if ident is None:
+        return None
+    name, h = ident
+    safe_name = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in name)
+    return os.path.join(_disk_cache_root(), f"{safe_name}_{h}.json")
+
+
+_CONFIG_OPT_ATTRS = (
+    "num_warps", "num_stages", "num_ctas", "num_buffers_warp_spec",
+    "num_consumer_groups", "reg_dec_producer", "reg_inc_consumer",
+    "maxnreg",
+)
+
+
+def _serialize_config(config) -> Optional[dict]:
+    """Capture enough of a `triton.Config` to reconstruct later."""
+    if config is None:
+        return None
+    try:
+        out: dict = {"kwargs": dict(getattr(config, "kwargs", {}) or {})}
+    except Exception:
+        return None
+    for attr in _CONFIG_OPT_ATTRS:
+        v = getattr(config, attr, None)
+        if v is not None:
+            try:
+                json.dumps(v)        # ensure JSON-serialisable
+                out[attr] = v
+            except TypeError:
+                continue
+    return out
+
+
+def _deserialize_config(d: dict):
+    """Reconstruct a `triton.Config` from a serialized dict. Returns None
+    when triton is unavailable or the dict shape doesn't match the
+    installed triton version's Config signature."""
+    if not d or not _TRITON_AVAILABLE:
+        return None
+    try:
+        kwargs = dict(d.get("kwargs") or {})
+        sig_params = set(inspect.signature(triton.Config.__init__).parameters)
+        extra = {k: d[k] for k in d if k != "kwargs" and k in sig_params}
+        return triton.Config(kwargs, **extra)
+    except Exception:
+        return None
+
+
+def _key_to_str(key) -> str:
+    try:
+        return json.dumps(list(key), default=str)
+    except Exception:
+        return json.dumps([str(x) for x in (key if isinstance(key, tuple) else (key,))])
+
+
+def _str_to_key(s: str):
+    try:
+        return tuple(json.loads(s))
+    except Exception:
+        return None
+
+
+def _maybe_load_disk_cache(autotuner) -> None:
+    """First call per Autotuner instance: load disk cache, merge entries
+    into `self.cache`. Idempotent across the process lifetime; later
+    calls return immediately.
+    """
+    if id(autotuner) in _DISK_CACHE_LOADED_FOR:
+        return
+    _DISK_CACHE_LOADED_FOR.add(id(autotuner))
+
+    if not _autotune_disk_cache_enabled():
+        return
+
+    path = _disk_cache_path_for(autotuner)
+    if path is None or not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+    entries = data.get("entries") or {}
+
+    cache = getattr(autotuner, "cache", None)
+    if cache is None:
+        try:
+            autotuner.cache = {}
+            cache = autotuner.cache
+        except Exception:
+            return
+
+    loaded = 0
+    for key_str, cfg_dict in entries.items():
+        key = _str_to_key(key_str)
+        if key is None:
+            continue
+        cfg = _deserialize_config(cfg_dict)
+        if cfg is None:
+            continue
+        try:
+            cache[key] = cfg
+            loaded += 1
+        except Exception:
+            continue
+    if loaded and os.getenv("AR_AUTOTUNE_DEBUG"):
+        print(f"[autotune] loaded {loaded} cache entries from {path}")
+
+
+def _save_disk_cache(autotuner) -> None:
+    """After `original_autotuner_run` returns: snapshot `self.cache` to
+    disk so the next process can skip the bench loop. Atomic write
+    (tmp + replace) to avoid torn JSON when two devices race.
+    """
+    if not _autotune_disk_cache_enabled():
+        return
+    cache = getattr(autotuner, "cache", None)
+    if not cache:
+        return
+    path = _disk_cache_path_for(autotuner)
+    if path is None:
+        return
+
+    ident = _kernel_ident(autotuner)
+    fn_name, src_hash = ident if ident else ("unknown", "0")
+
+    entries: dict = {}
+    for key, cfg in cache.items():
+        cfg_dict = _serialize_config(cfg)
+        if cfg_dict is None:
+            continue
+        entries[_key_to_str(key)] = cfg_dict
+    if not entries:
+        return
+
+    payload = {"fn_name": fn_name, "src_hash": src_hash, "entries": entries}
+    try:
+        d = os.path.dirname(path)
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".at_", suffix=".json.tmp", dir=d)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    except Exception as e:
+        if os.getenv("AR_AUTOTUNE_DEBUG"):
+            print(f"[autotune] disk-cache save failed for {path}: {e}")
+        return
+    if id(autotuner) not in _DISK_CACHE_SAVED_FOR:
+        _DISK_CACHE_SAVED_FOR.add(id(autotuner))
+        if os.getenv("AR_AUTOTUNE_DEBUG"):
+            print(f"[autotune] saved {len(entries)} cache entries to {path}")
 
 # ============================================================================
 # AR_restore_copy Triton kernel
@@ -273,17 +497,40 @@ def patch_triton_autotuner():
             pass
 
     def patched_autotuner_run(self, *args, **kwargs):
+        # Pre-warm `self.cache` from disk on first call for this instance
+        # so triton's built-in cache-hit fast path skips the bench loop
+        # entirely. No-op when the disk file doesn't exist (cold first
+        # round) or `autotune.disk_cache_enabled` is false in config.
+        try:
+            _maybe_load_disk_cache(self)
+        except Exception:
+            pass
         result = original_autotuner_run(self, *args, **kwargs)
         try:
             _process_config_timings(self)
         except Exception:
             pass
+        # Save AFTER the bench so any newly-picked winners land in the
+        # next process's pre-warm. Idempotent (atomic replace), cheap
+        # to call on every run.
+        try:
+            _save_disk_cache(self)
+        except Exception:
+            pass
         return result
 
     def patched_autotiling_run(self, *args, **kwargs):
+        try:
+            _maybe_load_disk_cache(self)
+        except Exception:
+            pass
         result = original_autotiling_run(self, *args, **kwargs)
         try:
             _process_config_timings(self)
+        except Exception:
+            pass
+        try:
+            _save_disk_cache(self)
         except Exception:
             pass
         return result
@@ -314,8 +561,35 @@ def clear_collected_config_timings():
     _collected_config_timings = {}
 
 
+def _autotune_bench_settings() -> dict:
+    """Pull autotune-bench knobs from `utils.settings.autotune_settings()`,
+    falling back to lightweight defaults when settings aren't reachable
+    (e.g. eval running in the tar-extracted worker tempdir where the
+    scripts root isn't on sys.path)."""
+    try:
+        from utils.settings import autotune_settings  # type: ignore
+        s = autotune_settings()
+        return {
+            "warmup":        int(s.get("benchmark_warmup", 1)),
+            "active":        int(s.get("benchmark_active", 3)),
+            "clear_l2":      bool(s.get("benchmark_clear_l2", False)),
+        }
+    except Exception:
+        return {"warmup": 1, "active": 3, "clear_l2": False}
+
+
 def patch_driver_benchmarker():
     """补丁 driver.active.get_benchmarker()，让 autotune 使用 profiler_npu。
+
+    autotune-time benchmark settings (`warmup` / `active` / `clear_l2`)
+    come from `autotune.benchmark_*` in .autoresearch/config.yaml. They
+    are intentionally LIGHTER than the user-facing measurement — autotune
+    only needs to relative-order configs, not measure final latency.
+    Historical defaults were warmup=5 / active=30 + per-iter L2 clear,
+    which made autotune dominate wallclock on multi-shape kernels
+    (51 cases × 4 configs × 30 launches × 2 = 12k profiled launches
+    just to pick winners). config.yaml ships warmup=1 / active=3 /
+    no L2-clear, ~12× lighter at autotune time.
 
     当 _restore_info 不为空时（即 _bench 禁用了原生 restore_value），
     benchmarker 自动用 AR_restore_copy kernel 包装 kernel_call，
@@ -328,6 +602,7 @@ def patch_driver_benchmarker():
             return True
 
         original_get_benchmarker = driver.active.get_benchmarker
+        bench_cfg = _autotune_bench_settings()
 
         def patched_get_benchmarker():
             def custom_benchmarker(kernel_call, quantiles=(0.5, 0.2, 0.8)):
@@ -338,10 +613,10 @@ def patch_driver_benchmarker():
 
                     time_us = profiler_npu(
                         fn_to_profile,
-                        warmup=5,
-                        active=30,
+                        warmup=bench_cfg["warmup"],
+                        active=bench_cfg["active"],
                         suppress_warnings=True,
-                        clear_l2_cache=True,
+                        clear_l2_cache=bench_cfg["clear_l2"],
                         l2_clear_kernel_name="AR_l2cache_clear",
                         filter_restore_copy=(_restore_info is not None),
                     )

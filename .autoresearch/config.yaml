@@ -1,10 +1,14 @@
-# Framework reference tables. Loaded once per process by settings.py.
+# Framework configuration. Loaded once per process by utils/settings.py.
 #
-# DSL is the only user-visible classifier. backend / device_type are pure
-# functions of DSL (see `ar_cli.py env list-dsls` — the canonical table
-# lives in the verifier registry, surfaced through that CLI). arch is
-# derived from hardware (local: `ar_cli.py env detect`; remote: worker
-# /api/v1/status via `ar_cli.py env detect --worker-url`).
+# Single source of truth for: DSL fallback, profiler defaults, autotune
+# behaviour, precision tolerances, worker daemon defaults, batch-verify
+# timeouts, and Claude-side script aliasing. Every consumer routes
+# through utils.settings (no hand-built tables inside Python modules).
+#
+# DSL → backend / device_type live in the verifier registry, surfaced
+# through `ar_cli.py env list-dsls`. arch is derived from hardware
+# (local: `ar_cli.py env detect`; remote: worker /api/v1/status via
+# `ar_cli.py env detect --worker-url`). None appear here.
 
 # Fallback DSL when scaffold.py is invoked directly without --dsl
 # (e.g. reconstructing an old task from task.yaml). The /autoresearch
@@ -12,18 +16,101 @@
 # --dsl up front so the LLM never silently picks a DSL.
 default_dsl: triton_ascend
 
-# Modules that live only on the remote worker (NPU / GPU rig). Static code
-# check skips import availability for these — the local dev box typically
-# lacks them. Worker-side verify catches any real import error.
+# --------------------------------------------------------------------
+# Profiler — user-facing latency measurement.
+# --------------------------------------------------------------------
+# Defaults for the per-shape `profiler_npu(warmup=..., active=...)`
+# call that produces the `latency_us` written to progress.json. Each
+# task.yaml may override per-task via `eval.warmup_times`,
+# `eval.run_times`, and `eval.timeout`.
+profiler:
+  warmup_times: 10
+  run_times: 100
+  eval_timeout: 600              # seconds per shape
+
+# --------------------------------------------------------------------
+# Autotune — distinct from `profiler` above.
+# --------------------------------------------------------------------
+# triton.autotune only needs to relative-order configs (pick a winner
+# among the 4 triton.Config candidates a kernel declares). It does NOT
+# need profiler-grade timing. Lightweight settings here cut wallclock
+# significantly on multi-shape autotune kernels (pad, etc.) while
+# preserving final-measurement accuracy (which still goes through
+# `profiler` above).
+#
+# Historical default was warmup=5 / active=30 + per-iter L2-clear
+# kernel — that's measurement-grade work, wasted on autotune.
+# patches/triton_autotune_patch.py reads these on import.
+autotune:
+  benchmark_warmup: 1
+  benchmark_active: 3
+  benchmark_clear_l2: false
+  # Per-(triton fn, autotune-key) winner cache. First round populates
+  # `~/.autoresearch_cache/autotune/<fn_name>_<src_hash>.json`;
+  # subsequent rounds load it into `Autotuner.cache` so the bench
+  # loop is skipped entirely. Kernel-source change invalidates via
+  # src_hash; nothing else needs manual eviction.
+  disk_cache_enabled: true
+
+# --------------------------------------------------------------------
+# Precision tolerance — mirrors `utils/correctness.py:_TOLERANCE_BY_DTYPE_NAME`.
+# --------------------------------------------------------------------
+# Layered (strict + relaxed) tolerance ported from
+# `akg_agents/op/verifier/adapters/framework/torch.py:_get_tolerance`.
+# Per dtype: (rtol, atol, outlier_rtol, outlier_atol, outlier_ratio).
+# Editing this is the single place to retune correctness — both
+# `compare_outputs` (in-process) and the eval-package tarball pick up
+# the new values automatically.
+precision:
+  float32:
+    rtol: 1.22e-4
+    atol: 1.0e-5
+    outlier_rtol: 1.22e-3
+    outlier_atol: 1.0e-4
+    outlier_ratio: 0.001
+  float16:
+    rtol: 9.77e-4
+    atol: 1.0e-3
+    outlier_rtol: 9.77e-3
+    outlier_atol: 1.0e-2
+    outlier_ratio: 0.005
+  bfloat16:
+    rtol: 7.81e-3
+    atol: 1.0e-2
+    outlier_rtol: 7.81e-2
+    outlier_atol: 1.0e-1
+    outlier_ratio: 0.010
+
+# --------------------------------------------------------------------
+# Worker daemon defaults — `ar_cli.py worker --start`.
+# --------------------------------------------------------------------
+worker:
+  port: 9001
+  host: 0.0.0.0
+
+# --------------------------------------------------------------------
+# `batch/verify.py` per-op subprocess timeouts.
+# --------------------------------------------------------------------
+batch_verify:
+  tier1_timeout: 30
+  tier2_timeout: 600
+
+# --------------------------------------------------------------------
+# Worker-only modules — skipped during static code-check import probe.
+# --------------------------------------------------------------------
+# The local dev box typically lacks these; worker-side verify catches
+# any real import error.
 worker_only_modules:
   - triton
   - torch_npu
   - torch_npu_extension
 
-# Common hallucinated script names → the real script Claude should use.
-# hook_guard_bash flags these early with a targeted error rather than a
-# generic "unknown script" rejection. Verify-style invocations all map to
-# `ar_cli.py verify` (single sentinel-tagged JSON CLI; see ar_cli.py).
+# --------------------------------------------------------------------
+# Hallucinated-script redirects for hooks/guard_bash.py.
+# --------------------------------------------------------------------
+# Common name guesses → the real script Claude should use. Verify-style
+# invocations all map to `ar_cli.py verify` (single sentinel-tagged
+# JSON CLI; see ar_cli.py).
 hallucinated_scripts:
   eval.py: ar_cli.py verify
   eval_wrapper.py: ar_cli.py verify

@@ -14,7 +14,25 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import os
+import sys
 import yaml
+
+# Profiler defaults live in `.autoresearch/config.yaml:profiler` and are
+# accessed via utils.settings. Loaded lazily on first TaskConfig
+# construction so import-time circularity with utils/* stays clean.
+_scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+
+
+def _profiler_defaults() -> dict:
+    """Lazy + cached pull from utils.settings; falls back to hardcoded
+    values when settings can't import (e.g. eval-package tempdir)."""
+    try:
+        from utils.settings import profiler_defaults
+        return profiler_defaults()
+    except Exception:
+        return {"warmup_times": 10, "run_times": 100, "eval_timeout": 600}
 
 
 # ---------------------------------------------------------------------------
@@ -37,14 +55,15 @@ class TaskConfig:
     editable_files: list = field(default_factory=list)
     ref_file: str = "reference.py"
 
-    # Eval params
-    eval_timeout: int = 600
-    # profiler iteration counts. Defaults match the previous hardcoded
-    # values in _gen_eval_script (warmup=10, repeats=100). Configurable
-    # via task.yaml eval.warmup_times / eval.run_times for ops where
-    # the defaults are too noisy or too expensive.
-    warmup_times: int = 10
-    run_times: int = 100
+    # Eval params. Defaults come from `.autoresearch/config.yaml:profiler`
+    # via utils.settings.profiler_defaults; per-task overrides land via
+    # task.yaml eval.* keys in `load_task_config`.
+    eval_timeout: int = field(
+        default_factory=lambda: int(_profiler_defaults()["eval_timeout"]))
+    warmup_times: int = field(
+        default_factory=lambda: int(_profiler_defaults()["warmup_times"]))
+    run_times: int = field(
+        default_factory=lambda: int(_profiler_defaults()["run_times"]))
 
     # Metric
     primary_metric: str = "score"

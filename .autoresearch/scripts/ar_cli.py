@@ -69,6 +69,17 @@ from urllib.request import Request, urlopen
 SCRIPTS_DIR = Path(__file__).resolve().parent   # .autoresearch/scripts/
 
 
+def _worker_cfg() -> dict:
+    """Pull `worker.{host,port}` from .autoresearch/config.yaml via
+    utils.settings. Lazy + cached; safe before sys.argv parsing."""
+    try:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        from utils.settings import worker_defaults
+        return worker_defaults()
+    except Exception:
+        return {"host": "0.0.0.0", "port": 9001}
+
+
 # ---------------------------------------------------------------------------
 # worker subcommand
 # ---------------------------------------------------------------------------
@@ -302,7 +313,7 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     # connect to 127.0.0.1 for --stop/--status (0.0.0.0 is bind-only and
     # cannot be the target of an outbound TCP connect).
     if args.host is None:
-        args.host = "0.0.0.0" if args.start else "127.0.0.1"
+        args.host = (_worker_cfg()["host"] if args.start else "127.0.0.1")
     if args.start:
         return _worker_start(args)
     if args.stop:
@@ -340,12 +351,18 @@ def _add_worker_subcommand(sub: argparse._SubParsersAction) -> None:
                    help="Arch string, e.g. ascend910b3 / a100 / x86_64.")
     p.add_argument("--devices", required=True,
                    help="Comma-separated device IDs, e.g. '2,5'.")
+    # Worker daemon defaults come from .autoresearch/config.yaml:worker via
+    # utils.settings; --start --host defaults override for the bind side,
+    # --status / --stop side rewrites None → 127.0.0.1 in _cmd_worker.
+    _w = _worker_cfg()
     p.add_argument("--host", default=None,
-                   help="Bind / probe address. Defaults to 0.0.0.0 for "
-                        "--start (all interfaces) and 127.0.0.1 for "
-                        "--status / --stop (loopback connect).")
-    p.add_argument("--port", type=int, default=9001,
-                   help="TCP port (default: 9001).")
+                   help="Bind / probe address. Defaults to config "
+                        f"`worker.host` ({_w['host']}) for --start, "
+                        "and 127.0.0.1 for --status / --stop (loopback "
+                        "connect).")
+    p.add_argument("--port", type=int, default=_w["port"],
+                   help=f"TCP port (default: {_w['port']} — config "
+                        "`worker.port`).")
     p.add_argument("--bg", action="store_true",
                    help="Daemon mode for --start. Detaches, logs to "
                         "/tmp/ar_worker_<port>.log, prints PID + log "

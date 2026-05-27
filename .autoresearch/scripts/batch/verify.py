@@ -31,13 +31,16 @@ import manifest as mf
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.input_groups import resolve as _resolve_groups  # noqa: E402
 from utils.json_io import parse_sentinel_line  # noqa: E402
+from utils.settings import batch_verify_timeouts  # noqa: E402
 
 VERIFY_RESULTS = "verify_results.json"
-TIER1_TIMEOUT = 30
-# Cold JIT compile across many cases on triton-ascend can take several
-# minutes for kernels with constexpr-driven specialisations. Bump the
-# Tier-2 cap so multi-shape verifies aren't killed mid-loop.
-TIER2_TIMEOUT = 600
+# Defaults overridden by `.autoresearch/config.yaml:batch_verify` via
+# utils.settings. Tier 1 is compile/import only — 30s is generous. Tier 2
+# includes cold-JIT pad-style kernels that can take many minutes; the
+# 600s cap is per op (the eval-package itself scales by num_cases inside).
+_timeouts = batch_verify_timeouts()
+TIER1_TIMEOUT = _timeouts["tier1_timeout"]
+TIER2_TIMEOUT = _timeouts["tier2_timeout"]
 
 # Path to ar_cli.py — Tier 2 shells out to it instead of pulling the
 # verify pipeline in-process. Same contract every other caller sees.

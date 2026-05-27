@@ -1,14 +1,20 @@
-"""Shared config loader for framework reference tables.
+"""Shared config loader for framework defaults.
 
-Every backend/DSL/arch mapping, hallucinated-script alias, and worker-only
-module list lives in `.autoresearch/config.yaml`. This module reads that
-file once per process and exposes small typed accessors — callers never
+Every framework-level knob lives in `.autoresearch/config.yaml`:
+default DSL fallback, profiler iteration counts, autotune behaviour,
+precision-tolerance table, worker daemon defaults, batch-verify
+timeouts, hallucinated-script aliases. This module reads that file
+once per process and exposes small typed accessors — callers never
 hand-build these tables inside Python modules.
+
+Every getter has a hardcoded fallback (the value below mirrors the
+documented default in config.yaml). A user can delete sections of
+config.yaml and the framework still runs.
 """
 from functools import lru_cache
 import os
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
@@ -51,6 +57,132 @@ def worker_only_modules() -> frozenset:
 
 def hallucinated_scripts() -> Dict[str, str]:
     return dict(_raw().get("hallucinated_scripts", {}))
+
+
+# ---------------------------------------------------------------------
+# profiler — user-facing latency measurement defaults
+# ---------------------------------------------------------------------
+
+_PROFILER_DEFAULTS = {"warmup_times": 10, "run_times": 100, "eval_timeout": 600}
+
+
+def profiler_defaults() -> Dict[str, int]:
+    """`warmup_times` / `run_times` / `eval_timeout` — used by `TaskConfig`
+    when task.yaml leaves the corresponding field unset, and embedded in
+    the generated eval-package tarball.
+    """
+    block = _raw().get("profiler") or {}
+    return {k: int(block.get(k, v)) for k, v in _PROFILER_DEFAULTS.items()}
+
+
+# ---------------------------------------------------------------------
+# autotune — patched triton autotuner benchmark + disk cache
+# ---------------------------------------------------------------------
+
+_AUTOTUNE_DEFAULTS: Dict[str, Any] = {
+    "benchmark_warmup": 1,
+    "benchmark_active": 3,
+    "benchmark_clear_l2": False,
+    "disk_cache_enabled": True,
+}
+
+
+def autotune_settings() -> Dict[str, Any]:
+    """Knobs for `patches/triton_autotune_patch.py`. Keys:
+      benchmark_warmup / benchmark_active / benchmark_clear_l2 — the
+        warmup, active, and L2-clear flags passed into `profiler_npu`
+        when triton.autotune asks for per-config timing. Distinct from
+        the user-facing measurement (see `profiler_defaults`).
+      disk_cache_enabled — when True, autotune winners persist to
+        `~/.autoresearch_cache/autotune/<fn>_<src_hash>.json` after
+        each `Autotuner.run`, and load back at next invocation so the
+        bench loop is skipped.
+    """
+    block = _raw().get("autotune") or {}
+    out: Dict[str, Any] = {}
+    for k, v in _AUTOTUNE_DEFAULTS.items():
+        raw = block.get(k, v)
+        if isinstance(v, bool):
+            out[k] = bool(raw)
+        elif isinstance(v, int):
+            out[k] = int(raw)
+        else:
+            out[k] = raw
+    return out
+
+
+# ---------------------------------------------------------------------
+# precision — per-dtype layered tolerance
+# ---------------------------------------------------------------------
+
+# Fallbacks mirror akg_agents torch adapter _get_tolerance; if config.yaml
+# is missing or its `precision` block is incomplete, correctness.py still
+# gates kernels the same way.
+_PRECISION_FALLBACK: Dict[str, Tuple[float, float, float, float, float]] = {
+    "torch.float32":  (1.22e-4, 1.0e-5, 1.22e-3, 1.0e-4, 0.001),
+    "torch.float16":  (9.77e-4, 1.0e-3, 9.77e-3, 1.0e-2, 0.005),
+    "torch.bfloat16": (7.81e-3, 1.0e-2, 7.81e-2, 1.0e-1, 0.010),
+}
+
+# config.yaml uses bare dtype names (`float32`, not `torch.float32`).
+_DTYPE_NAME_MAP = {
+    "float32":  "torch.float32",
+    "float16":  "torch.float16",
+    "bfloat16": "torch.bfloat16",
+}
+
+
+def precision_table() -> Dict[str, Tuple[float, float, float, float, float]]:
+    """Per-dtype 5-tuple `(rtol, atol, outlier_rtol, outlier_atol, outlier_ratio)`.
+
+    Keys are `str(torch.dtype)` (e.g. `"torch.float16"`) to match the
+    in-process lookup in `utils/correctness.py:_tolerance_for`. Missing
+    dtypes fall back to the fp32 row, mirroring the in-process default.
+    """
+    block = _raw().get("precision") or {}
+    out: Dict[str, Tuple[float, float, float, float, float]] = dict(_PRECISION_FALLBACK)
+    for name, spec in block.items():
+        full = _DTYPE_NAME_MAP.get(str(name).lower(), str(name))
+        if not isinstance(spec, dict):
+            continue
+        try:
+            out[full] = (
+                float(spec.get("rtol",          _PRECISION_FALLBACK.get(full, _PRECISION_FALLBACK["torch.float32"])[0])),
+                float(spec.get("atol",          _PRECISION_FALLBACK.get(full, _PRECISION_FALLBACK["torch.float32"])[1])),
+                float(spec.get("outlier_rtol",  _PRECISION_FALLBACK.get(full, _PRECISION_FALLBACK["torch.float32"])[2])),
+                float(spec.get("outlier_atol", _PRECISION_FALLBACK.get(full, _PRECISION_FALLBACK["torch.float32"])[3])),
+                float(spec.get("outlier_ratio", _PRECISION_FALLBACK.get(full, _PRECISION_FALLBACK["torch.float32"])[4])),
+            )
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+# ---------------------------------------------------------------------
+# worker — `ar_cli.py worker --start` defaults
+# ---------------------------------------------------------------------
+
+_WORKER_DEFAULTS: Dict[str, Any] = {"port": 9001, "host": "0.0.0.0"}
+
+
+def worker_defaults() -> Dict[str, Any]:
+    block = _raw().get("worker") or {}
+    return {
+        "port": int(block.get("port", _WORKER_DEFAULTS["port"])),
+        "host": str(block.get("host", _WORKER_DEFAULTS["host"])),
+    }
+
+
+# ---------------------------------------------------------------------
+# batch_verify — `batch/verify.py` subprocess timeouts
+# ---------------------------------------------------------------------
+
+_BATCH_VERIFY_DEFAULTS: Dict[str, int] = {"tier1_timeout": 30, "tier2_timeout": 600}
+
+
+def batch_verify_timeouts() -> Dict[str, int]:
+    block = _raw().get("batch_verify") or {}
+    return {k: int(block.get(k, v)) for k, v in _BATCH_VERIFY_DEFAULTS.items()}
 
 
 # Thin code_checker.yaml accessors. Missing keys → KeyError naturally.

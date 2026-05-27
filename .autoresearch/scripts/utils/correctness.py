@@ -43,13 +43,35 @@ from typing import Any, Optional
 
 # Tolerance table keyed by torch dtype. Mirrors akg-hitl
 # `akg_agents/op/verifier/adapters/framework/torch.py:_get_tolerance`.
-# (rtol, atol, outlier_rtol, outlier_atol, outlier_ratio)
-_TOLERANCE_BY_DTYPE_NAME = {
+# (rtol, atol, outlier_rtol, outlier_atol, outlier_ratio).
+#
+# The hardcoded fallback below is the source of truth when this module
+# runs inside the eval-package tarball (where `utils.settings` is not
+# bundled). When invoked in-process (batch verify pre-flight, dev
+# repls, tests), we prefer `.autoresearch/config.yaml:precision` via
+# utils.settings — that's the user-facing "edit one place to retune"
+# knob the framework documents.
+_TOLERANCE_FALLBACK = {
     "torch.float32":  (1.22e-4, 1e-5, 1.22e-3, 1e-4, 0.001),
     "torch.float16":  (9.77e-4, 1e-3, 9.77e-3, 1e-2, 0.005),
     "torch.bfloat16": (7.81e-3, 1e-2, 7.81e-2, 1e-1, 0.010),
 }
 _DEFAULT_TOLERANCE = (1.22e-4, 1e-5, 1.22e-3, 1e-4, 0.001)
+
+
+def _build_tolerance_table() -> dict:
+    """Prefer settings.precision_table(); fall back to the hardcoded
+    table when settings can't import (eval-package tarball context)."""
+    try:
+        from utils.settings import precision_table  # type: ignore
+        merged = dict(_TOLERANCE_FALLBACK)
+        merged.update(precision_table())
+        return merged
+    except Exception:
+        return dict(_TOLERANCE_FALLBACK)
+
+
+_TOLERANCE_BY_DTYPE_NAME = _build_tolerance_table()
 
 
 def _tolerance_for(dtype: Any) -> tuple[float, float, float, float, float]:
