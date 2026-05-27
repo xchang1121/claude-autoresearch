@@ -449,6 +449,14 @@ def _taskconfig_from_dict(cfg: dict) -> Any:
         elif isinstance(spec, (list, tuple)) and len(spec) == 2:
             constraints[metric_name] = tuple(spec)
 
+    # Default editable_files to `["kernel.py"]` when the caller didn't
+    # declare one — `_gen_eval_script` indexes `editable_files[0]` to
+    # decide which file to import the kernel symbol from, and a TaskConfig
+    # built straight from inline JSON (the akg-verify-style invocation
+    # path) wouldn't have it set otherwise. scaffold-built task.yaml
+    # always populates this; we mirror that contract here.
+    editable_files = cfg.get("editable_files") or ["kernel.py"]
+
     return TaskConfig(
         name=name,
         description=cfg.get("description", ""),
@@ -456,7 +464,7 @@ def _taskconfig_from_dict(cfg: dict) -> Any:
         framework=cfg.get("framework"),
         backend=cfg.get("backend"),
         arch=cfg.get("arch"),
-        editable_files=cfg.get("editable_files", []),
+        editable_files=editable_files,
         ref_file=cfg.get("ref_file") or agent_block.get("ref_file") or "reference.py",
         eval_timeout=int(eval_timeout),
         warmup_times=int(warmup_times),
