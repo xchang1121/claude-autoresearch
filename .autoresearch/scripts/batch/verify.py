@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import manifest as mf
@@ -105,7 +106,8 @@ def _tier1_inspect(path: Path, required: tuple[str, ...]) -> dict:
 
 
 def _tier2_run(ref_path: Path, kernel_path: Path, op_name: str,
-               dsl: str) -> dict:
+               dsl: str, worker_url: Optional[str] = None,
+               device_id: Optional[int] = None) -> dict:
     """Run `ar_cli.py verify --mode verify-only` against (ref, kernel).
 
     Builds a minimal task_config JSON (op_name + dsl), points the CLI at
@@ -145,6 +147,14 @@ def _tier2_run(ref_path: Path, kernel_path: Path, op_name: str,
             "--reference", f"@{ref_path}",
             "--mode", "verify-only",
         ]
+        # Tier 2 must declare a transport: prefer worker_url (matches
+        # what runtime eval does when manifest declares `worker.urls`);
+        # otherwise fall through to a local device. Without either, the
+        # CLI returns infra_fail.
+        if worker_url:
+            cmd += ["--worker-url", worker_url]
+        else:
+            cmd += ["--device-id", str(device_id if device_id is not None else 0)]
         env = os.environ.copy()
         env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
         try:
@@ -258,7 +268,9 @@ def _run_subprocess(*, tier: str, ref: Path, kernel: Path | None,
     return result
 
 
-def _verify_one(case: dict, full: bool, dsl: str) -> dict:
+def _verify_one(case: dict, full: bool, dsl: str,
+                worker_url: Optional[str] = None,
+                device_id: Optional[int] = None) -> dict:
     op = case["op_name"]
     ref = Path(case["ref"])
     kernel = Path(case["kernel"])
@@ -278,7 +290,8 @@ def _verify_one(case: dict, full: bool, dsl: str) -> dict:
     if full:
         if tier1_ok:
             t0 = time.time()
-            tier2 = _tier2_run(ref, kernel, op_name=op, dsl=dsl)
+            tier2 = _tier2_run(ref, kernel, op_name=op, dsl=dsl,
+                               worker_url=worker_url, device_id=device_id)
             tier2["elapsed_s"] = round(time.time() - t0, 2)
             out["tier2"] = tier2
         else:
@@ -367,7 +380,9 @@ def _print_table(results: dict, full: bool) -> None:
 
 
 def run_verification(batch_dir: Path, *, full: bool = False,
-                     only: str = "", dsl_override: str = "") -> int:
+                     only: str = "", dsl_override: str = "",
+                     worker_url_override: str = "",
+                     device_id_override: Optional[int] = None) -> int:
     """Run the verification loop programmatically (so prepare.py and other
     scripts can call us without subprocessing). Returns the same exit code
     main() would: 0 if everything passed, 1 if any FAIL/ERROR. All output
@@ -378,6 +393,12 @@ def run_verification(batch_dir: Path, *, full: bool = False,
     (CLI `--dsl`) wins over manifest.dsl when both are present; the field
     is required for Tier 2 because the verify pipeline picks a DSL adapter
     to build eval_<op>.py.
+
+    Transport for Tier 2 (in priority order):
+      1. `worker_url_override` (CLI `--worker-url`)
+      2. `manifest.worker.urls[0]`
+      3. `device_id_override` (CLI `--device-id`)
+      4. local device 0 (with the usual ar_cli.py verify warning)
     """
     batch_dir = Path(batch_dir).resolve()
     if not batch_dir.is_dir():
@@ -398,15 +419,33 @@ def run_verification(batch_dir: Path, *, full: bool = False,
     if full and not dsl:
         sys.exit("Tier 2 needs a DSL — declare `dsl:` in manifest or pass --dsl.")
 
+    worker_block = manifest_data.get("worker") or {}
+    manifest_worker_urls = worker_block.get("urls") or []
+    if isinstance(manifest_worker_urls, str):
+        manifest_worker_urls = [u.strip() for u in manifest_worker_urls.split(",")
+                                if u.strip()]
+    worker_url: Optional[str] = (worker_url_override.strip()
+                                  if worker_url_override else None)
+    if not worker_url and manifest_worker_urls:
+        worker_url = manifest_worker_urls[0]
+
     only_set = {s.strip() for s in (only or "").split(",") if s.strip()}
     if only_set:
         cases = [c for c in cases if c["op_name"] in only_set]
         if not cases:
             sys.exit("--only filtered out all ops")
 
+    transport_note = ""
+    if full:
+        if worker_url:
+            transport_note = f"  worker={worker_url}"
+        elif device_id_override is not None:
+            transport_note = f"  device_id={device_id_override}"
+        else:
+            transport_note = "  device_id=0 (fallback)"
     print(f"verify  batch_dir={batch_dir}  "
           f"tier={'1+2' if full else '1'}  ops={len(cases)}"
-          + (f"  dsl={dsl}" if full else ""))
+          + (f"  dsl={dsl}{transport_note}" if full else ""))
     print()
 
     results: dict = {}
@@ -415,7 +454,9 @@ def run_verification(batch_dir: Path, *, full: bool = False,
         op = case["op_name"]
         sys.stdout.write(f"  [{i:>3}/{len(cases)}] {op} ... ")
         sys.stdout.flush()
-        rec = _verify_one(case, full=full, dsl=dsl)
+        rec = _verify_one(case, full=full, dsl=dsl,
+                          worker_url=worker_url,
+                          device_id=device_id_override)
         results[op] = rec
         ok = _summary_status(rec, full=full)
         sys.stdout.write(f"{ok}\n")
@@ -457,11 +498,19 @@ def main() -> int:
                     help="comma-separated op names")
     ap.add_argument("--dsl", default="",
                     help="DSL for Tier 2; overrides manifest.dsl when set")
+    ap.add_argument("--worker-url", default="",
+                    help="Tier-2 transport: worker URL; overrides "
+                         "manifest.worker.urls[0]")
+    ap.add_argument("--device-id", type=int, default=None,
+                    help="Tier-2 transport: local device id; used when "
+                         "no worker URL resolved (default: 0)")
     args = ap.parse_args()
 
     return run_verification(
         Path(args.batch_dir),
         full=args.full, only=args.only, dsl_override=args.dsl,
+        worker_url_override=args.worker_url,
+        device_id_override=args.device_id,
     )
 
 
