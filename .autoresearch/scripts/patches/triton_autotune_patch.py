@@ -582,35 +582,89 @@ def _autotune_bench_settings() -> dict:
     """Pull autotune-bench knobs from `utils.settings.autotune_settings()`,
     falling back to lightweight defaults when settings aren't reachable
     (e.g. eval running in the tar-extracted worker tempdir where the
-    scripts root isn't on sys.path)."""
+    scripts root isn't on sys.path).
+
+    `method` chooses the benchmarker:
+      - "sync_timer" (default): torch.npu.synchronize + time.perf_counter,
+        matches AscendOpGenAgent's autotune speed (no msprof overhead).
+      - "profiler_npu": route every autotune trial through profiler_npu
+        for measurement-grade timing. Heavier per-trial; useful only
+        when the lightweight bench misorders configs (rare for kernels
+        with clear BLOCK/num_warps differences).
+    """
     try:
         from utils.settings import autotune_settings  # type: ignore
         s = autotune_settings()
         return {
-            "warmup":        int(s.get("benchmark_warmup", 1)),
-            "active":        int(s.get("benchmark_active", 3)),
-            "clear_l2":      bool(s.get("benchmark_clear_l2", False)),
+            "method":   str(s.get("benchmark_method", "sync_timer")),
+            "warmup":   int(s.get("benchmark_warmup", 1)),
+            "active":   int(s.get("benchmark_active", 3)),
+            "clear_l2": bool(s.get("benchmark_clear_l2", False)),
         }
     except Exception:
-        return {"warmup": 1, "active": 3, "clear_l2": False}
+        return {"method": "sync_timer", "warmup": 1, "active": 3, "clear_l2": False}
+
+
+def _sync_timer_bench(fn_to_profile, warmup: int, active: int) -> float:
+    """torch.npu.synchronize + time.perf_counter — the AscendOpGenAgent path.
+
+    No msprof startup, no trace ingest. Autotune only needs the relative
+    order of configs; a wall-clock mean over `active` iterations after
+    `warmup` warm calls is sufficient to pick the winner. Per-trial cost
+    on Ascend is ~ kernel_latency_us; vs profiler_npu's ~seconds setup
+    per call, this is 100×-1000× faster, restoring AscendOpGenAgent-like
+    autotune wallclock.
+
+    Falls back to torch.cuda.synchronize for CUDA backends, and no-sync
+    on CPU. `time.perf_counter` ticks are sub-microsecond on every
+    supported platform.
+    """
+    import time
+    try:
+        import torch
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            sync = torch.npu.synchronize
+        elif torch.cuda.is_available():
+            sync = torch.cuda.synchronize
+        else:
+            sync = lambda: None
+    except Exception:
+        sync = lambda: None
+
+    for _ in range(max(0, int(warmup))):
+        fn_to_profile()
+    sync()
+    n = max(1, int(active))
+    t0 = time.perf_counter()
+    for _ in range(n):
+        fn_to_profile()
+    sync()
+    elapsed_s = time.perf_counter() - t0
+    return (elapsed_s / n) * 1.0e6  # microseconds, matching profiler_npu's contract
 
 
 def patch_driver_benchmarker():
-    """补丁 driver.active.get_benchmarker()，让 autotune 使用 profiler_npu。
+    """补丁 driver.active.get_benchmarker() to control autotune-time bench.
 
-    autotune-time benchmark settings (`warmup` / `active` / `clear_l2`)
-    come from `autotune.benchmark_*` in .autoresearch/config.yaml. They
-    are intentionally LIGHTER than the user-facing measurement — autotune
-    only needs to relative-order configs, not measure final latency.
-    Historical defaults were warmup=5 / active=30 + per-iter L2 clear,
-    which made autotune dominate wallclock on multi-shape kernels
-    (51 cases × 4 configs × 30 launches × 2 = 12k profiled launches
-    just to pick winners). config.yaml ships warmup=1 / active=3 /
-    no L2-clear, ~12× lighter at autotune time.
+    Routes triton.autotune's per-config timing through one of two backends,
+    selected by `autotune.benchmark_method` in .autoresearch/config.yaml:
 
-    当 _restore_info 不为空时（即 _bench 禁用了原生 restore_value），
-    benchmarker 自动用 AR_restore_copy kernel 包装 kernel_call，
-    profiler 按 kernel 名字精确过滤，不会误删用户的 TensorMove 操作。
+      "sync_timer" (default): torch.npu.synchronize + time.perf_counter
+        — matches AscendOpGenAgent's autotune speed, no msprof overhead.
+        Per-trial cost ≈ kernel_latency_us. For pad (51 keys × 4 configs)
+        autotune drops from ~minutes (profiler_npu) to ~seconds.
+
+      "profiler_npu": route through `verifier.profiler.profiler_npu` with
+        configurable warmup / active / L2-clear. Measurement-grade timing,
+        only worth the cost when sync_timer misorders close-race configs.
+
+    AR_restore_copy stays in the kernel_call wrap path either way: if the
+    caller's `_bench` patch set `_restore_info`, the wrapped fn runs
+    restore-pre/post around the actual kernel so destructive autotune
+    targets stay correct. The msprof filter_restore_copy step is a
+    profiler_npu-only concern and is skipped on the sync_timer path
+    (no profiler trace exists for the AR_restore_copy launches to leak
+    into).
     """
     try:
         from triton.runtime import driver
@@ -625,6 +679,24 @@ def patch_driver_benchmarker():
             def custom_benchmarker(kernel_call, quantiles=(0.5, 0.2, 0.8)):
                 fn_to_profile = _wrap_kernel_call_with_restore(kernel_call, _restore_info)
 
+                method = bench_cfg.get("method", "sync_timer")
+                if method == "sync_timer":
+                    try:
+                        time_us = _sync_timer_bench(
+                            fn_to_profile,
+                            warmup=bench_cfg["warmup"],
+                            active=bench_cfg["active"],
+                        )
+                        return [time_us] * 3
+                    except Exception as e:
+                        # Fall through to triton default on unexpected error.
+                        if os.getenv("AR_AUTOTUNE_DEBUG"):
+                            print(f"[autotune] sync_timer bench failed: {e}")
+                        original_benchmarker = original_get_benchmarker()
+                        return original_benchmarker(fn_to_profile, quantiles)
+
+                # method == "profiler_npu" — preserved for the rare case
+                # where measurement-grade autotune ordering matters.
                 try:
                     from verifier.profiler import profiler_npu
 

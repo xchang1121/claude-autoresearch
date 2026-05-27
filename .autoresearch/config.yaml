@@ -38,13 +38,18 @@ profiler:
 # preserving final-measurement accuracy (which still goes through
 # `profiler` above).
 #
-# Historical default was warmup=5 / active=30 + per-iter L2-clear
-# kernel — that's measurement-grade work, wasted on autotune.
-# patches/triton_autotune_patch.py reads these on import.
+# Historical default was profiler_npu(warmup=5, active=30) + per-iter
+# L2-clear — that's measurement-grade work, wasted on autotune. Default
+# is now sync_timer (matches AscendOpGenAgent: torch.npu.synchronize +
+# time.perf_counter, no msprof). patches/triton_autotune_patch.py
+# reads these on import.
 autotune:
+  # "sync_timer" — sub-second/trial, AscendOpGenAgent-equivalent.
+  # "profiler_npu" — msprof-grade timing, seconds/trial (legacy).
+  benchmark_method: sync_timer
   benchmark_warmup: 1
   benchmark_active: 3
-  benchmark_clear_l2: false
+  benchmark_clear_l2: false   # profiler_npu only; sync_timer ignores
   # Per-(triton fn, autotune-key) winner cache. First round populates
   # `~/.autoresearch_cache/autotune/<fn_name>_<src_hash>.json`;
   # subsequent rounds load it into `Autotuner.cache` so the bench

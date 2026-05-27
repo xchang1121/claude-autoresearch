@@ -80,6 +80,7 @@ def profiler_defaults() -> Dict[str, int]:
 # ---------------------------------------------------------------------
 
 _AUTOTUNE_DEFAULTS: Dict[str, Any] = {
+    "benchmark_method": "sync_timer",
     "benchmark_warmup": 1,
     "benchmark_active": 3,
     "benchmark_clear_l2": False,
@@ -89,14 +90,17 @@ _AUTOTUNE_DEFAULTS: Dict[str, Any] = {
 
 def autotune_settings() -> Dict[str, Any]:
     """Knobs for `patches/triton_autotune_patch.py`. Keys:
-      benchmark_warmup / benchmark_active / benchmark_clear_l2 — the
-        warmup, active, and L2-clear flags passed into `profiler_npu`
-        when triton.autotune asks for per-config timing. Distinct from
-        the user-facing measurement (see `profiler_defaults`).
+      benchmark_method — `"sync_timer"` (default; AscendOpGenAgent-style,
+        sub-second per trial) or `"profiler_npu"` (msprof-grade,
+        seconds per trial — only worth it when sync_timer misorders
+        close-race configs).
+      benchmark_warmup / benchmark_active / benchmark_clear_l2 — passed
+        into whichever bench method handles a trial. `clear_l2` is
+        profiler_npu-only (sync_timer ignores it).
       disk_cache_enabled — when True, autotune winners persist to
         `~/.autoresearch_cache/autotune/<fn>_<src_hash>.json` after
         each `Autotuner.run`, and load back at next invocation so the
-        bench loop is skipped.
+        bench loop is skipped entirely on subsequent rounds.
     """
     block = _raw().get("autotune") or {}
     out: Dict[str, Any] = {}

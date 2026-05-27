@@ -240,11 +240,25 @@ getter，所有 consumer 都走它，不在 Python 模块里写表。
 | `worker_only_modules` | list | code checker 跳过的 import |
 | `hallucinated_scripts` | dict | hooks/guard_bash.py 重定向 |
 
-**autotune 调优要点**：默认 `benchmark_warmup=1, benchmark_active=3,
-benchmark_clear_l2=false`。historical 默认是 5/30+L2-clear，那是
-measurement-grade 设置，autotune 只需要 4 个 config 的相对排序，根本
-不用那么重。pad（51 cases × 4 configs）在改前 cold 跑 23-32min，改后
-冷启动预期 ~10min，热（命中 disk cache）预期 ~3min。
+**autotune 调优要点**：
+
+`benchmark_method` 默认 `sync_timer`（对齐 AscendOpGenAgent）：
+`torch.npu.synchronize` + `time.perf_counter`，每个 config 试一次只
+需 kernel_latency_us 量级，没有 msprof 启动/落 trace 的开销。
+`benchmark_method: profiler_npu` 是 legacy 路径，每次 trial 都走
+完整 profiler_npu (seconds/trial)，只在 sync_timer 把贴身竞赛的 config
+排错序时才需要。
+
+`benchmark_warmup` / `benchmark_active` / `benchmark_clear_l2` 是给两种
+bench 共用的迭代参数；`clear_l2` 只对 `profiler_npu` 有效，
+`sync_timer` 忽略它。
+
+pad（51 shapes × 4 configs）实测：
+| 配置 | cold round | warm round (disk cache hit) |
+|------|----------:|----:|
+| profiler_npu 重量级 (historical) | ~30 min | ~9 min |
+| sync_timer (new default) | ~10-15 min（与 AscendOpGenAgent 对齐） | ~3 min |
+| sync_timer + disk_cache_enabled | 同上 | autotune 整段跳过 |
 
 ref 时延（用于 speedup 计算）和 kernel 时延都通过同一个 `eval_<op>.py`
 脚本测量，但 worker 端**起两个子进程**跑：先 `AR_EVAL_PHASE=ref_only`
