@@ -58,7 +58,8 @@ python .autoresearch/scripts/dashboard.py
 | `--eval-timeout S` |  | 单次 eval 超时（秒），默认 600 |
 | `--no-code-checker` |  | 关闭静态 CodeChecker。当前规则只覆盖 `triton_*`，其他 DSL 建议加 |
 
-派生项（用户不写）：`backend` 由 DSL 决定；`arch` 由 `--devices` 本地探测（`npu-smi` / `nvidia-smi`）
+派生项（用户不写）：`backend` 由 DSL 决定；`arch` 由 `--devices` 本地探测
+（`ar_cli.py env detect` 内部走 `npu-smi` / `nvidia-smi` / `uname -m`）
 或从 worker `GET /api/v1/status` 自报。
 
 > seed kernel 跑 baseline 失败也直接进 PLAN —— 第一批 plan items 会用于改写
@@ -98,6 +99,44 @@ python .autoresearch/scripts/dashboard.py <task_dir> --watch 2
 键位：`↑` / `↓` / `PgUp` / `PgDn` / `Home` / `End` 滚动 history，`q` / `Esc` 退出。
 顶栏：task 名 / 阶段 / plan 版本 / budget / Baseline / Seed / Best / 改进比；
 下栏：history 表 + 当前 plan。
+
+## 端到端 CLI（`ar_cli.py`）
+
+所有 subprocess-接驳的入口都聚到 [ar_cli.py](.autoresearch/scripts/ar_cli.py) 一个文件下，
+JSON-in / JSON-out，结果行带 sentinel 前缀以免被 CANN / HCCL 的 stdout warning
+冲掉。`pipeline.py` / `baseline.py` / `batch/verify.py` Tier-2 全部走它，跟
+[akg_agents](../akg-hitl) 的 `akg-verify` / `akg-env` 模式同构。
+
+| 子命令 | 用途 | sentinel |
+|--------|------|----------|
+| `worker --start/--stop/--status` | worker daemon 生命周期管理 | — |
+| `verify` | kernel verify + profile（替代旧 `eval_wrapper.py`） | `AR_VERIFY_RESULT:` |
+| `env detect` / `env check` / `env list-dsls` | 硬件 / SDK / DSL 表查询（替代旧 `utils/hw_detect.py`） | `AR_ENV_RESULT:` |
+
+```bash
+# verify 一个 kernel（impl + reference 可以 inline 或 @file）
+python .autoresearch/scripts/ar_cli.py verify \
+    --task-config @task.yaml \
+    --impl       @kernel.py  \
+    --reference  @reference.py \
+    --task-dir   ar_tasks/sinkhorn_... \
+    --device-id 5 \
+    --mode verify+profile
+
+# 列 DSL → backend 表
+python .autoresearch/scripts/ar_cli.py env list-dsls
+
+# 检测本地硬件 / 远端 worker
+python .autoresearch/scripts/ar_cli.py env detect
+python .autoresearch/scripts/ar_cli.py env detect --worker-url 127.0.0.1:9111
+```
+
+`--task-dir` 可选：给了它就把 `editable_files` / 其余 `.py` / `.ar_state/progress.json`
+（sticky baseline 锚点）从那儿拷到内部 tempdir，多文件 kernel 仍能跑；省略就
+是纯单文件 kernel + reference。
+
+`--mode verify-only` 跳过 profile 段的指标（仍跑 eval 全流程），`batch/verify.py
+--full` Tier-2 走这个 mode 跟主流程共用一份 correctness gate。
 
 ## 批量跑
 
@@ -149,24 +188,36 @@ curl http://127.0.0.1:9111/api/v1/status
 
 ## 精度
 
-每轮 worker 端在 device 上重算 reference，按 case 跟 `ModelNew` 输出比对：
-
-1. `Model(*get_init_inputs())(*get_inputs())` 拿 ref
-2. `ModelNew.forward()` 拿实测
-3. AND-of-maxima 检查（对齐 `akg/akg_agents` 的精度标准）：
+每轮 worker 端在 device 上重算 reference，按 case 跟 `ModelNew` 输出比对。
+精度标准对齐 [akg_agents/op/verifier/adapters/framework/torch.py](../akg-hitl/akg_agents/python/akg_agents/op/verifier/adapters/framework/torch.py)
+的 **dtype-驱动分层容差**（CANN MARE/MERE 约定）：
 
 ```
-abs_diff = |ref - sol|
-rel_diff = abs_diff / (|ref| + 1e-8)
-PASS iff  max(abs_diff) <= atol  AND  max(rel_diff) <= rtol
+strict_tol  = atol         + rtol         * |ref|
+relaxed_tol = outlier_atol + outlier_rtol * |ref|     # 10× strict
+
+PASS iff:
+  · 形状 / NaN 位置 / Inf 位置+符号匹配
+  · hard_fail = count(|diff| > relaxed_tol) == 0
+  · outlier   = count(|diff| > strict_tol AND <= relaxed_tol)
+                ≤ total * outlier_ratio
 ```
 
-solution 端任何 NaN/Inf 直接判 fail；非 Tensor 输出也判 fail。这比
-`torch.allclose` 的逐元素和式 `|a-b| <= atol + rtol*|b|` 更严，因为
-不允许"单个元素用绝对误差换相对误差"。
+dtype 表（[utils/correctness.py:_TOLERANCE_BY_DTYPE_NAME](.autoresearch/scripts/utils/correctness.py)）：
 
-容差固定在 [`utils/correctness.py`](.autoresearch/scripts/utils/correctness.py)：
-`DEFAULT_ATOL = DEFAULT_RTOL = 1e-2`。要调精度直接改这一个文件。
+| dtype | rtol | atol | outlier_rtol | outlier_atol | outlier_ratio |
+|-------|-----:|-----:|-------------:|-------------:|--------------:|
+| `torch.float32`  | 1.22e-4 | 1e-5 | 1.22e-3 | 1e-4 | 0.1% |
+| `torch.float16`  | 9.77e-4 | 1e-3 | 9.77e-3 | 1e-2 | 0.5% |
+| `torch.bfloat16` | 7.81e-3 | 1e-2 | 7.81e-2 | 1e-1 | 1.0% |
+| 其他 / 未知       | 同 fp32 兜底 | | | | |
+
+bool tensor 走精确相等；非 Tensor 输出和 NaN/Inf 位置不一致都直接 fail。
+诊断里同时报 `mere = mean(|diff|/(|ref|+atol))` 和 `mare = max(...)`，跟
+CANN profiling 工具的输出对齐。
+
+调精度改这一个文件，eval-package 把 `correctness.py` 整个打进 tarball，
+batch Tier-2 和 worker runtime 共用同一份 gate，没法漂移。
 
 ref 时延（用于 speedup 计算）和 kernel 时延都通过同一个 `eval_<op>.py`
 脚本测量，但 worker 端**起两个子进程**跑：先 `AR_EVAL_PHASE=ref_only`
@@ -234,6 +285,7 @@ PLAN 阶段 hook 会提示 Claude 用具体的 Glob 模式扫该 DSL 的 SKILL.m
 | Hook 接线 | [.claude/settings.json](.claude/settings.json) + [hooks/](.autoresearch/scripts/hooks/) |
 | Plan / history / progress 写入 | [phase_machine/state_store.py](.autoresearch/scripts/phase_machine/state_store.py) |
 | DSL adapter（profiler / autotune） | [verifier/adapters/factory.py](.autoresearch/scripts/verifier/adapters/factory.py) |
+| 端到端 CLI（verify / env / worker 入口） | [ar_cli.py](.autoresearch/scripts/ar_cli.py) + [utils/ar_env_client.py](.autoresearch/scripts/utils/ar_env_client.py) |
 | 本地 vs 远端执行路由 | [utils/local_worker.py](.autoresearch/scripts/utils/local_worker.py) / [worker/server.py](.autoresearch/scripts/worker/server.py) |
 | CodeChecker 规则 | [utils/code_checker.py](.autoresearch/scripts/utils/code_checker.py) + `.autoresearch/code_checker.yaml` |
 | 不变量（plan 权威态 / pid 单调 / DIAGNOSE 契约 / 等） | [CLAUDE.md](CLAUDE.md) |

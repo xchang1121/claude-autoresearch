@@ -72,8 +72,9 @@ def _build_scaffold_command(args) -> str:
     parts.append("--run-baseline")
     if args.no_code_checker:
         parts.append("--no-code-checker")
-    # --correctness-atol / --correctness-rtol used to live here; atol/rtol
-    # are locked to correctness.DEFAULT_ATOL / DEFAULT_RTOL now.
+    # --correctness-atol / --correctness-rtol used to live here. Tolerance
+    # is now a dtype-driven layered table in correctness._tolerance_for —
+    # single per-dtype source of truth, no CLI override.
     return " ".join(parts)
 
 

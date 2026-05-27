@@ -122,9 +122,11 @@ class DSLAdapter(ABC):
     def default_backend(self) -> str:
         """Backend implied by this DSL name (``ascend`` / ``cuda`` / ``cpu``).
 
-        Single source of truth; ``hw_detect`` derives the DSL→backend map
-        from each adapter at lookup time, so adapters that ship in this
-        repo can't drift from a hand-maintained table.
+        Single source of truth; `ar_cli.py env list-dsls` (and the
+        in-process `utils.ar_env_client.list_dsls()` wrapper) derive
+        the DSL→backend map from each adapter at lookup time, so
+        adapters that ship in this repo can't drift from a hand-
+        maintained table.
         """
         pass
 

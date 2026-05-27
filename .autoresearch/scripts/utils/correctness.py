@@ -1,67 +1,99 @@
-"""Shared atol/rtol output comparison — matches akg/akg_agents semantics.
+"""Layered tolerance output comparison — aligned with akg_agents torch adapter.
 
 Single source of truth used by:
-  - the generated eval script (package_builder._gen_eval_script) that
+  - the generated eval script (`package_builder._gen_eval_script`) that
     runs inside the worker / local subprocess
-  - the batch-time pre-flight verify.py Tier-2 check
+  - (formerly) the batch-time pre-flight verify; now routed through
+    `ar_cli.py verify --mode verify-only` to share this gate end-to-end
 
-Defaults and semantics come from akg/akg_agents
-(`examples/kernel_related/bench_lite_common.py:_check_correctness`):
+Semantics (ported from `akg_agents/op/verifier/adapters/framework/torch.py`):
 
-  DEFAULT_ATOL = DEFAULT_RTOL = 1e-2
-  per-tensor check: max_abs_diff <= atol  AND  max_rel_diff <= rtol
-                    where rel_diff = abs_diff / (|ref| + 1e-8)
-  NaN / Inf in the solution → fail
-  shape mismatch → fail
+  Per-dtype tolerance table (rtol, atol, outlier_rtol, outlier_atol, outlier_ratio).
+  Outlier thresholds = 10× strict; outlier_ratio caps how many elements
+  may exceed strict-but-stay-under-relaxed before the tensor fails.
 
-This is STRICTER than `torch.allclose(a, b, atol, rtol)`'s element-wise
-`|a-b| <= atol + rtol*|b|` because the AND of maxima can't trade absolute
-error against relative error within one element. Picking it deliberately
-mirrors the benchmark suite's own correctness gate so claude-autoresearch
-classifies a kernel the same way akg_agents would.
+    strict_tol  = atol         + rtol         * |ref|
+    relaxed_tol = outlier_atol + outlier_rtol * |ref|
 
-Dependency-light (only torch) so it can be bundled into the eval-package
-tarball.
+  Per tensor:
+    - shape mismatch              → FAIL
+    - NaN / Inf position mismatch → FAIL
+    - Inf sign mismatch           → FAIL
+    - hard_fail = count(|diff| > relaxed_tol);  any hard_fail > 0 → FAIL
+    - outlier   = count(|diff| > strict_tol AND |diff| <= relaxed_tol)
+                  fail when outlier > total * outlier_ratio
+    - bool dtypes require exact equality (no tolerance applies)
+
+  Plus MERE / MARE diagnostics:
+    mere = mean(|diff| / (|ref| + atol))
+    mare = max(|diff| / (|ref| + atol))
+
+This is STRICTER than `torch.allclose(a, b, atol, rtol)` for the strict
+band but allows a small fraction of "outlier" elements within a relaxed
+10× band — matching CANN's MARE-threshold = 10× MERE-threshold convention
+so claude-autoresearch classifies a kernel the same way akg_agents would.
+
+Dependency-light (only torch) so this module can be bundled into the
+eval-package tarball.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 
-# Single global tolerance, matching akg_agents.bench_lite_common.
-DEFAULT_ATOL = 1e-2
-DEFAULT_RTOL = 1e-2
+# Tolerance table keyed by torch dtype. Mirrors akg-hitl
+# `akg_agents/op/verifier/adapters/framework/torch.py:_get_tolerance`.
+# (rtol, atol, outlier_rtol, outlier_atol, outlier_ratio)
+_TOLERANCE_BY_DTYPE_NAME = {
+    "torch.float32":  (1.22e-4, 1e-5, 1.22e-3, 1e-4, 0.001),
+    "torch.float16":  (9.77e-4, 1e-3, 9.77e-3, 1e-2, 0.005),
+    "torch.bfloat16": (7.81e-3, 1e-2, 7.81e-2, 1e-1, 0.010),
+}
+_DEFAULT_TOLERANCE = (1.22e-4, 1e-5, 1.22e-3, 1e-4, 0.001)
 
-# Small epsilon prevents div-by-zero when ref values are exact 0. Same
-# value akg_agents uses.
-_REL_EPS = 1e-8
+
+def _tolerance_for(dtype: Any) -> tuple[float, float, float, float, float]:
+    """Look up `(rtol, atol, outlier_rtol, outlier_atol, outlier_ratio)`
+    for a torch dtype. Falls back to fp32-grade tolerance for unknown
+    dtypes (int / quantized / etc.) so callers always get a 5-tuple.
+    """
+    return _TOLERANCE_BY_DTYPE_NAME.get(str(dtype), _DEFAULT_TOLERANCE)
 
 
-def compare_outputs(out_ref: list, out_new: list,
-                    atol: float = DEFAULT_ATOL,
-                    rtol: float = DEFAULT_RTOL) -> dict:
-    """akg_agents-style AND-of-maxima check.
+def compare_outputs(out_ref: list, out_new: list) -> dict:
+    """Per-tensor layered-tolerance check.
 
     For each tensor pair:
-      - tensors are detached, moved to CPU, cast to fp32 for stable
-        subtraction math
-      - NaN or Inf anywhere in the solution → fail
+      - tensors are detached, moved to CPU; the float comparisons cast
+        to float32 for stable subtraction math
+      - non-tensor outputs fail explicitly (a silent skip used to let
+        scalar / numpy / mixed-structure outputs falsely classify as PASS)
+      - NaN / Inf position mismatch → fail
       - shape mismatch → fail
-      - max_abs_diff = max(|ref - sol|)
-      - max_rel_diff = max(|ref - sol| / (|ref| + 1e-8))
-      - PASS iff `max_abs_diff <= atol` AND `max_rel_diff <= rtol`
+      - hard_fail > 0  OR  outlier > total * outlier_ratio → fail
+      - bool tensors require exact equality
 
     Returns:
       {"correctness": bool,
        "diagnostics": list[str],
        "max_abs_diff": float | None,
-       "atol": float, "rtol": float}
+       "mere": float | None,    # mean |diff|/(|ref|+atol), across all tensors
+       "mare": float | None,    # max  |diff|/(|ref|+atol)
+       "hard_fail": int,
+       "outlier": int,
+       "outlier_cap": int}
     """
-    import torch  # local import keeps the module importable without torch
+    import torch  # local import keeps module importable without torch
 
     diagnostics: list[str] = []
     all_close = True
     max_abs_overall: Optional[float] = None
+    mere_acc = 0.0
+    mere_count = 0
+    mare_overall: Optional[float] = None
+    hard_fail_total = 0
+    outlier_total = 0
+    cap_total = 0
 
     if len(out_ref) != len(out_new):
         return {
@@ -70,15 +102,11 @@ def compare_outputs(out_ref: list, out_new: list,
                 f"output count: ref={len(out_ref)} new={len(out_new)}"
             ],
             "max_abs_diff": None,
-            "atol": atol, "rtol": rtol,
+            "mere": None, "mare": None,
+            "hard_fail": 0, "outlier": 0, "outlier_cap": 0,
         }
 
     for i, (r, n) in enumerate(zip(out_ref, out_new)):
-        # Both sides must be tensors. Silently skipping non-tensor pairs
-        # used to let scalar / numpy / mixed-structure outputs falsely
-        # classify as PASS (the loop body would never run on them). Fail
-        # explicitly so a model misconfiguration surfaces instead of
-        # quietly producing a green eval round.
         if not isinstance(r, torch.Tensor) or not isinstance(n, torch.Tensor):
             all_close = False
             diagnostics.append(
@@ -88,8 +116,9 @@ def compare_outputs(out_ref: list, out_new: list,
             )
             continue
 
-        rf = r.detach().cpu().float()
-        nf = n.detach().cpu().float()
+        rf_dtype = r.dtype
+        rf = r.detach().cpu()
+        nf = n.detach().cpu()
 
         if rf.shape != nf.shape:
             all_close = False
@@ -98,63 +127,132 @@ def compare_outputs(out_ref: list, out_new: list,
             )
             continue
 
-        if torch.isnan(nf).any() or torch.isinf(nf).any():
+        # NaN / Inf position must match. Position mismatch is unambiguous
+        # kernel breakage even when subsequent finite-value comparison
+        # would still pass (a NaN moved across cells produces wrong data).
+        ref_nan = torch.isnan(rf)
+        new_nan = torch.isnan(nf)
+        if not torch.equal(ref_nan, new_nan):
             all_close = False
-            n_bad = int((torch.isnan(nf) | torch.isinf(nf)).sum().item())
             diagnostics.append(
-                f"out{i}: kernel produced {n_bad} NaN/Inf value(s)"
+                f"out{i}: NaN position mismatch "
+                f"(ref={int(ref_nan.sum())}, new={int(new_nan.sum())})"
             )
             continue
 
-        abs_diff = (rf - nf).abs()
-        rel_diff = abs_diff / (rf.abs() + _REL_EPS)
-        max_abs = float(abs_diff.max().item())
-        max_rel = float(rel_diff.max().item())
+        ref_inf = torch.isinf(rf)
+        new_inf = torch.isinf(nf)
+        if not torch.equal(ref_inf, new_inf):
+            all_close = False
+            diagnostics.append(
+                f"out{i}: Inf position mismatch "
+                f"(ref={int(ref_inf.sum())}, new={int(new_inf.sum())})"
+            )
+            continue
+        if ref_inf.any() and not torch.equal(
+                torch.sign(rf[ref_inf]), torch.sign(nf[ref_inf])):
+            all_close = False
+            diagnostics.append(f"out{i}: Inf sign mismatch")
+            continue
 
+        # Bool tensors: no tolerance applies, demand exact equality.
+        if rf.dtype == torch.bool:
+            if not torch.equal(rf, nf):
+                all_close = False
+                diff_count = int((rf != nf).sum())
+                diagnostics.append(
+                    f"out{i}: bool mismatch ({diff_count}/{rf.numel()} cells)"
+                )
+            else:
+                diagnostics.append(f"out{i}: OK (bool, n={rf.numel()})")
+            continue
+
+        finite_mask = torch.isfinite(rf) & torch.isfinite(nf)
+        finite_count = int(finite_mask.sum())
+        if finite_count == 0:
+            diagnostics.append(
+                f"out{i}: all values Inf/NaN, skipping precision check"
+            )
+            continue
+
+        rf_finite = rf[finite_mask]
+        nf_finite = nf[finite_mask]
+        if nf_finite.dtype != rf_finite.dtype:
+            nf_finite = nf_finite.to(rf_finite.dtype)
+
+        rtol, atol, out_rtol, out_atol, out_ratio = _tolerance_for(rf_dtype)
+
+        rf_f = rf_finite.float()
+        nf_f = nf_finite.float()
+        abs_diff = torch.abs(rf_f - nf_f)
+        abs_ref = torch.abs(rf_f)
+        strict_tol = atol + rtol * abs_ref
+        relaxed_tol = out_atol + out_rtol * abs_ref
+
+        max_abs = float(abs_diff.max().item())
         if max_abs_overall is None or max_abs > max_abs_overall:
             max_abs_overall = max_abs
 
-        # akg_agents AND-of-maxima: fail when EITHER threshold blown.
-        if max_abs > atol or max_rel > rtol:
+        strict_pass = abs_diff <= strict_tol
+        relaxed_pass = abs_diff <= relaxed_tol
+        hard_fail = int((~relaxed_pass).sum().item())
+        outlier = int(((~strict_pass) & relaxed_pass).sum().item())
+        cap = int(rf_f.numel() * out_ratio)
+
+        # MERE / MARE diagnostics (CANN convention: divide by |ref|+atol).
+        denom = abs_ref + atol
+        per_elem = abs_diff / denom
+        mere_acc += float(per_elem.sum().item())
+        mere_count += int(per_elem.numel())
+        mare = float(per_elem.max().item())
+        if mare_overall is None or mare > mare_overall:
+            mare_overall = mare
+
+        hard_fail_total += hard_fail
+        outlier_total += outlier
+        cap_total += cap
+
+        if hard_fail > 0 or outlier > cap:
             all_close = False
-            # bad_elems counts how many elements broke either threshold —
-            # useful diagnostic the bare max numbers don't convey.
-            bad_abs = abs_diff > atol
-            bad_rel = rel_diff > rtol
-            n_bad = int((bad_abs | bad_rel).sum().item())
-            n_tot = int(rf.numel())
+            kind = "hard_fail" if hard_fail > 0 else "outlier-over-cap"
             diagnostics.append(
-                f"out{i}: max_abs={max_abs:.3e} (atol={atol:.1e}) "
-                f"max_rel={max_rel:.3e} (rtol={rtol:.1e}) "
-                f"bad_elems={n_bad}/{n_tot} ({100.0 * n_bad / n_tot:.2f}%)"
+                f"out{i}: {kind} dtype={rf_dtype} total={rf_f.numel()} "
+                f"hard_fail={hard_fail} outlier={outlier}/{cap} "
+                f"max_abs={max_abs:.3e} mare={mare:.3e} "
+                f"(rtol={rtol:.2e} atol={atol:.2e})"
             )
         else:
             diagnostics.append(
-                f"out{i}: OK (max_abs={max_abs:.3e} max_rel={max_rel:.3e})"
+                f"out{i}: OK (dtype={rf_dtype}, total={rf_f.numel()}, "
+                f"outlier={outlier}/{cap}, max_abs={max_abs:.3e})"
             )
 
+    mere_overall = (mere_acc / mere_count) if mere_count > 0 else None
     return {
         "correctness": all_close,
         "diagnostics": diagnostics,
         "max_abs_diff": max_abs_overall,
-        "atol": atol, "rtol": rtol,
+        "mere": mere_overall,
+        "mare": mare_overall,
+        "hard_fail": hard_fail_total,
+        "outlier": outlier_total,
+        "outlier_cap": cap_total,
     }
 
 
 def compare_outputs_per_case(out_ref_per_case: list,
-                             out_new_per_case: list,
-                             atol: float = DEFAULT_ATOL,
-                             rtol: float = DEFAULT_RTOL) -> dict:
-    """Multi-shape AND-of-maxima check; hard-gate on every case.
+                             out_new_per_case: list) -> dict:
+    """Multi-shape layered-tolerance check; hard-gate on every case.
 
-    Inputs are List[List[Tensor]] — one outer entry per shape case.
-    Returns {"correctness", "per_case", "diagnostics" (flat with
-    `[case i]` prefix), "max_abs_diff", "failed_indices", "worst_idx",
-    "worst_max_abs_diff", "atol", "rtol"}.
+    Inputs are `List[List[Tensor]]` — one outer entry per shape case.
+    Returns:
+      `{"correctness", "per_case", "diagnostics" (flat with `[case i]`
+       prefix), "max_abs_diff", "failed_indices", "worst_idx",
+       "worst_max_abs_diff"}`.
 
-    On multi-case failure appends one CORRECTNESS_SUMMARY line to the
-    flat diagnostics for failure_extractor to pick up; DIAGNOSE consumes
-    it directly.
+    On multi-case failure appends one `CORRECTNESS_SUMMARY` line to the
+    flat diagnostics for `failure_extractor` to pick up; DIAGNOSE
+    consumes it directly.
     """
     if len(out_ref_per_case) != len(out_new_per_case):
         return {
@@ -168,7 +266,6 @@ def compare_outputs_per_case(out_ref_per_case: list,
             "failed_indices": [],
             "worst_idx": None,
             "worst_max_abs_diff": None,
-            "atol": atol, "rtol": rtol,
         }
 
     per_case = []
@@ -178,12 +275,17 @@ def compare_outputs_per_case(out_ref_per_case: list,
 
     for i, (out_ref, out_new) in enumerate(zip(out_ref_per_case,
                                                out_new_per_case)):
-        sub = compare_outputs(list(out_ref), list(out_new), atol, rtol)
+        sub = compare_outputs(list(out_ref), list(out_new))
         per_case.append({
             "idx": i,
             "correctness": sub["correctness"],
             "diagnostics": sub["diagnostics"],
             "max_abs_diff": sub["max_abs_diff"],
+            "mere": sub.get("mere"),
+            "mare": sub.get("mare"),
+            "hard_fail": sub.get("hard_fail", 0),
+            "outlier": sub.get("outlier", 0),
+            "outlier_cap": sub.get("outlier_cap", 0),
         })
         if not sub["correctness"]:
             all_pass = False
@@ -220,5 +322,4 @@ def compare_outputs_per_case(out_ref_per_case: list,
         "failed_indices": failed_indices,
         "worst_idx": worst_idx,
         "worst_max_abs_diff": worst_max,
-        "atol": atol, "rtol": rtol,
     }

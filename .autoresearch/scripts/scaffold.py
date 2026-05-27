@@ -96,10 +96,10 @@ def scaffold_task_dir(
         "metric": {
             "primary": "latency_us",
             "lower_is_better": True,
-            # atol / rtol used to live here too; they're hardcoded in
-            # correctness.DEFAULT_ATOL / DEFAULT_RTOL now (single source
-            # of truth). Loader silently ignores any stale fields a user
-            # might still have in their task.yaml.
+            # atol / rtol used to live here too; tolerance is now a
+            # dtype-driven layered table in correctness._tolerance_for
+            # (single source of truth). Loader silently ignores any
+            # stale fields a user might still have in their task.yaml.
         },
         "agent": {
             "ref_file": "reference.py",
@@ -210,9 +210,9 @@ def _make_arg_parser() -> argparse.ArgumentParser:
                               "too strict for the chosen kernel style. Writes "
                               "`code_checker: {enabled: false}` into "
                               "task.yaml; flip the field to re-enable later."))
-    # --correctness-atol / --correctness-rtol used to live here. atol/rtol
-    # are now locked to correctness.DEFAULT_ATOL / DEFAULT_RTOL — see the
-    # comment in scaffold.create_task() and in correctness.py.
+    # --correctness-atol / --correctness-rtol used to live here. Tolerance
+    # is now a dtype-driven layered table in `correctness._tolerance_for`
+    # — see the comment in scaffold.create_task() and in correctness.py.
     return parser
 
 
@@ -223,7 +223,7 @@ def main():
     # Resolve DSL (and via it, backend).
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from utils.settings import default_dsl
-    from utils.hw_detect import derive_arch, fetch_worker_hardware
+    from utils.ar_env_client import derive_arch, fetch_worker_hardware
     from verifier.adapters.factory import (
         get_dsl_adapter, get_framework_adapter,
     )

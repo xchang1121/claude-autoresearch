@@ -51,11 +51,12 @@ class TaskConfig:
     lower_is_better: bool = True
     improvement_threshold: float = 0.0
 
-    # Correctness tolerance is no longer a TaskConfig field. atol/rtol are
-    # hardcoded in correctness.DEFAULT_ATOL / DEFAULT_RTOL — the previous
-    # task.yaml `metric.correctness_atol` / `correctness_rtol` paths fed
-    # four independent comparison sites (worker verify, batch verify,
-    # scaffold default, hardcoded fallback) and routinely drifted.
+    # Correctness tolerance is no longer a TaskConfig field. The dtype-
+    # driven layered table in `correctness._tolerance_for` owns it (per
+    # dtype: rtol / atol / outlier_rtol / outlier_atol / outlier_ratio).
+    # The previous task.yaml `metric.correctness_atol` / `correctness_rtol`
+    # paths fed four independent comparison sites (worker verify, batch
+    # verify, scaffold default, hardcoded fallback) and routinely drifted.
 
     # Constraints: {metric_name: (operator_str, threshold)}
     constraints: dict = field(default_factory=dict)

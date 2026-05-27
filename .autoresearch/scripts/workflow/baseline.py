@@ -36,9 +36,9 @@ _EXIT_FOR = {
 
 def run_baseline_init(task_dir: str, eval_json: str) -> int:
     """Library entry point. engine/baseline.py calls this after
-    eval_wrapper finishes; the return value becomes that script's exit
-    code. Side effects (progress, history, phase) are durable on disk
-    before this returns."""
+    `ar_cli.py verify` finishes; the return value becomes that script's
+    exit code. Side effects (progress, history, phase) are durable on
+    disk before this returns."""
     config = load_task_config(task_dir)
     if config is None:
         print("[baseline] ERROR: task.yaml not found", file=sys.stderr)

@@ -73,11 +73,13 @@ plan rationales.
 9. **AR scripts run as direct top-level Bash invocations only.**
    To *invoke* a blessed CLI the command must be a single foreground
    call: `python .autoresearch/scripts/engine/<name>.py <task_dir>
-   [args...]` (pipeline, baseline, create_plan, eval_wrapper,
-   quick_check, settle, parse_args). The top-level lifecycle scripts
-   use the flat path: `python .autoresearch/scripts/<name>.py`
-   (scaffold, resume, dashboard). Env-var prefixes, Python flags, and
-   FD redirection (`> log 2>&1`) are fine. Wrappers (`nohup`,
+   [args...]` (pipeline, baseline, create_plan, quick_check, settle,
+   parse_args). The top-level lifecycle scripts use the flat path:
+   `python .autoresearch/scripts/<name>.py` (ar_cli, scaffold, resume,
+   dashboard). `ar_cli.py` exposes the verify / env / worker
+   subcommands — `python .autoresearch/scripts/ar_cli.py verify ...`
+   replaces the old `eval_wrapper.py`. Env-var prefixes, Python flags,
+   and FD redirection (`> log 2>&1`) are fine. Wrappers (`nohup`,
    `bash -lc`, `sh -c`, subshells, `$(...)`), chains (`&&`, `||`, `;`,
    `|`), and backgrounding (`&`) are unsupported and rejected by
    `hooks/guard_bash.py`. Run multiple AR scripts as separate Bash

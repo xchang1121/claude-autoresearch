@@ -3,10 +3,9 @@
 Tier 1 (default, no hardware): compile + import + required-symbol check
 on ref.py (Model + get_inputs + get_init_inputs) and kernel.py (ModelNew).
 
-Tier 2 (--full): LOCAL smoke test. Loads both modules on `torch.npu:0`
-(or CPU), runs them, allclose via `utils.correctness`. NOT a proxy for
-the batch eval path — `batch/run.py` defaults to a remote worker, and
-a green --full says only "kernel runs locally".
+Tier 2 (--full): LOCAL smoke test via `ar_cli.py verify --mode verify-only`.
+Re-uses the same verify pipeline runtime calls, so batch pre-flight and
+per-round eval share one correctness gate — no drift between them.
 
 Each op runs in its own subprocess. Results: <batch_dir>/verify_results.json.
 
@@ -22,20 +21,15 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import manifest as mf
-# Reach up one level so we can import the shared correctness +
-# input_groups modules the eval-package verify script also uses. Single
-# source of truth for the allclose comparison — verify.py and
-# autoresearch's eval can't drift.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils.correctness import (  # noqa: E402
-    compare_outputs_per_case, DEFAULT_ATOL, DEFAULT_RTOL,
-)
 from utils.input_groups import resolve as _resolve_groups  # noqa: E402
+from utils.json_io import parse_sentinel_line  # noqa: E402
 
 VERIFY_RESULTS = "verify_results.json"
 TIER1_TIMEOUT = 30
@@ -43,11 +37,10 @@ TIER1_TIMEOUT = 30
 # minutes for kernels with constexpr-driven specialisations. Bump the
 # Tier-2 cap so multi-shape verifies aren't killed mid-loop.
 TIER2_TIMEOUT = 600
-# atol/rtol are imported from correctness — the single source of truth.
-# Previously this file accepted --atol/--rtol CLI flags + a
-# manifest.correctness_atol/_rtol override; those entry points were
-# removed to eliminate drift between batch verify and the per-round
-# worker verify.
+
+# Path to ar_cli.py — Tier 2 shells out to it instead of pulling the
+# verify pipeline in-process. Same contract every other caller sees.
+_AR_CLI = str(Path(__file__).resolve().parent.parent / "ar_cli.py")
 
 # Reference must export Model + get_init_inputs + one of (get_inputs,
 # get_input_groups). The "input provider" is checked separately (per
@@ -111,108 +104,93 @@ def _tier1_inspect(path: Path, required: tuple[str, ...]) -> dict:
     return out
 
 
-def _tier2_run(ref_path: Path, kernel_path: Path) -> dict:
-    """Run ref + kernel, compare outputs via the shared correctness module
-    (autoresearch's eval calls into the same `compare_outputs`).
+def _tier2_run(ref_path: Path, kernel_path: Path, op_name: str,
+               dsl: str) -> dict:
+    """Run `ar_cli.py verify --mode verify-only` against (ref, kernel).
 
-    atol/rtol are locked to `correctness.DEFAULT_ATOL / DEFAULT_RTOL`
-    (1e-2 / 1e-2 — matches akg/akg_agents bench_lite). The comparison
-    semantics are AND-of-maxima, also from akg_agents.
+    Builds a minimal task_config JSON (op_name + dsl), points the CLI at
+    the ref + kernel files via `@path`, parses the AR_VERIFY_RESULT:
+    sentinel back. The verify pipeline materialises its own tempdir,
+    runs eval_<op>.py twice (ref pass + kernel pass), and applies
+    `utils.correctness` AND-of-maxima — exactly the path per-round eval
+    takes, so batch pre-flight can't drift from runtime correctness.
+
+    Tier 2's old return fields (max_abs_diff / per_case / atol / rtol)
+    are derivable from the eval pipeline but not surfaced through the
+    EvalResult dataclass today; we report `status` + a one-line `msg`,
+    and stash the full sentinel payload under `verify_payload` for any
+    consumer that wants to dig in.
     """
-    out: dict = {"status": "skip", "msg": "", "max_abs_diff": None,
-                 "atol": DEFAULT_ATOL, "rtol": DEFAULT_RTOL}
+    out: dict = {"status": "skip", "msg": "", "verify_payload": None}
 
+    task_cfg = {
+        "name": op_name,
+        "framework": "torch",
+        "dsl": dsl or "triton_ascend",
+        # backend / arch are derived from DSL by the verifier adapter —
+        # passing only name + dsl + framework keeps Tier-2 callsite-blind
+        # to whichever NPU / GPU the host happens to expose. eval_timeout
+        # / warmup / run_times default in TaskConfig.
+        "eval_timeout": TIER2_TIMEOUT,
+    }
+    cfg_fd, cfg_path = tempfile.mkstemp(prefix=f"_verify_cfg_{op_name}_",
+                                         suffix=".json")
     try:
-        import torch  # type: ignore
-    except ImportError as e:
+        with os.fdopen(cfg_fd, "w", encoding="utf-8") as f:
+            json.dump(task_cfg, f)
+        cmd = [
+            sys.executable, _AR_CLI, "verify",
+            "--task-config", f"@{cfg_path}",
+            "--impl", f"@{kernel_path}",
+            "--reference", f"@{ref_path}",
+            "--mode", "verify-only",
+        ]
+        env = os.environ.copy()
+        env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=TIER2_TIMEOUT, env=env)
+        except subprocess.TimeoutExpired:
+            out["status"] = "ERROR"
+            out["msg"] = f"ar_cli.py verify timed out after {TIER2_TIMEOUT}s"
+            return out
+    finally:
+        try:
+            os.unlink(cfg_path)
+        except OSError:
+            pass
+
+    payload = parse_sentinel_line(proc.stdout, "AR_VERIFY_RESULT:")
+    if payload is None:
         out["status"] = "ERROR"
-        out["msg"] = f"torch import failed: {e}"
+        tail = (proc.stderr or proc.stdout or "").strip()[-400:]
+        out["msg"] = f"no AR_VERIFY_RESULT: sentinel (rc={proc.returncode}); {tail}"
         return out
-    try:
-        import torch_npu  # type: ignore  # noqa: F401
-    except Exception:
-        pass  # not on Ascend; fine — kernel will pick its own device
+    out["verify_payload"] = payload
 
-    import importlib.util
-    try:
-        ref_spec = importlib.util.spec_from_file_location("_v_ref", str(ref_path))
-        ref_mod = importlib.util.module_from_spec(ref_spec)  # type: ignore[arg-type]
-        ref_spec.loader.exec_module(ref_mod)  # type: ignore[union-attr]
-        kernel_spec = importlib.util.spec_from_file_location("_v_kernel", str(kernel_path))
-        kernel_mod = importlib.util.module_from_spec(kernel_spec)  # type: ignore[arg-type]
-        kernel_spec.loader.exec_module(kernel_mod)  # type: ignore[union-attr]
-    except Exception as e:
-        out["status"] = "ERROR"
-        out["msg"] = f"import: {type(e).__name__}: {e}"
-        return out
-
-    try:
-        init_args = ref_mod.get_init_inputs()
-        cases = _resolve_groups(ref_mod)
-    except Exception as e:
-        out["status"] = "ERROR"
-        out["msg"] = f"get_inputs/get_input_groups: {type(e).__name__}: {e}"
-        return out
-
-    # NPU when available; CPU otherwise. Kernels allocate output buffers
-    # via torch.empty_like(x), so CPU input → CPU output buffer → garbage.
-    npu_mod = getattr(torch, "npu", None)
-    if npu_mod is not None and getattr(npu_mod, "is_available", lambda: False)():
-        device = torch.device("npu:0")
-    else:
-        device = torch.device("cpu")
-
-    try:
-        ref = ref_mod.Model(*init_args).to(device).eval()
-        new = kernel_mod.ModelNew(*init_args).to(device).eval()
-    except Exception as e:
-        out["status"] = "ERROR"
-        out["msg"] = f"construct: {type(e).__name__}: {e}"
-        return out
-
-    def _to_list(x):
-        if isinstance(x, (tuple, list)):
-            return list(x)
-        return [x]
-
-    def _to_device(seq):
-        return [t.to(device) if hasattr(t, "to") else t for t in seq]
-
-    out_ref_per_case: list = []
-    out_new_per_case: list = []
-    try:
-        with torch.no_grad():
-            for case in cases:
-                inp = _to_device(list(case))
-                out_ref_per_case.append(_to_list(ref(*inp)))
-                out_new_per_case.append(_to_list(new(*inp)))
-    except Exception as e:
-        out["status"] = "ERROR"
-        out["msg"] = f"forward: {type(e).__name__}: {e}"
-        return out
-
-    cmp = compare_outputs_per_case(out_ref_per_case, out_new_per_case,
-                                   DEFAULT_ATOL, DEFAULT_RTOL)
-    out["max_abs_diff"] = cmp["max_abs_diff"]
-    out["num_cases"] = len(cases)
-    out["per_case"] = cmp["per_case"]
-    if cmp["correctness"]:
+    outcome = payload.get("outcome")
+    if outcome == "ok" and payload.get("correctness"):
         out["status"] = "PASS"
-        out["msg"] = f"OK (n={len(cases)})"
+        out["msg"] = "OK"
+    elif outcome == "infra_fail":
+        out["status"] = "ERROR"
+        out["msg"] = (payload.get("error") or "infra_fail").splitlines()[0][:200]
     else:
         out["status"] = "FAIL"
-        # Surface the first failing diagnostic — the full list goes into the
-        # JSON output for verify_results.json.
-        bad = next((d for d in cmp["diagnostics"] if "OK" not in d), None)
-        out["msg"] = bad or "correctness mismatch (no diagnostics)"
-        out["diagnostics"] = cmp["diagnostics"]
+        out["msg"] = (payload.get("error")
+                      or "correctness mismatch (no diagnostics)").splitlines()[0][:200]
     return out
 
 
 def _worker_main() -> int:
-    """Subprocess entry point. Writes JSON to a sidecar path on stdout's last line."""
+    """Subprocess entry point. Writes JSON to a sidecar path on stdout's last line.
+
+    Tier 2 has no `--tier-worker` route: it shells out to `ar_cli.py verify`
+    directly from `_verify_one`. The worker dispatch only handles the
+    import-time Tier-1 checks (compile / import / required-symbol).
+    """
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tier", choices=("1ref", "1kernel", "2"), required=True)
+    ap.add_argument("--tier", choices=("1ref", "1kernel"), required=True)
     ap.add_argument("--ref", required=True)
     ap.add_argument("--kernel", default="")
     ap.add_argument("--sidecar", required=True)
@@ -223,12 +201,8 @@ def _worker_main() -> int:
 
     if args.tier == "1ref":
         result = _tier1_inspect(ref_path, REF_REQUIRED)
-    elif args.tier == "1kernel":
+    else:  # tier == "1kernel"
         result = _tier1_inspect(kernel_path, KERNEL_REQUIRED)
-    else:  # tier == "2"
-        # atol/rtol are no longer worker arguments — locked to
-        # correctness.DEFAULT_ATOL / DEFAULT_RTOL.
-        result = _tier2_run(ref_path, kernel_path)
 
     Path(args.sidecar).write_text(json.dumps(result), encoding="utf-8")
     return 0
@@ -284,7 +258,7 @@ def _run_subprocess(*, tier: str, ref: Path, kernel: Path | None,
     return result
 
 
-def _verify_one(case: dict, full: bool) -> dict:
+def _verify_one(case: dict, full: bool, dsl: str) -> dict:
     op = case["op_name"]
     ref = Path(case["ref"])
     kernel = Path(case["kernel"])
@@ -303,8 +277,10 @@ def _verify_one(case: dict, full: bool) -> dict:
 
     if full:
         if tier1_ok:
-            out["tier2"] = _run_subprocess(tier="2", ref=ref, kernel=kernel,
-                                           timeout=TIER2_TIMEOUT)
+            t0 = time.time()
+            tier2 = _tier2_run(ref, kernel, op_name=op, dsl=dsl)
+            tier2["elapsed_s"] = round(time.time() - t0, 2)
+            out["tier2"] = tier2
         else:
             out["tier2"] = {"status": "skip",
                             "msg": "tier1 failed; skipping tier2",
@@ -391,15 +367,18 @@ def _print_table(results: dict, full: bool) -> None:
 
 
 def run_verification(batch_dir: Path, *, full: bool = False,
-                     only: str = "") -> int:
+                     only: str = "", dsl_override: str = "") -> int:
     """Run the verification loop programmatically (so prepare.py and other
     scripts can call us without subprocessing). Returns the same exit code
     main() would: 0 if everything passed, 1 if any FAIL/ERROR. All output
     still goes to stdout for the caller to surface.
 
-    atol/rtol are not configurable — they're constants in correctness.py.
-    Manifest's `correctness_atol` / `correctness_rtol` keys are now
-    ignored; the CLI no longer exposes overrides."""
+    Tier 2 invokes `ar_cli.py verify --mode verify-only`; tolerances live
+    in `utils.correctness` and are not exposed as flags here. `dsl_override`
+    (CLI `--dsl`) wins over manifest.dsl when both are present; the field
+    is required for Tier 2 because the verify pipeline picks a DSL adapter
+    to build eval_<op>.py.
+    """
     batch_dir = Path(batch_dir).resolve()
     if not batch_dir.is_dir():
         sys.exit(f"batch dir not found: {batch_dir}")
@@ -415,6 +394,10 @@ def run_verification(batch_dir: Path, *, full: bool = False,
     except mf.ManifestError as e:
         sys.exit(f"manifest validation failed: {e}")
 
+    dsl = (dsl_override or manifest_data.get("dsl") or "").strip()
+    if full and not dsl:
+        sys.exit("Tier 2 needs a DSL — declare `dsl:` in manifest or pass --dsl.")
+
     only_set = {s.strip() for s in (only or "").split(",") if s.strip()}
     if only_set:
         cases = [c for c in cases if c["op_name"] in only_set]
@@ -422,8 +405,8 @@ def run_verification(batch_dir: Path, *, full: bool = False,
             sys.exit("--only filtered out all ops")
 
     print(f"verify  batch_dir={batch_dir}  "
-          f"tier={'1+2' if full else '1'}  ops={len(cases)}  "
-          f"tols: atol={DEFAULT_ATOL:g}  rtol={DEFAULT_RTOL:g}")
+          f"tier={'1+2' if full else '1'}  ops={len(cases)}"
+          + (f"  dsl={dsl}" if full else ""))
     print()
 
     results: dict = {}
@@ -432,7 +415,7 @@ def run_verification(batch_dir: Path, *, full: bool = False,
         op = case["op_name"]
         sys.stdout.write(f"  [{i:>3}/{len(cases)}] {op} ... ")
         sys.stdout.flush()
-        rec = _verify_one(case, full=full)
+        rec = _verify_one(case, full=full, dsl=dsl)
         results[op] = rec
         ok = _summary_status(rec, full=full)
         sys.stdout.write(f"{ok}\n")
@@ -440,8 +423,7 @@ def run_verification(batch_dir: Path, *, full: bool = False,
 
     out_path = batch_dir / VERIFY_RESULTS
     out_path.write_text(json.dumps({
-        "full": full,
-        "atol": DEFAULT_ATOL, "rtol": DEFAULT_RTOL,
+        "full": full, "dsl": dsl,
         "results": results,
     }, indent=2), encoding="utf-8")
 
@@ -468,15 +450,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Pre-flight verify for batch directories.")
     ap.add_argument("batch_dir")
     ap.add_argument("--full", action="store_true",
-                    help="also run Tier 2 (execute ref + kernel, compare outputs); "
-                         "needs the same hardware /autoresearch eval would use")
+                    help="also run Tier 2 (execute ref + kernel via "
+                         "ar_cli.py verify --mode verify-only); needs the "
+                         "same hardware /autoresearch eval would use")
     ap.add_argument("--only", default="",
                     help="comma-separated op names")
+    ap.add_argument("--dsl", default="",
+                    help="DSL for Tier 2; overrides manifest.dsl when set")
     args = ap.parse_args()
 
     return run_verification(
         Path(args.batch_dir),
-        full=args.full, only=args.only,
+        full=args.full, only=args.only, dsl_override=args.dsl,
     )
 
 

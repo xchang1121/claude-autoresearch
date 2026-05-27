@@ -14,9 +14,10 @@ directly via the Bash tool:
   - `create_plan.py`          → EDIT on plan validation pass
                                 (called from PLAN / DIAGNOSE / REPLAN)
 
-The inner pipeline steps (quick_check / eval_wrapper / keep_or_discard /
-settle) are subprocess children of pipeline.py and never re-enter this hook,
-so they don't need their own phase constants or branches here.
+The inner pipeline steps (quick_check / ar_cli.py verify /
+keep_or_discard / settle) are subprocess children of pipeline.py and
+never re-enter this hook, so they don't need their own phase
+constants or branches here.
 """
 import json
 import os

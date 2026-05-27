@@ -54,3 +54,24 @@ def parse_last_json_line(text: str) -> Optional[dict]:
             except json.JSONDecodeError:
                 continue
     return None
+
+
+def parse_sentinel_line(text: str, sentinel: str) -> Optional[dict]:
+    """Find the last line prefixed by `sentinel` and parse its JSON body.
+
+    Used to read `AR_VERIFY_RESULT:` / `AR_ENV_RESULT:` outputs from
+    `ar_cli.py` subprocesses. The sentinel disambiguates the result
+    line from CANN/HCCL warnings that occasionally land on stdout
+    without trailing newlines and would otherwise corrupt a plain
+    `parse_last_json_line` extraction.
+    """
+    if not text or not sentinel:
+        return None
+    for line in reversed(text.splitlines()):
+        s = line.strip()
+        if s.startswith(sentinel):
+            try:
+                return json.loads(s[len(sentinel):])
+            except json.JSONDecodeError:
+                return None
+    return None

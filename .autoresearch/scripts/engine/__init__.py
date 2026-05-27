@@ -1,9 +1,11 @@
 """engine/ — orchestration scripts the LLM and hooks invoke via subprocess.
 
-Holds the blessed-script set: pipeline.py (main post-edit driver) plus the
-single-purpose CLIs it spawns (quick_check, eval_wrapper, settle), the
-BASELINE-phase entry (baseline.py), the PLAN-phase entry (create_plan.py),
-and the /autoresearch arg dispatcher (parse_args.py).
+Holds the blessed-script set: pipeline.py (main post-edit driver) plus
+the single-purpose CLIs it spawns (quick_check, settle) and the
+sentinel-tagged top-level CLI it shells out to for verify+profile
+(`ar_cli.py verify`). Also: the BASELINE-phase entry (baseline.py),
+the PLAN-phase entry (create_plan.py), and the /autoresearch arg
+dispatcher (parse_args.py).
 
 Body-level logic (record_round, run_baseline_init) lives in workflow/
 and is now called in-process; the earlier shell wrappers

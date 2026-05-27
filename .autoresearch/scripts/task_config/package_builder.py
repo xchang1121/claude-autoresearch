@@ -41,11 +41,11 @@ EVAL_SIDECAR = "eval_result.json"
 
 def _detect_device_type(config: TaskConfig) -> str:
     """torch.device prefix ('npu' / 'cuda' / 'cpu'). Derived from DSL:
-    DSL adapter declares its backend, hw_detect maps backend → device_type."""
+    DSL adapter declares its backend, ar_env_client maps backend → device_type."""
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
-    from utils.hw_detect import device_type_for_backend
+    from utils.ar_env_client import device_type_for_backend
     from verifier.adapters.factory import get_dsl_adapter
     try:
         backend = get_dsl_adapter(config.dsl or "").default_backend()
@@ -350,9 +350,7 @@ if DO_KERNEL_PHASES:
 # Phase B import failed). `correctness` is bundled at tarball root and
 # is needed regardless of mode by other tooling — keep the import
 # unconditional.
-from correctness import (
-    compare_outputs_per_case, DEFAULT_ATOL, DEFAULT_RTOL,
-)
+from correctness import compare_outputs_per_case
 
 if kernel_imported:
     out_ref_per_case = []
@@ -406,8 +404,7 @@ if kernel_imported:
     else:
         try:
             cmp_result = compare_outputs_per_case(
-                out_ref_per_case, out_new_per_case,
-                DEFAULT_ATOL, DEFAULT_RTOL)
+                out_ref_per_case, out_new_per_case)
 
             for d in cmp_result["diagnostics"]:
                 print(d, file=sys.stderr)

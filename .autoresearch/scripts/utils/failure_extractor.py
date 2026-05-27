@@ -32,7 +32,7 @@ class EvalDiagnostic:
     """Structured failure summary produced by `extract_failure_signals`.
 
     Single source of truth for the failure_signals schema that flows
-    eval subprocess stderr -> failure_extractor -> eval_wrapper ->
+    eval subprocess stderr -> failure_extractor -> ar_cli.py verify ->
     record_round -> history.jsonl -> guidance prompt. Every consumer
     either takes an instance directly or reads its `to_dict()` form
     back off disk; the field set is owned here.

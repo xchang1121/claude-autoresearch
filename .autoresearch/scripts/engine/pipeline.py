@@ -33,7 +33,7 @@ from phase_machine import (
     get_guidance, auto_rollback, load_progress, edit_marker_path,
     pending_settle_path, FINISH,
 )
-from utils.json_io import parse_last_json_line
+from utils.json_io import parse_last_json_line, parse_sentinel_line
 from workflow import PhaseController, record_round
 
 
@@ -229,11 +229,11 @@ def main():
     print("[PIPELINE] Quick check PASS", flush=True)
 
     # === Step 2: Eval ===
-    # Multi-shape: scale the eval_wrapper subprocess wall-clock cap by
+    # Multi-shape: scale the verify-subprocess wall-clock cap by
     # num_cases. eval_request.effective_timeout already scales the
     # WORKER-side budget (HTTP timeout / local subprocess kill); this
-    # is the OUTER cap that wraps the eval_wrapper run. Use the same
-    # per-shape multiplier + 300s buffer for IPC / package transfer.
+    # is the OUTER cap that wraps the `ar_cli.py verify` run. Use the
+    # same per-shape multiplier + 300s buffer for IPC / package transfer.
     try:
         from task_config.eval_request import count_ref_cases
         probed_cases = count_ref_cases(task_dir, config)
@@ -251,7 +251,13 @@ def main():
               f"({per_shape_budget}s/shape x {num_cases} cases + 300s buffer)",
               flush=True)
     print("[PIPELINE] Running eval...", flush=True)
-    eval_cmd = [sys.executable, os.path.join(SCRIPT_DIR, "eval_wrapper.py"), task_dir] + worker_flag
+    eval_cmd = [
+        sys.executable, os.path.join(SCRIPTS_ROOT, "ar_cli.py"), "verify",
+        "--task-config", f"@{os.path.join(task_dir, 'task.yaml')}",
+        "--impl",        f"@{os.path.join(task_dir, 'kernel.py')}",
+        "--reference",   f"@{os.path.join(task_dir, config.ref_file)}",
+        "--task-dir",    task_dir,
+    ] + worker_flag
     # Run in a throwaway tmpdir so CANN's unsolicited PROF_* dumps don't
     # accumulate in the repo (torch_npu.profiler dumps to cwd; a tmpdir
     # that gets deleted afterwards catches them silently).
@@ -266,10 +272,11 @@ def main():
     finally:
         shutil.rmtree(_eval_tmpdir, ignore_errors=True)
 
-    eval_json = parse_last_json_line(ev.stdout)
+    eval_json = parse_sentinel_line(ev.stdout, "AR_VERIFY_RESULT:")
     if eval_json is None:
         auto_rollback(task_dir)
-        print(f"[PIPELINE] EVAL ERROR: no JSON output. stderr: {ev.stderr[:200]}")
+        print(f"[PIPELINE] EVAL ERROR: no AR_VERIFY_RESULT: sentinel in "
+              f"stdout. stderr: {ev.stderr[:200]}")
         sys.exit(1)
 
     correctness = eval_json.get("correctness", False)

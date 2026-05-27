@@ -36,7 +36,7 @@ from utils.settings import hallucinated_scripts
 # treated as an unknown script and rejected with a sorted list of
 # valid names.
 _BLESSED_SCRIPTS = {
-    "quick_check.py", "eval_wrapper.py",
+    "quick_check.py", "ar_cli.py",
     "scaffold.py", "baseline.py", "dashboard.py",
     "create_plan.py", "settle.py", "pipeline.py", "resume.py",
     "parse_args.py",
@@ -54,7 +54,15 @@ _LIBRARY_NOT_CLI = {
     ),
     "task_config.py": "task_config.py is a library, not a CLI.",
     "settings.py": "settings.py is a library, not a CLI.",
-    "hw_detect.py": "hw_detect.py is a library, not a CLI.",
+    "ar_env_client.py": (
+        "ar_env_client.py is a library bridge; call `python "
+        ".autoresearch/scripts/ar_cli.py env <detect|check|list-dsls>` "
+        "directly for env queries."
+    ),
+    "eval_wrapper.py": (
+        "eval_wrapper.py was removed; use `python "
+        ".autoresearch/scripts/ar_cli.py verify ...` instead."
+    ),
     "utils.py": "hooks/utils.py is a library, not a CLI.",
     "failure_extractor.py": "failure_extractor.py is a library, not a CLI.",
     "code_checker.py": (

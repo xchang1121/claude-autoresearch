@@ -18,8 +18,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, SCRIPTS_ROOT)
 sys.path.insert(0, SCRIPT_DIR)
+from task_config import load_task_config
 from utils.failure_extractor import format_for_stdout
-from utils.json_io import parse_last_json_line
+from utils.json_io import parse_sentinel_line
 from workflow import run_baseline_init
 
 
@@ -33,6 +34,12 @@ def main():
     task_dir = os.path.abspath(args.task_dir)
     os.makedirs(os.path.join(task_dir, ".ar_state"), exist_ok=True)
 
+    config = load_task_config(task_dir)
+    if config is None:
+        print("[baseline] ERROR: task.yaml not found in task_dir",
+              file=sys.stderr)
+        sys.exit(1)
+
     extra = []
     if args.device_id is not None:
         extra += ["--device-id", str(args.device_id)]
@@ -43,7 +50,11 @@ def main():
     _eval_tmpdir = tempfile.mkdtemp(prefix="ar_eval_")
     try:
         ev = subprocess.run(
-            [sys.executable, os.path.join(SCRIPT_DIR, "eval_wrapper.py"), task_dir] + extra,
+            [sys.executable, os.path.join(SCRIPTS_ROOT, "ar_cli.py"), "verify",
+             "--task-config", f"@{os.path.join(task_dir, 'task.yaml')}",
+             "--impl",        f"@{os.path.join(task_dir, 'kernel.py')}",
+             "--reference",   f"@{os.path.join(task_dir, config.ref_file)}",
+             "--task-dir",    task_dir] + extra,
             capture_output=True, text=True, cwd=_eval_tmpdir,
         )
     finally:
@@ -51,27 +62,30 @@ def main():
     if ev.stderr:
         print(ev.stderr, end="", file=sys.stderr, flush=True)
 
-    # Echo eval_wrapper stdout EXCEPT the trailing JSON line — that line is
-    # parsed below and (on failure) re-rendered via format_for_stdout, so
-    # printing it raw here would duplicate the failure info as unreadable JSON.
-    eval_data = parse_last_json_line(ev.stdout)
+    # Echo verify stdout EXCEPT the sentinel-tagged result line — that
+    # line is parsed below and (on failure) re-rendered via
+    # format_for_stdout, so printing it raw here would duplicate the
+    # failure info as unreadable JSON.
+    eval_data = parse_sentinel_line(ev.stdout, "AR_VERIFY_RESULT:")
     if ev.stdout:
         lines = ev.stdout.splitlines(keepends=True)
         if eval_data is not None and lines:
-            # parse_last_json_line consumes the LAST non-empty line; drop it.
+            # parse_sentinel_line picked the LAST AR_VERIFY_RESULT: line; drop it.
             for i in range(len(lines) - 1, -1, -1):
-                if lines[i].strip():
+                if lines[i].strip().startswith("AR_VERIFY_RESULT:"):
                     lines.pop(i)
                     break
         if lines:
             print("".join(lines), end="", flush=True)
 
     if ev.returncode != 0:
-        print(f"[baseline] eval_wrapper failed (rc={ev.returncode})", file=sys.stderr)
+        print(f"[baseline] ar_cli.py verify failed (rc={ev.returncode})",
+              file=sys.stderr)
         sys.exit(ev.returncode)
 
     if eval_data is None:
-        print("[baseline] ERROR: no JSON output from eval_wrapper", file=sys.stderr)
+        print("[baseline] ERROR: no AR_VERIFY_RESULT: sentinel in stdout",
+              file=sys.stderr)
         sys.exit(1)
 
     # Pretty-print structured failure signals (UB overflow, aivec trap, OOM,
