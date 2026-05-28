@@ -198,13 +198,42 @@ def merge_sidecars(ref: Optional[dict],
     }
 
 
+import math as _math
+
+
+def _sanitize_floats(obj):
+    """Recursively replace `inf` / `-inf` / `nan` with `None`.
+
+    FastAPI's default JSON encoder rejects non-finite floats with
+    `ValueError: Out of range float values are not JSON compliant`,
+    bubbling up as `HTTP 500` from `worker/server.py:/api/v1/run`.
+    Seed kernels that report `latency_us=0` (`inf` speedup) or
+    `nan` from a profiler-trace parse failure both hit this.
+    Replacing with `None` (→ JSON `null`) lets the caller surface
+    the result and decide how to flag it — usually as `infra_fail`,
+    not as a worker-side crash.
+    """
+    if isinstance(obj, float):
+        return None if not _math.isfinite(obj) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_floats(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_floats(v) for v in obj)
+    return obj
+
+
 def build_response(device_id: int, returncode: int, log: str,
                    eval_result: Optional[dict]) -> dict:
     """Both transports return the same dict shape; centralise it here so
-    `task_config.eval_assemble` is transport-agnostic."""
+    `task_config.eval_assemble` is transport-agnostic. `eval_result`
+    runs through `_sanitize_floats` so non-finite values can't poison
+    the FastAPI JSON encoder (would otherwise surface as HTTP 500 →
+    infra_fail with no useful diagnostics)."""
     return {
         "device_id": device_id,
         "returncode": returncode,
         "log": log,
-        "eval_result": eval_result,
+        "eval_result": _sanitize_floats(eval_result),
     }
