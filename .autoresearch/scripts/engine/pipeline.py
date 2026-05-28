@@ -17,52 +17,49 @@ Output: human-readable status to stdout. Claude Code sees it and acts accordingl
 """
 import json
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, SCRIPTS_ROOT)
 sys.path.insert(0, SCRIPT_DIR)
-from task_config import load_task_config
-from utils.failure_extractor import format_for_stdout
+from task_config import load_task_config, run_eval
+from utils.failure_extractor import extract_failure_signals, format_for_stdout
 from phase_machine import (
     get_active_item,
     get_guidance, auto_rollback, load_progress, edit_marker_path,
     pending_settle_path, FINISH,
 )
-from utils.json_io import parse_last_json_line, parse_sentinel_line
-from workflow import PhaseController, record_round
+from workflow import PhaseController, PlanStore, record_round
+from quick_check import check_editable_files, _run_smoke_test as _run_smoke
 
 
 def _run_settle(task_dir: str, kd_json: dict) -> tuple:
-    """Invoke settle.py with the given kd_json.
+    """Settle the active plan item in-process. Returns
+    ``(ok: bool, error_tail: str, settle_json: dict | None)``.
 
-    Returns (rc, stdout_tail, stderr_tail, settle_json):
-      - rc:           settle.py exit code
-      - stdout_tail:  last 400 chars of stdout (for error reports)
-      - stderr_tail:  last 400 chars of stderr
-      - settle_json:  parsed last-JSON-line from stdout, or None on
-                      parse failure / non-zero rc. Carries the
-                      `settled_item` id, which the caller needs for the
-                      status report — `get_active_item()` AFTER settle
-                      points at the NEXT ACTIVE item, not the one we
-                      just settled.
+    Previously this subprocessed `settle.py` and parsed its stdout.
+    Same process tree as pipeline.py and the rest of the engine, no
+    subprocess / rc-decoding ceremony. `settle.py` itself stays as a
+    standalone CLI for manual replay; this in-process path duplicates
+    its body verbatim, so behaviour is identical.
     """
-    settle = subprocess.run(
-        [sys.executable, os.path.join(SCRIPT_DIR, "settle.py"),
-         task_dir, json.dumps(kd_json)],
-        capture_output=True, text=True, timeout=10,
-    )
-    settle_json = parse_last_json_line(settle.stdout) if settle.returncode == 0 else None
-    return (
-        settle.returncode,
-        (settle.stdout or "").strip()[-400:],
-        (settle.stderr or "").strip()[-400:],
-        settle_json,
-    )
+    try:
+        decision = kd_json.get("decision", "FAIL")
+        best_metric = kd_json.get("best_metric")
+        metric_val = best_metric if decision == "KEEP" else None
+
+        store = PlanStore(task_dir)
+        if not store.exists():
+            return False, "plan.md not found", None
+        settled_item_id, _settled_desc = store.settle_active(decision, metric_val)
+        return True, "", {
+            "settled_item": settled_item_id,
+            "decision": decision,
+            "metric": metric_val,
+        }
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}", None
 
 
 def _persist_pending_settle(task_dir: str, kd_json: dict) -> None:
@@ -78,16 +75,15 @@ def _clear_pending_settle(task_dir: str) -> None:
         os.remove(path)
 
 
-def _emit_settle_failure(task_dir: str, rc: int, tail_out: str,
-                         tail_err: str) -> None:
-    print(f"[PIPELINE] SETTLE FAILED (rc={rc}). plan.md was NOT updated. "
+def _emit_settle_failure(task_dir: str, error_tail: str) -> None:
+    print(f"[PIPELINE] SETTLE FAILED. plan.md was NOT updated. "
           f"progress.json + history.jsonl already moved during this round; "
           f"re-running this script will RETRY SETTLE ONLY (kd_json was "
           f"persisted to .ar_state/.pending_settle.json) — it will NOT "
           f"re-run quick_check/eval/keep_or_discard.\n"
           f"\n"
           f"Recovery options (do NOT hand-edit plan.md):\n"
-          f"  1. Fix the underlying cause from the stderr tail below, "
+          f"  1. Fix the underlying cause from the error tail below, "
           f"then re-run pipeline.py — the replay-only path will retry "
           f"settle on the same kd_json.\n"
           f"  2. If the failure is structural (plan.md malformed, no "
@@ -99,8 +95,7 @@ def _emit_settle_failure(task_dir: str, rc: int, tail_out: str,
           f"pending_settle.json. The orphan history.jsonl row stays "
           f"(audit trail) but no longer corresponds to any plan item.\n"
           f"\n"
-          f"stdout tail: {tail_out}\n"
-          f"stderr tail: {tail_err}", file=sys.stderr)
+          f"error: {error_tail}", file=sys.stderr)
 
 
 def _post_settle(task_dir: str, decision: str, settled_id: str) -> None:
@@ -181,9 +176,9 @@ def main():
             sys.exit(1)
         print(f"[PIPELINE] Retrying settle from {os.path.basename(pending_path)} "
               f"(skipping quick_check/eval/keep_or_discard).", flush=True)
-        rc, tail_out, tail_err, settle_json = _run_settle(task_dir, kd_json)
-        if rc != 0:
-            _emit_settle_failure(task_dir, rc, tail_out, tail_err)
+        ok, error_tail, settle_json = _run_settle(task_dir, kd_json)
+        if not ok:
+            _emit_settle_failure(task_dir, error_tail)
             sys.exit(1)
         _clear_pending_settle(task_dir)
         # Use settle.py's reported settled_item, not get_active_item — by
@@ -204,24 +199,35 @@ def main():
     desc = active["description"] if active else "optimization round"
     plan_item = active["id"] if active else None
 
-    # Worker flag
-    worker_flag = []
-    if config.worker_urls:
-        worker_flag = ["--worker-url", config.worker_urls[0]]
-
     # === Step 1: Quick check ===
+    # In-process: check_editable_files + smoke test. quick_check.py
+    # stays as a standalone CLI for manual replay; here we call the
+    # same helpers directly, no subprocess / rc-decoding / stdout-parse.
     print("[PIPELINE] Running quick_check...", flush=True)
-    qc = subprocess.run(
-        [sys.executable, os.path.join(SCRIPT_DIR, "quick_check.py"), task_dir],
-        capture_output=True, text=True, timeout=60,
-    )
-    if qc.returncode != 0 or "OK" not in qc.stdout:
+    try:
+        file_issues = check_editable_files(task_dir, config)
+        smoke_errors = _run_smoke(task_dir, config)
+    except Exception as exc:
+        file_issues = [{"file": "(internal)",
+                        "report": f"quick_check crashed: "
+                                  f"{type(exc).__name__}: {exc}",
+                        "errors": []}]
+        smoke_errors = []
+
+    if file_issues or smoke_errors:
         auto_rollback(task_dir)
-        # Clear edit marker — rollback means we're back to clean state
         marker = edit_marker_path(task_dir)
         if os.path.exists(marker):
             os.remove(marker)
-        print(f"[PIPELINE] QUICK CHECK FAIL: {qc.stdout[:200]}")
+        blob = {"ok": False}
+        if file_issues:
+            blob["file_issues"] = file_issues
+        if smoke_errors:
+            blob["smoke_errors"] = smoke_errors
+        # Trim to keep the rollback-context tight; full detail is also in
+        # stdout from the in-process call paths.
+        print(f"[PIPELINE] QUICK CHECK FAIL: "
+              f"{json.dumps(blob, ensure_ascii=False)[:200]}")
         print(f"[PIPELINE] Auto-rolled back. Fix and re-edit.")
         print(get_guidance(task_dir))
         sys.exit(0)
@@ -229,64 +235,44 @@ def main():
     print("[PIPELINE] Quick check PASS", flush=True)
 
     # === Step 2: Eval ===
-    # Multi-shape: scale the verify-subprocess wall-clock cap by
-    # num_cases. eval_request.effective_timeout already scales the
-    # WORKER-side budget (HTTP timeout / local subprocess kill); this
-    # is the OUTER cap that wraps the `ar_cli.py verify` run. Use the
-    # same per-shape multiplier + 300s buffer for IPC / package transfer.
-    try:
-        from task_config.eval_request import count_ref_cases
-        probed_cases = count_ref_cases(task_dir, config)
-    except Exception:
-        probed_cases = 1
-    progress_for_count = load_progress(task_dir) or {}
-    num_cases = progress_for_count.get("num_cases")
-    if not isinstance(num_cases, int) or num_cases < 1:
-        num_cases = probed_cases
-    per_shape_budget = int(getattr(config, "eval_timeout", 600) or 600)
-    pipeline_eval_cap = per_shape_budget * max(num_cases, 1) + 300
-    if num_cases > 1:
-        print(f"[PIPELINE] multi-shape: num_cases={num_cases}, "
-              f"eval subprocess cap = {pipeline_eval_cap}s "
-              f"({per_shape_budget}s/shape x {num_cases} cases + 300s buffer)",
-              flush=True)
+    # In-process: task_config.run_eval. The eval pipeline itself still
+    # subprocesses `eval_<op>.py` (local) or POSTs to a remote worker
+    # — that's where crash isolation lives. Removing the extra
+    # pipeline.py → ar_cli.py verify subprocess layer eliminates the
+    # tempdir / sentinel-parse / rc-gate plumbing that turned a recoverable
+    # kernel_fail into a baseline deadlock.
     print("[PIPELINE] Running eval...", flush=True)
-    eval_cmd = [
-        sys.executable, os.path.join(SCRIPTS_ROOT, "ar_cli.py"), "verify",
-        "--task-config", f"@{os.path.join(task_dir, 'task.yaml')}",
-        "--impl",        f"@{os.path.join(task_dir, 'kernel.py')}",
-        "--reference",   f"@{os.path.join(task_dir, config.ref_file)}",
-        "--task-dir",    task_dir,
-    ] + worker_flag
-    # Run in a throwaway tmpdir so CANN's unsolicited PROF_* dumps don't
-    # accumulate in the repo (torch_npu.profiler dumps to cwd; a tmpdir
-    # that gets deleted afterwards catches them silently).
-    _eval_tmpdir = tempfile.mkdtemp(prefix="ar_eval_")
     try:
-        ev = subprocess.run(eval_cmd, capture_output=True, text=True,
-                            timeout=pipeline_eval_cap, cwd=_eval_tmpdir)
-    except subprocess.TimeoutExpired:
+        result = run_eval(task_dir, config,
+                          device_id=None,
+                          worker_urls=config.worker_urls or None)
+    except Exception as exc:
         auto_rollback(task_dir)
-        print(f"[PIPELINE] EVAL TIMEOUT (>{pipeline_eval_cap}s). Rolled back.")
-        sys.exit(0)
-    finally:
-        shutil.rmtree(_eval_tmpdir, ignore_errors=True)
-
-    eval_json = parse_sentinel_line(ev.stdout, "AR_VERIFY_RESULT:")
-    if eval_json is None:
-        auto_rollback(task_dir)
-        print(f"[PIPELINE] EVAL ERROR: no AR_VERIFY_RESULT: sentinel in "
-              f"stdout. stderr: {ev.stderr[:200]}")
+        print(f"[PIPELINE] EVAL ERROR: run_eval raised "
+              f"{type(exc).__name__}: {exc}")
         sys.exit(1)
 
-    correctness = eval_json.get("correctness", False)
-    metrics = eval_json.get("metrics", {})
-    print(f"[PIPELINE] Eval: correctness={correctness}, metrics={metrics}", flush=True)
+    eval_json = {
+        "outcome": result.outcome.value,
+        "correctness": result.correctness,
+        "metrics": result.metrics or {},
+        "error": result.error,
+        "error_source": result.error_source,
+    }
+    if not result.correctness or result.error:
+        eval_json["failure_signals"] = extract_failure_signals(
+            result.raw_output).to_dict()
+        eval_json["raw_output_tail"] = (result.raw_output or "")[-4000:]
+
+    correctness = eval_json["correctness"]
+    metrics = eval_json["metrics"]
+    print(f"[PIPELINE] Eval: correctness={correctness}, metrics={metrics}",
+          flush=True)
 
     # infra_fail: eval pipeline broke before kernel was meaningfully
     # exercised. Roll back and skip the round — recording a FAIL here
     # would mislead later DIAGNOSE / KEEP / DISCARD.
-    if eval_json.get("outcome") == "infra_fail":
+    if eval_json["outcome"] == "infra_fail":
         auto_rollback(task_dir)
         print(f"[PIPELINE] INFRA_FAIL: {eval_json.get('error', 'no data')}. "
               f"Rolled back, not recording round.", flush=True)
@@ -295,8 +281,8 @@ def main():
     # Surface structured failure signals (UB overflow, aivec trap, OOM, ...)
     # extracted from the worker's raw log. Without this, Claude sees only a
     # generic "verify failed" string and has nothing to act on. Fall back
-    # through increasingly coarse sources so *something* always reaches the
-    # user on failure.
+    # through increasingly coarse sources so *something* always reaches
+    # the user on failure.
     if not correctness or eval_json.get("error"):
         if eval_json.get("error"):
             print(f"[PIPELINE] Error: {eval_json['error']}", flush=True)
@@ -304,8 +290,6 @@ def main():
         if pretty:
             print(pretty, flush=True)
         elif eval_json.get("raw_output_tail"):
-            # No known pattern matched — dump the tail raw so Claude still
-            # has something concrete to work with.
             print("[PIPELINE] Worker log tail (no structured signals matched):",
                   flush=True)
             print(eval_json["raw_output_tail"], flush=True)
@@ -331,10 +315,10 @@ def main():
     # kd_json is persisted to .pending_settle.json so the NEXT invocation
     # of pipeline.py retries settle alone (no second eval, no duplicate
     # history row). The advance-phase block is gated on settle success.
-    rc, tail_out, tail_err, _settle_json = _run_settle(task_dir, kd_json)
-    if rc != 0:
+    ok, error_tail, _settle_json = _run_settle(task_dir, kd_json)
+    if not ok:
         _persist_pending_settle(task_dir, kd_json)
-        _emit_settle_failure(task_dir, rc, tail_out, tail_err)
+        _emit_settle_failure(task_dir, error_tail)
         sys.exit(1)
     _clear_pending_settle(task_dir)
 
