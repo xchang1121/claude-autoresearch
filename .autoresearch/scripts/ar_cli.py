@@ -561,10 +561,22 @@ def _filter_by_mode(eval_dict: dict, mode: str) -> dict:
 
 
 def _emit_verify_result(payload: dict) -> int:
+    """Print sentinel-tagged JSON and return rc=0 whenever a result is
+    emitted — `kernel_fail` and `infra_fail` are still informational
+    outcomes the caller reads off the JSON, not CLI-level errors.
+
+    Reserving non-zero for true CLI failures matches the contract the
+    eval-wrapper layer used to expose: stdout-JSON-or-bust. baseline.py
+    in particular aborts on any non-zero rc *before* parsing the JSON
+    body, so distinguishing ok vs kernel_fail at exit-code level would
+    deadlock the BASELINE → PLAN transition for any seed kernel that
+    happened to fail correctness on round 0 (which is a routine,
+    expected path — first plan items just rewrite the seed).
+    """
     sys.stdout.write("\n" + _VERIFY_SENTINEL
                      + json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
-    return 0 if payload.get("outcome") == "ok" else 1
+    return 0
 
 
 def _verify_infra_fail(msg: str) -> dict:
