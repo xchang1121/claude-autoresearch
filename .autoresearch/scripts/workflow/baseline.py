@@ -1,11 +1,10 @@
-"""Round-0 SEED eval recorder. `run_baseline_init(task_dir, eval_json)`
+"""Round-0 SEED eval recorder. `run_baseline_init(task_dir, eval_data)`
 is called in-process by engine/baseline.py and returns that script's
 exit code (see `_EXIT_FOR`). Owns the post-baseline phase transition
 via PhaseController.on_baseline_settled — the post-Bash hook only
 emits guidance off the phase already on disk."""
 from __future__ import annotations
 
-import json
 import os
 import sys
 
@@ -34,17 +33,18 @@ _EXIT_FOR = {
 }
 
 
-def run_baseline_init(task_dir: str, eval_json: str) -> int:
-    """Library entry point. engine/baseline.py calls this after
-    `ar_cli.py verify` finishes; the return value becomes that script's
-    exit code. Side effects (progress, history, phase) are durable on
-    disk before this returns."""
+def run_baseline_init(task_dir: str, eval_data: dict) -> int:
+    """Library entry point. engine/baseline.py calls this with the
+    eval-result dict (``outcome`` / ``correctness`` / ``metrics`` / ``error``
+    / ``error_source`` / optional ``failure_signals`` / ``raw_output_tail``);
+    the return value becomes that script's exit code. Side effects
+    (progress, history, phase) are durable on disk before this returns.
+    """
     config = load_task_config(task_dir)
     if config is None:
         print("[baseline] ERROR: task.yaml not found", file=sys.stderr)
         return 1
 
-    eval_data = json.loads(eval_json)
     existing = load_progress(task_dir) or Progress()
     head_commit = current_head_short(task_dir) or "unknown"
     reduction = reduce_baseline_init(
