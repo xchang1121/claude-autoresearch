@@ -155,10 +155,12 @@ remote_worker:
 ```bash
 cd autoresearch
 python scripts/ar_cli.py worker --remote-host my-npu --start \
-    --backend ascend --arch ascend910b3 --devices <NPU-id>
+    --backend ascend --devices <NPU-id>
 ```
 
 一条命令做两件事：(1) SSH 到远端启动 daemon (2) 本机起 `ssh -L 9111:127.0.0.1:9111`。后续所有调用透传 tunnel。
+
+`--arch` 不传时由远端 ar_cli 用 `npu-smi info` 自动推断。如需覆盖，加 `--arch ascend910b<N>` 即可。
 
 验证：
 ```bash
@@ -345,7 +347,7 @@ A/B/C 均适用：
 |---|---|---|---|---|
 | `--start` / `--stop` / `--status` | flag | ✅ 三选一 | — | 互斥 |
 | `--backend` | `ascend` / `cuda` / `cpu` | `--start` 时必填 | — | 硬件后端 |
-| `--arch` | 字符串（如 `ascend910b3`） | `--start` 时必填 | — | 写入 worker 自报的 arch |
+| `--arch` | 字符串（如 `ascend910b3`） | ❌（`--start` 时不传则由 `npu-smi info` 自动推断） | 自动推断 | 写入 worker 自报的 arch |
 | `--devices` | 逗号分隔（如 `2,5`） | `--start` 时必填 | — | worker 管理的卡集合 |
 | `--port` | int | ❌ | 9111（[config.yaml](config.yaml): `worker.port`） | TCP 端口 |
 | `--host` | IP | ❌ | `127.0.0.1` | 绑定地址，**默认强制 loopback**（worker 只能经 SSH tunnel 访问，禁止暴露公网） |

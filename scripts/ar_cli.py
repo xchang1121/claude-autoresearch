@@ -10,17 +10,16 @@ hit the remote daemon. Remote host config lives in
 
 Examples:
 
-    # local daemon control
-    ar_cli worker --start --backend ascend --arch ascend910b3 \\
-        --devices 6 --port 9111 --bg
+    # local daemon control (arch auto-derived from --devices via npu-smi)
+    ar_cli worker --start --backend ascend --devices 6 --port 9111 --bg
     ar_cli worker --status --port 9111
     ar_cli worker --stop --port 9111
 
-    # remote (the host alias is an entry in config.yaml; both sides
-    # need their own AscendOpGenAgent checkout — the remote `repo_path`
-    # should point at the autoresearch/ subdir, not the outer repo)
+    # remote — the host alias is an entry in config.yaml. arch is
+    # auto-derived on the remote side via `npu-smi info` (pass --arch
+    # explicitly to override).
     ar_cli worker --remote-host my-npu --start --backend ascend \\
-        --arch ascend910b3 --devices 6 --port 9111
+        --devices 6 --port 9111
     ar_cli worker --remote-host my-npu --status --port 9111
     ar_cli worker --remote-host my-npu --stop --port 9111
 """
@@ -140,6 +139,25 @@ def _cmdline_contains_worker(pid: int) -> bool:
 
 
 def cmd_worker_start(args) -> int:
+    # arch is optional on the CLI; auto-derive from the first --devices
+    # entry via `npu-smi info`. Caller can still pass --arch explicitly
+    # to override.
+    if not args.arch:
+        from utils.hw_detect import derive_arch
+        try:
+            first_dev = int(args.devices.split(",")[0].strip())
+        except (ValueError, AttributeError):
+            print(f"[ar_cli] --start: cannot parse first device id from "
+                  f"--devices={args.devices!r}", file=sys.stderr)
+            return 2
+        derived = derive_arch(first_dev)
+        if not derived:
+            print(f"[ar_cli] --start: arch auto-derive failed for device "
+                  f"{first_dev} (npu-smi missing or unparseable). Pass "
+                  f"--arch explicitly.", file=sys.stderr)
+            return 2
+        args.arch = derived
+
     env = os.environ.copy()
     env["WORKER_BACKEND"] = args.backend
     env["WORKER_ARCH"] = args.arch
@@ -294,7 +312,10 @@ def _build_parser() -> argparse.ArgumentParser:
     w.add_argument("--backend", choices=["ascend", "cuda", "cpu"],
                    help="Hardware backend (required for --start).")
     w.add_argument("--arch",
-                   help="Arch string, e.g. ascend910b3 (required for --start).")
+                   help="Arch string, e.g. ascend910b3. Optional for "
+                        "--start — defaults to auto-derive via `npu-smi "
+                        "info` on the first --devices entry. Pass "
+                        "explicitly to override.")
     w.add_argument("--devices",
                    help="Comma-separated device IDs, e.g. '2,5' "
                         "(required for --start).")
@@ -323,9 +344,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_worker_args(args) -> Optional[str]:
-    if args.start and not (args.backend and args.arch and args.devices):
-        return ("--start requires --backend, --arch, --devices "
-                "(no auto-detect mode).")
+    if args.start and not (args.backend and args.devices):
+        return ("--start requires --backend and --devices "
+                "(--arch is auto-derived from npu-smi when omitted).")
     if args.host is None:
         # SSH-only: always loopback. The worker is reached through an
         # ssh -L tunnel, never by binding a public interface.
