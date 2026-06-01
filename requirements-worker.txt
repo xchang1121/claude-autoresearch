@@ -1,0 +1,23 @@
+# AutoResearch remote eval worker — Python dependencies.
+#
+# The worker (scripts/worker/server.py) is the ONLY part of AutoResearch
+# that needs a web stack. Install on the remote Ascend host BEFORE starting
+# the worker. The worker is SSH-only: it binds 127.0.0.1 and is reached via
+# `ssh -L` — it makes no outbound network calls, so a strict no-egress host
+# is fully supported once these wheels are present (install from an internal
+# mirror or a pre-downloaded wheelhouse: `pip install --no-index
+# --find-links=<wheel_dir> -r requirements-worker.txt`).
+#
+# pip-installable (the HTTP server itself):
+fastapi
+uvicorn
+python-multipart        # FastAPI Form()/UploadFile() multipart parsing
+pyyaml                  # task.yaml parsing (load_task_config)
+
+# NOT pip-installable from this file — provision the Ascend stack on the
+# worker host out of band (vendor wheels + CANN toolkit):
+#   torch
+#   torch_npu
+#   triton  (triton-ascend)
+#   CANN runtime + drivers (system packages, set up `set_env.sh`)
+# The dev/orchestrator side needs none of these — only pyyaml + Claude Code.
