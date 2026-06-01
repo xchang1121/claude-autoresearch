@@ -104,18 +104,8 @@ def _build_env(device_id: int) -> dict:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["DEVICE_ID"] = str(device_id)
-    # NOTE: do NOT set ASCEND_RT_VISIBLE_DEVICES here. The new eval_kernel
-    # path delegates to KernelVerifier, whose rendered subprocess scripts
-    # call `torch.npu.set_device(<physical_device_id>)` (e.g. set_device(1)).
-    # If we masked physical device 1 to logical 0 via
-    # ASCEND_RT_VISIBLE_DEVICES=1, that set_device(1) would fail with NPU
-    # error 107001 ("Failed to set visible device. The invalid device is 1
-    # and the input visible device is 1"). The pre-KernelVerifier
-    # eval_kernel.py masked + used `npu:0` and was safe; the post-migration
-    # eval_kernel.py is just a thin CLI around KernelVerifier and must let
-    # the subprocess see physical device ids unchanged.
-    env["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # Windows libiomp5 dup-load (no-op on Linux)
-    env["PYTHONIOENCODING"] = "utf-8"  # propagates UTF-8 to eval_kernel subproc
+    env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
