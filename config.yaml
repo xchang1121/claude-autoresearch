@@ -68,7 +68,7 @@ hallucinated_scripts:
 remote_worker:
   hosts:
     npu:
-      repo_path: /home/yyz/cxy/AscendOpGenAgent/autoresearch
+      repo_path: /home/yyz/cxy/claude-autoresearch
       env_script: /home/yyz/env.sh
 
 
