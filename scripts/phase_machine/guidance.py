@@ -244,17 +244,25 @@ def _skills_hint() -> str:
     skills section because the subagent's framing differs: it's
     diagnosing failures, not opening a plan, and the prompt wording
     reflects that.
+
+    The Glob path is expanded with `settings.skill_dsl()`
+    (config.yaml `defaults.skill_dsl`; kebab-case, e.g.
+    `triton-ascend`) so the LLM gets a literal
+    `../skills/triton-ascend/**/SKILL.md` and not a "<dsl>"
+    placeholder that the Glob tool would treat as a literal dir name
+    and return zero matches for.
     """
     if not os.path.isdir(latency_refs_dir()):
         return ""
+    from utils.settings import skill_dsl as _skill_dsl
+    dsl = _skill_dsl()
     return (
-        "\nSkills: Glob ../skills/<dsl>/**/SKILL.md "
-        "(DSL-partitioned skill docs — `<dsl>` = triton-ascend, "
-        "triton-cuda, pypto, cpp, cuda-c, tilelang-cuda; subdirs are "
-        "`fundamentals/` `guides/` `cases/` `examples/` "
-        "`evolved-improvement/`), Read 1-3 most relevant to a candidate "
-        "plan-item direction. Citing the filename in the rationale is "
-        "recommended for traceability but not enforced."
+        f"\nSkills: Glob ../skills/{dsl}/**/SKILL.md "
+        f"(skill subdirs are `fundamentals/` `guides/` `cases/` "
+        f"`examples/` `evolved-improvement/`), Read 1-3 most relevant "
+        f"to a candidate plan-item direction. Citing the filename in "
+        f"the rationale is recommended for traceability but not "
+        f"enforced."
     )
 
 
@@ -603,24 +611,28 @@ def get_guidance(task_dir: str) -> str:
         # pattern that returns zero matches, and they'd silently skip
         # the skill-reading step.
         skills_present = os.path.isdir(latency_refs_dir())
+        # Resolve to the literal kebab-case DSL dir name so the Glob
+        # patterns below target an actual subtree (`triton-ascend/`
+        # etc.) rather than the literal `<dsl>` token, which the Glob
+        # tool would search for and return zero matches.
+        from utils.settings import skill_dsl as _skill_dsl
+        dsl = _skill_dsl()
         if skills_present:
             skills_block = (
-                "Read curated DSL-specific skill references (use them to "
-                "ground fix directions in known-good patterns for this "
-                "hardware):\n"
-                "  - Glob ../skills/<dsl>/**/SKILL.md "
-                "(DSL-partitioned: triton-ascend, triton-cuda, pypto, "
-                "cpp, cuda-c, tilelang-cuda; under each DSL the relevant "
-                "subdirs are `fundamentals/` `guides/` `cases/` "
-                "`examples/` `evolved-improvement/`) and Read what "
-                "matches the fix direction.\n"
-                "  - Cite filename in the rationale of items you "
-                "propose.\n\n"
+                f"Read curated DSL-specific skill references for "
+                f"`{dsl}` (use them to ground fix directions in "
+                f"known-good patterns for this hardware):\n"
+                f"  - Glob ../skills/{dsl}/**/SKILL.md "
+                f"(subdirs: `fundamentals/` `guides/` `cases/` "
+                f"`examples/` `evolved-improvement/`) and Read what "
+                f"matches the fix direction.\n"
+                f"  - Cite filename in the rationale of items you "
+                f"propose.\n\n"
             )
             scope_constraint = (
-                "  - Glob / Grep ONLY under ../skills/<dsl>/ for the "
-                "current DSL. The 4 task files plus that skills subtree "
-                "are the entire scope.\n"
+                f"  - Glob / Grep ONLY under ../skills/{dsl}/. "
+                f"The 4 task files plus that skills subtree are the "
+                f"entire scope.\n"
             )
             cite_clause = " Cite reference filenames where relevant."
         else:

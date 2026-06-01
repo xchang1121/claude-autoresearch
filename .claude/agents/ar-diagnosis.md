@@ -13,13 +13,16 @@ The parent will hand you a prompt containing:
 - the **exact path** you must Write your report to (under `<task_dir>/.ar_state/`)
 - the **exact magic marker line** you must end the report with
 - absolute paths to reference.py, kernel.py, plan.md, history.jsonl
-- when applicable, the curated `../skills/<dsl>/` subtree to consult
+- when applicable, a curated `../skills/<NAME>/` subtree (the parent
+  expands `<NAME>` to the actual DSL directory — e.g.
+  `../skills/triton-ascend/` — read it as a literal path; do not Glob
+  `<NAME>` as a directory name)
 
 Workflow:
 1. Read `history.jsonl` (last ~10 rounds) — see metric trajectory and KEEP/DISCARD/FAIL reasons.
 2. Read `kernel.py` and `reference.py` — compare structure; the gap to baseline is your target.
 3. Read `plan.md` — see what's already been tried so you don't repeat it.
-4. If a `../skills/<dsl>/` tree was named, Glob it and Read 1–3 SKILL.md files whose frontmatter description / keywords match a candidate fix direction.
+4. If a `../skills/<NAME>/` tree was named (with `<NAME>` expanded to a concrete DSL dir by the parent), Glob it and Read 1–3 SKILL.md files whose frontmatter description / keywords match a candidate fix direction.
 5. **Write your report** to the exact path given by the parent. The file's body must contain the three section headings and the marker line — the host validates presence, not position, but the marker on its own line near the end is the recommended style. Do not paraphrase the section headings; do not omit the marker.
 
 ## Required artifact structure
@@ -57,7 +60,8 @@ a later DIAGNOSE round. Use the integer plan_version the parent gave you.
 - Read-only otherwise: Read / Glob / Grep — no Bash, no Edit, no nested Agent.
 - No git history (`git log` / `git show` / `git grep`) — per-round commits
   carry no keyword signal.
-- Glob / Grep restricted to the named `../skills/<dsl>/` subtree and the 4
+- Glob / Grep restricted to the named `../skills/<NAME>/` subtree (the
+  parent gives you the actual DSL dir name in the prompt) and the 4
   task files. Do not wander the wider repo.
 - Stop after at most 12 tool uses. If you can't fully conclude, Write what
   you have — but **always include the marker** so the host knows you

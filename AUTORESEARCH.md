@@ -457,13 +457,15 @@ baseline.py / pipeline.py
 
 verify 失败时 ref 时延由 `profile_base` 同进程单独测得，与 verify 解耦，dashboard 顶栏始终显示 PyTorch baseline。Sticky baseline 写定（`baseline_metric` 与 `baseline_source=ref` 写入 state.json）后，后续轮 phase 列表不再包含 `profile_base`。
 
-**直接调试 eval_kernel.py**（静态脚本，CLI 接 `--phases`）：
+**直接调试 eval_kernel.py**（薄 CLI，包装 [`scripts/eval/`](scripts/eval/) 的 KernelVerifier）：
 ```bash
 cd <task_dir>
-python <repo>/autoresearch/scripts/engine/eval_kernel.py \
+python <repo>/scripts/engine/eval_kernel.py \
     --task-dir . --op-name <op> --kernel-file kernel --ref-file reference \
     --device-id 0 --phases verify,profile_gen
 ```
+
+可选项（默认对齐 autoresearch 当前 NPU+Triton+PyTorch 场景）：`--backend ascend` `--dsl triton_ascend` `--arch ascend910b4` `--framework torch` `--task-id 0` `--current-step 0` `--verify-timeout 300`。`--arch` 在框架调用时由 [`eval_runner.local_eval`](scripts/utils/eval_runner.py) 从 `task.yaml: arch` 自动透传。
 
 **客户端断连自动 cancel**：worker `/api/v1/run` 同时 await eval task 与 disconnect watch：
 - eval 先完成 → 取消 watch，返回结果

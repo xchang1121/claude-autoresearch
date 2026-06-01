@@ -80,6 +80,16 @@ def default_metric() -> dict:
     return m
 
 
+def skill_dsl() -> str:
+    """Kebab-case name of the skills/ subtree this repo consults
+    (`triton-ascend` / `triton-cuda` / `pypto` / `cpp` / `cuda-c` /
+    `tilelang-cuda`). Used by guidance.py to expand `<dsl>` in PLAN /
+    REPLAN / DIAGNOSE prompt Glob patterns to a literal directory name.
+    Single-DSL-per-repo by design; lives at defaults/skill_dsl in
+    config.yaml, not on per-task TaskConfig."""
+    return str(_get("defaults", "skill_dsl"))
+
+
 # --- eval timing measurement (read where the timing runs: on remote eval
 #     that is the WORKER's config.yaml) ----------------------------------
 def eval_warmup() -> int:

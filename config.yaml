@@ -150,6 +150,14 @@ defaults:
     primary: latency_us
     lower_is_better: true
     improvement_threshold: 0.0
+  # Which DSL subtree under skills/ the framework consults when guidance.py
+  # builds PLAN / REPLAN / DIAGNOSE prompts. Kebab-case, must match an
+  # actual directory under skills/ (triton-ascend, triton-cuda, pypto,
+  # cpp, cuda-c, tilelang-cuda). The repo is single-DSL by construction
+  # (autoresearch only targets one kernel framework at a time), so this
+  # sits in defaults/ rather than per-task task.yaml — moving the repo
+  # to a different DSL means editing this one value, not every task.yaml.
+  skill_dsl: triton-ascend
 
 
 # ---------------------------------------------------------------------------
