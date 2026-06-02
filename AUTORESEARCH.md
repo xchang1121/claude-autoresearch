@@ -136,6 +136,56 @@ python scripts/dashboard.py <task_dir> --watch
 | 远端 NPU 机 | (1) 把 AscendOpGenAgent 仓库 clone 到 `<repo_path>`（B.2 会把这条路径写进 config）。(2) 写 `~/env.sh`：source 完毕后 `python -c "import torch_npu, triton"` 不抛异常，模板见 [§7](#7-envsh-契约)。(3) `npu-smi info` 能列出设备。**无需** Claude Code CLI（远端只跑 worker，不跑 claude）。 |
 | 本机 | (1) 装 Python ≥ 3.10、PyYAML、Claude Code CLI。(2) **无需** torch_npu / CANN / NPU 硬件（eval 全部走远端）。(3) `~/.ssh/config` 配好 alias（下文以 `my-npu` 为例）+ 密钥免密登录远端。 |
 
+<details><summary><code>~/.ssh/config</code> 怎么配 + 跑前自检</summary>
+
+**第一步：本机 `~/.ssh/config` 给远端机起个别名**。别名是为了让后续命令短一点（不用每次敲 IP + 用户名），叫什么都行，下面用 `my-npu`。
+
+```text
+# 文件路径：本机 ~/.ssh/config（没有就新建，注意是 config 不是 config.txt）
+Host my-npu                            # 这是别名，自己看的，叫什么都行
+    HostName 192.168.x.x               # 远端机真实 IP 或域名
+    User <remote-user>                 # 登录远端用的账号，比如 root
+    # 私钥若在本机 ~/.ssh/ 下的默认位置（id_rsa / id_ed25519 / id_ecdsa 任一），下一行不用写；
+    # 私钥放在本机别处才需要补这行，路径换成本机实际位置：
+    # IdentityFile <本机私钥绝对路径>
+    # 如果中间要过跳板机/堡垒机：
+    # ProxyJump bastion
+```
+
+> 如果本机之前从没生成过 ssh 密钥，可以走最简流程（本机和远端都各有自己的 `~/.ssh/`，下面每一步都标了在哪台机器跑、读/写哪一边的文件）：
+>
+> 1. **本机** 命令行跑 `ssh-keygen`（一路回车用默认即可），在 **本机** `~/.ssh/` 下生成两个文件——`id_rsa` 是**私钥**（留本机，永远不要拷给远端、不要发出去），`id_rsa.pub` 是**公钥**（接下来要送到远端的那一份）。
+> 2. **本机** 跑 `ssh-copy-id my-npu`。这条命令做的事情：用密码方式登一次远端，把 **本机** `~/.ssh/id_rsa.pub` 的内容追加到 **远端** `~/.ssh/authorized_keys` 末尾——远端的 ssh 服务一旦在 `authorized_keys` 里看到本机公钥，之后本机用对应私钥连上来时就不再要密码。前提是远端的 ssh 密码登录暂时是开的（系统默认通常开着），运行时会让一次性输入远端账号的密码。
+> 3. 配完之后 **本机** 跑 `ssh my-npu` 不再问密码，就算成功。
+
+> **注意**：上面 `Host` 后面的别名必须和 B.2 里 `remote_worker.hosts:` 下面写的 key 完全一样（autoresearch 默认按 key 当 ssh 目标用）。若 `~/.ssh/config` 里 `Host` 名跟 B.2 的 key 不一样，B.2 里加一行 `ssh_alias: <ssh 实际用的 Host 名>` 覆盖即可。
+
+**第二步：跑前自检**。在本机命令行敲下面这一行，确认三件事一次性都过：免密 ssh 通、远端 env 完好、NPU 看得见。三个都过了才上 B.2 / B.3。
+
+```bash
+# 命令在本机敲。ssh 后面单引号里那一串都是在远端执行的，所以路径里的 <远端账号> 指远端机
+# 的用户名，env.sh 是远端机上的脚本。
+ssh my-npu 'source /home/<远端账号>/env.sh \
+    && python -c "import torch_npu, triton" \
+    && npu-smi info | head -3'
+```
+
+**预期看到**（按顺序）：
+1. 没有 `Permission denied` / `Connection refused` —— ssh 通了
+2. `python -c ...` 一行不报错（特别是没有 `ModuleNotFoundError`）—— 远端 conda 环境和 CANN 都装好了
+3. 打印一段类似 `npu-smi 25.x.rcN  Version: ...` 的表头 —— NPU 驱动和卡都在
+
+**任一步出错就在这里修掉，别先去跑 ar_cli**（ar_cli 启动失败时同样的错误会被埋进 `/tmp/ar_worker_9111.log` 里，定位起来麻烦得多）。常见错和对应处理：
+
+| 报错关键字 | 大概率原因 | 怎么修 |
+|---|---|---|
+| `Permission denied (publickey)` | 公钥没进远端 `~/.ssh/authorized_keys`，或本机私钥路径填错 | `ssh-copy-id my-npu` 把公钥推过去；或检查 `IdentityFile` 路径 |
+| `Connection timed out` / `No route to host` | 远端 IP 写错，或者本机当前网络连不到 | 改 `HostName`；或确认本机已接入能访问远端的网络（VPN / 内网） |
+| `ModuleNotFoundError: torch_npu` | 远端 env.sh 路径错，或远端 conda 环境没装好 | ssh 进远端手动 `source <远端 env.sh 绝对路径> && python -c "import torch_npu"`，调通了再回来跑本机这条自检命令 |
+| `npu-smi: command not found` | 远端 CANN 没装，或没在远端 `PATH` 里 | 远端 env.sh 里补 CANN 的 `source set_env.sh`，或在远端装 CANN |
+
+</details>
+
 ### B.2 [本机] 配 worker host
 
 `autoresearch/config.yaml`：
@@ -274,6 +324,7 @@ tmux new -d -s ar_batch \
 - `error` 默认跳过；`--retry-errored` 重新纳入
 - `pending` 自动续
 - `running`（终止瞬间在跑的 op）下次启动时自动降级为 `error`，note 记 `stale running, demoted on batch restart`
+- **transient 自动续**（同 batch 内）：单个 op 跑到一半 `claude --print` 进程异常退（rc≠0，常见 ECONNRESET / Stream idle timeout / 其他 transient API 错），但 framework state 仍 intact（`progress_initialized=True`，phase 不是 FINISH）时，supervisor 会自动 `/autoresearch --resume <task_dir> --force` 接续，最多 `batch.transient_retries` 次（默认 3，配 [`config.yaml`](config.yaml)）。接续成功的 op `batch_progress.json::cases.<op>.note` 会记 `transient_retries=N`，区分一遍过 vs 靠 wrapper 救活。`rc=0 + phase != FINISH`（LLM 自然 stop）或 `rc != 0 + no progress`（baseline 没 commit）属于真失败，不 retry，直接记 `error` 跳下一个 op。
 
 > 同一 batch_dir **禁止并发** 多个 `run.py`（`.batch.lock` 排它）。死进程残留的 lock 下次启动自动判活清理。
 
@@ -371,8 +422,9 @@ A/B/C 均适用：
 | `--timeout-min` | int 分钟 | ❌ | 180（[config.yaml](config.yaml): `batch.run_timeout_min`）| 单 op wall-clock 上限，超时杀 `claude --print` 子进程 |
 | `--only` | 逗号分隔 op 名 | ❌ | — | 队列过滤：只跑这些 |
 | `--limit` | int | ❌ | — | 队列过滤：跑前 N 个 |
-| `--retry-errored` | flag | ❌ | (跳过) | 把 `error` / `stale running` 重新纳入队列 |
+| `--retry-errored` | flag | ❌ | (跳过) | 把 `error` / `stale running` 重新纳入队列（下一次批跑时生效）|
 | `--cooldown-sec` | int 秒 | ❌ | 5（[config.yaml](config.yaml): `batch.cooldown_sec`）| 两个 op 之间的间隔 |
+| _无 CLI flag_ | int | — | 3（[config.yaml](config.yaml): `batch.transient_retries`）| 单 op 内 transient 自动续：claude.exe 异常退但 framework progress 完整时，supervisor 自动 `/autoresearch --resume --force` 接续最多 N 次。见 [§C.4](#c4-断点续跑--重试)。|
 | `--claude-bin` | 路径 | ❌ | `claude` | Claude CLI 可执行文件路径（Windows 下需指向 `claude.cmd`）|
 | `--model` | 字符串 | ❌ | (空) | 透传到 `claude --model`，覆盖默认模型 |
 | `--extra-claude-arg` | 字符串（可重复）| ❌ | — | 任意额外 flag 透传给 `claude --print`（可叠加：`--extra-claude-arg --foo --extra-claude-arg --bar`）|
@@ -394,7 +446,7 @@ A/B/C 均适用：
 ## 3. 主循环 / 状态机
 
 单轮：`PLAN → EDIT → quick_check → eval → KEEP/DISCARD → settle`。
-连续 3 次 FAIL 转 `DIAGNOSE`；plan 全部 settle 转 `REPLAN`；预算耗尽转 `FINISH`。
+连续 N 次 FAIL 转 `DIAGNOSE`（N 默认 3，配 [`config.yaml`](config.yaml) `defaults.consecutive_fail_threshold`）；plan 全部 settle 转 `REPLAN`；预算耗尽转 `FINISH`。DIAGNOSE 子代理对同一 plan_version 最多重试 `defaults.diagnose_max_attempts` 次（默认 5），用尽后转人工 fallback。
 
 ```
 INIT
@@ -413,7 +465,7 @@ PLAN  (BASELINE PASS 或 FAIL 均进入 PLAN；FAIL 时首批 plan items 改写 
    │   ├─ DISCARD : 回滚 editable_files                   │
    │   └─ FAIL    : consecutive_failures++，回滚         │
    │                                                     │
-   │   ├─ failures ≥ 3              ─→ DIAGNOSE ─→ PLAN ─┤
+   │   ├─ failures ≥ N (config)     ─→ DIAGNOSE ─→ PLAN ─┤
    │   ├─ plan 全部 settle           ─→ REPLAN  ─→ PLAN ─┤
    │   └─ eval_rounds == max_rounds ─→ FINISH
    └─────────────────────────────────────────────────────┘
