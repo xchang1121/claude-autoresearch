@@ -140,6 +140,16 @@ remote_worker:
 #                                         5.0  → requires >5 % better
 #                                       Setting 0.05 here means ">0.05 %"
 #                                       — almost any positive improvement.
+#   consecutive_fail_threshold (int)    FAIL streak length that flips
+#                                       PLAN/EDIT into DIAGNOSE. Was
+#                                       hard-coded `3` in
+#                                       phase_policy.py.
+#   diagnose_max_attempts (int)         DIAGNOSE subagent retries
+#                                       allowed per plan_version before
+#                                       the manual-fallback artifact
+#                                       path opens. Was
+#                                       `DIAGNOSE_ATTEMPTS_CAP = 5` in
+#                                       state_store.py.
 # ---------------------------------------------------------------------------
 defaults:
   max_rounds: 30
@@ -151,12 +161,6 @@ defaults:
     lower_is_better: true
     improvement_threshold: 0.0
   skill_dsl: triton-ascend
-  # Phase-machine thresholds previously hard-coded in scripts/phase_machine/.
-  # consecutive_fail_threshold: FAIL streak length that flips PLAN/EDIT to
-  #   DIAGNOSE (was hard-coded `3` in phase_policy.py).
-  # diagnose_max_attempts:      DIAGNOSE subagent retries allowed against a
-  #   single plan_version before the manual-fallback path opens (was
-  #   `DIAGNOSE_ATTEMPTS_CAP = 5` in state_store.py).
   consecutive_fail_threshold: 3
   diagnose_max_attempts: 5
 
@@ -263,20 +267,26 @@ worker:
 #                                   next op acquires. Override via
 #                                   `--cooldown-sec N`. 0 is allowed but
 #                                   invites flaky device-acquire races.
+#   transient_retries (int)         max times batch/run.py re-spawns
+#                                   `claude --print /autoresearch
+#                                   --resume <task_dir> --force` for the
+#                                   same op when the session crashed
+#                                   mid-flight (claude.exe rc != 0) but
+#                                   framework progress is intact
+#                                   (progress_initialized=True). Catches
+#                                   ECONNRESET / stream idle timeouts /
+#                                   transient API errors that exit the
+#                                   cli without going through stop_save.
+#                                   Real failures (rc=0 + phase != FINISH
+#                                   = LLM ended turn early; rc != 0 + no
+#                                   progress = baseline never committed)
+#                                   skip retry and surface immediately.
 # ---------------------------------------------------------------------------
 batch:
   tier1_timeout: 30
   tier2_timeout: 600
   run_timeout_min: 180
   cooldown_sec: 5
-  # transient_retries: max times batch/run.py re-spawns `claude --print
-  # /autoresearch --resume <task_dir> --force` for the same op when the
-  # session crashed mid-flight (claude.exe rc != 0) but framework progress
-  # is intact (progress_initialized=True). Catches ECONNRESET / stream
-  # idle timeouts / transient API errors that exit the cli without going
-  # through stop_save. Real failures (rc=0 + phase != FINISH = LLM ended
-  # turn early; rc != 0 + no progress = baseline never committed) skip
-  # retry and surface immediately.
   transient_retries: 3
 
 

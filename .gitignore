@@ -8,3 +8,8 @@ ar_tasks/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 workspace/
+# runtime control-plane state (per-session pointers / per-task locks)
+.session_tasks/
+.task_dir_pointers/
+# operator handoff notes (per-deployment, not part of the framework)
+HANDOFF_PROMPT.md
