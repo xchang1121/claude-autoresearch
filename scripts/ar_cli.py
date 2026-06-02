@@ -308,6 +308,12 @@ def _build_parser() -> argparse.ArgumentParser:
                              "POSIX-only (uses ss/lsof + SIGTERM/SIGKILL).")
     action.add_argument("--status", action="store_true",
                         help="Curl /api/v1/status on --host:--port.")
+    action.add_argument("--reconnect-tunnel", action="store_true",
+                        dest="reconnect_tunnel",
+                        help="Only rebuild the local ssh -L tunnel "
+                             "(don't restart remote daemon). Use when a "
+                             "long batch silently lost its tunnel. "
+                             "--remote-host required.")
 
     w.add_argument("--backend", choices=["ascend", "cuda", "cpu"],
                    help="Hardware backend (required for --start).")
@@ -363,6 +369,10 @@ def _dispatch_worker(args) -> int:
     if args.remote_host:
         return _dispatch_remote_worker(args)
 
+    if args.reconnect_tunnel:
+        print("[ar_cli] --reconnect-tunnel only meaningful with --remote-host.",
+              file=sys.stderr)
+        return 2
     if args.start:
         return cmd_worker_start(args)
     if args.stop:
@@ -465,9 +475,17 @@ def _tunnel_start(host: str, port: int) -> int:
     # may declare unrelated forwards (RemoteForward for IDE relays, etc.)
     # whose failure would take down the -L we actually need. Readiness is
     # confirmed via a curl probe to /api/v1/status after the fork.
+    #
+    # Keepalive: ping every 30s, drop after 10 missed (~5 min idle
+    # tolerance). Default OpenSSH (60s / 3x) drops idle long-running
+    # tunnels on flaky multi-tenant networks; bumped because a long
+    # autoresearch batch can sit in PLAN for several minutes without
+    # using the tunnel, and we don't want the next eval call to find a
+    # dead tunnel.
     cmd = [
         "ssh", "-f", "-N", "-T",
-        "-o", "ServerAliveInterval=60",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=10",
         "-L", f"{port}:127.0.0.1:{port}",
         host,
     ]
@@ -583,9 +601,28 @@ def _dispatch_remote_worker(args) -> int:
               f"`repo_path`.", file=sys.stderr)
         return 2
 
+    ssh_alias = host_cfg.get("ssh_alias") or args.remote_host
+
+    # Tunnel-only reconnect: rebuild the local ssh -L without SSH-ing to
+    # the remote daemon. Use when a long batch silently lost the tunnel
+    # but the daemon is still alive.
+    if args.reconnect_tunnel:
+        _tunnel_stop_silent(args.port, ssh_alias)
+        pid = _tunnel_start(ssh_alias, args.port)
+        if pid:
+            print(f"[ar_cli] ssh -L 127.0.0.1:{args.port} -> "
+                  f"{ssh_alias}:{args.port} reconnected (tunnel pid={pid})")
+        st = _curl_status("127.0.0.1", args.port)
+        if st is None:
+            print(f"[ar_cli] tunneled status probe failed after reconnect; "
+                  f"remote daemon may have died too — use --stop + --start.",
+                  file=sys.stderr)
+            return 1
+        print(json.dumps(st, indent=2))
+        return 0
+
     remote_args = _strip_remote_flags(args)
     remote_cmd = _build_remote_ar_cli_cmd(host_cfg, remote_args)
-    ssh_alias = host_cfg.get("ssh_alias") or args.remote_host
 
     print(f"[ar_cli] remote ({ssh_alias}): {remote_cmd}", file=sys.stderr)
     # Pass the bash command as a SINGLE ssh arg so OpenSSH ships it
