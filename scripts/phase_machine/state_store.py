@@ -68,7 +68,11 @@ INTENT_FILE = "intent.json"
 # DIAGNOSE artifact — see CLAUDE.md invariant #10.
 DIAGNOSE_ARTIFACT_TEMPLATE = "diagnose_v{}.md"
 DIAGNOSE_MARKER_TEMPLATE = "[AR DIAGNOSE COMPLETE marker_v{}]"
-DIAGNOSE_ATTEMPTS_CAP = 5
+# Pulled from config.yaml `defaults.diagnose_max_attempts` at import time
+# so the 8 callers using the bare name don't need to change. Edit
+# config.yaml to retune; restart the process to pick up.
+from utils.settings import diagnose_max_attempts as _diagnose_max_attempts
+DIAGNOSE_ATTEMPTS_CAP = _diagnose_max_attempts()
 
 
 # ---------------------------------------------------------------------------

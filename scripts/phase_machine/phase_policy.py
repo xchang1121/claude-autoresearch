@@ -608,7 +608,8 @@ def compute_next_phase(task_dir: str) -> str:
 
     if eval_rounds >= max_rounds:
         return FINISH
-    if consecutive_failures >= 3:
+    from utils.settings import consecutive_fail_threshold
+    if consecutive_failures >= consecutive_fail_threshold():
         return DIAGNOSE
     if has_pending_items(task_dir):
         return EDIT

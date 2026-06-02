@@ -147,6 +147,25 @@ def batch_cooldown_sec() -> int:
     return _get("batch", "cooldown_sec")
 
 
+def batch_transient_retries() -> int:
+    """Max times batch/run.py re-spawns `claude --print /autoresearch
+    --resume` for the same op after a transient claude.exe crash
+    (rc != 0 with framework progress intact). 0 disables retry."""
+    return _get("batch", "transient_retries")
+
+
+# --- phase machine thresholds -----------------------------------------
+def consecutive_fail_threshold() -> int:
+    """FAIL-streak length that flips PLAN/EDIT into DIAGNOSE."""
+    return _get("defaults", "consecutive_fail_threshold")
+
+
+def diagnose_max_attempts() -> int:
+    """DIAGNOSE subagent retries allowed per plan_version before the
+    manual-fallback artifact path opens."""
+    return _get("defaults", "diagnose_max_attempts")
+
+
 # --- resume heartbeat freshness window (seconds) ----------------------
 def heartbeat_fresh_seconds() -> int:
     return _get("resume", "heartbeat_fresh_seconds")

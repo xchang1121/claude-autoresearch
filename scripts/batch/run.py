@@ -483,6 +483,100 @@ def run_one(batch_dir: Path, case: dict,
     result = mf.read_task_state(task_dir)
     final_status = ("done" if phase == "FINISH" and not interrupted
                     and not consistency_note else "error")
+
+    # (D) Transient claude-exe retry. claude.exe exits rc != 0 on
+    # ECONNRESET / Stream idle timeout / other transient API failures
+    # before the Stop hook ever sees the turn — supervisor's only
+    # signal is rc + state.json. When framework progress is intact
+    # (progress_initialized=True, baseline-ok), re-spawn
+    # `claude --print /autoresearch --resume <td> --force` to roll the
+    # task forward. Bounded by config.yaml batch.transient_retries.
+    # rc=0 + phase != FINISH = LLM ended turn early (real fail, no retry);
+    # rc != 0 + no progress = baseline never committed (real fail, no
+    # retry).
+    transient_attempts = 0
+    if (final_status == "error" and proc.returncode != 0
+            and not interrupted and not consistency_note
+            and phase != "FINISH"
+            and (result or {}).get("progress_initialized") is True):
+        from utils.settings import batch_transient_retries as _max_retries
+        max_retries = _max_retries()
+        resume_prompt = (
+            f"/autoresearch --resume {task_dir} --force"
+        )
+        resume_cmd = build_claude_cmd(args, resume_prompt)
+        while (transient_attempts < max_retries
+               and final_status == "error"
+               and phase != "FINISH"):
+            transient_attempts += 1
+            r_started = time.time()
+            r_msg = (f"[run] transient claude crash (rc={proc.returncode}, "
+                     f"phase={phase}); resuming attempt "
+                     f"{transient_attempts}/{max_retries} via "
+                     f"--resume --force\n")
+            sys.stdout.write(r_msg); log_fp.write(r_msg)
+            sys.stdout.flush(); log_fp.flush()
+            r_proc = subprocess.Popen(
+                resume_cmd,
+                cwd=str(repo_root),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True, encoding='utf-8', errors='replace',
+                bufsize=1, env=env_with_no_proxy(),
+            )
+            r_q: "queue.Queue[str]" = queue.Queue()
+            r_done = threading.Event()
+            def _r_reader(p=r_proc, q=r_q, done=r_done):
+                try:
+                    assert p.stdout is not None
+                    for line in p.stdout:
+                        q.put(line)
+                finally:
+                    done.set()
+            threading.Thread(target=_r_reader, daemon=True).start()
+            r_interrupted = False
+            try:
+                while True:
+                    try:
+                        line = r_q.get(timeout=5)
+                    except queue.Empty:
+                        if time.time() - r_started > timeout_s:
+                            sys.stdout.write(f"[run] WALL-CLOCK TIMEOUT after "
+                                             f"{args.timeout_min}min on "
+                                             f"resume attempt "
+                                             f"{transient_attempts}, killing\n")
+                            r_proc.kill()
+                            break
+                        if r_done.is_set() and r_q.empty():
+                            break
+                        continue
+                    sys.stdout.write(line); log_fp.write(line)
+                    sys.stdout.flush(); log_fp.flush()
+                r_proc.wait(timeout=30)
+            except KeyboardInterrupt:
+                r_interrupted = True
+                r_proc.kill()
+            r_elapsed = time.time() - r_started
+            sys.stdout.write(f"[run] resume attempt {transient_attempts} "
+                             f"exited rc={r_proc.returncode} after "
+                             f"{r_elapsed:.0f}s\n")
+            # Reread phase + state; rebind proc so the final
+            # update_case() below sees the latest rc.
+            try:
+                with _open_task(str(task_dir), role=_Role.SUPERVISOR):
+                    pass
+            except _Consistency:
+                pass
+            phase = mf.read_phase(task_dir)
+            result = mf.read_task_state(task_dir)
+            proc = r_proc
+            interrupted = interrupted or r_interrupted
+            final_status = ("done" if phase == "FINISH" and not interrupted
+                            else "error")
+            if r_interrupted:
+                break
+
     note = ""
     if final_status == "error":
         note = f"phase={phase} rc={proc.returncode}"
@@ -490,6 +584,9 @@ def run_one(batch_dir: Path, case: dict,
             note += "; interrupted"
         if consistency_note:
             note += consistency_note
+    if transient_attempts > 0:
+        rt_tag = f"transient_retries={transient_attempts}"
+        note = f"{rt_tag}; {note}" if note else rt_tag
 
     mf.update_case(batch_dir, op,
                    status=final_status,
