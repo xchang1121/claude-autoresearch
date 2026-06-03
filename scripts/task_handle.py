@@ -475,6 +475,13 @@ class Task:
             "next_pid":     new_next_pid,
         }
 
+        # DIAGNOSE plan commit clears cf in the same save_state that
+        # bumps pv. Redundant with post_bash._reset_failures_for_diagnose;
+        # closes the hook-miss hole.
+        state_before = load_state(self.task_dir) or {}
+        if state_before.get("phase") == DIAGNOSE:
+            progress_fields["consecutive_failures"] = 0
+
         # ---- Journal ----
         # Plan intent payload mirrors round/baseline: enough to
         # reconstruct state.json from the body on crash recovery.
@@ -493,8 +500,7 @@ class Task:
         # the state write; the consistency check next time will
         # flag it.
         if prog is not None and os.path.exists(state_record_path(self.task_dir)):
-            new_prog = prog.apply(next_pid=new_next_pid,
-                                  plan_version=version)
+            new_prog = prog.apply(**progress_fields)
             state = load_state(self.task_dir) or {}
             for k, v in new_prog.to_dict().items():
                 state[k] = v
