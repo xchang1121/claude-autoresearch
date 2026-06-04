@@ -597,28 +597,43 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
 验证：`source ~/env.sh && python -c "import torch_npu, triton"` 退出码 0。
 
-## 8. 远程 worker 内部
+## 8. ar_cli worker
 
-[操作 B](#b-双机本机跑-claude无-npu-远端-npu-机跑-eval) 已覆盖正常使用。以下是 `ar_cli` 内部行为：
+Worker 是个 FastAPI HTTP daemon，跑 eval 子进程。`scripts/ar_cli.py worker` 子命令负责本机/远端起停、ssh -L tunnel 维护、探活。
 
-- `--start --remote-host`：dev 端组装 `ssh <alias> 'bash -lc "source env_script && cd repo_path && python scripts/ar_cli.py worker --start --bg ..."'`，远端 daemon log 写 `/tmp/ar_worker_<port>.log`
-- 同时启动 `ssh -f -N -T -L <port>:127.0.0.1:<port> <alias>`，pid 写 `~/.autoresearch_state/tunnels/<port>.pid`（Windows 用 `Get-CimInstance`，POSIX 用 `pgrep`）
-- `--stop`：反向，先 SSH 终止远端 daemon，再 SIGTERM 本机 tunnel
-- `--status`：直接 `curl 127.0.0.1:<port>/api/v1/status`（经 tunnel）
-- 远端 `worker/server.py` 仅暴露 `/api/v1/run`（multipart：tar + task_id + op_name + timeout）与 `/api/v1/status`
+### 启动示例
 
-打包内容（`task_config/package_builder.py`）：`task.yaml` + `ref_file` + `editable_files[*]` + `data_files[*]`。`data_files` 由 scaffold 按 ref 文件名扫描同目录下名字匹配的数据文件得到，匹配规则见 [§2](#2-命名契约) "同目录数据文件" 一行。
+```bash
+scripts/ar_cli.py worker --remote-host my-npu --start --backend ascend --devices 0,1
+scripts/ar_cli.py worker --remote-host my-npu --status
+scripts/ar_cli.py worker --remote-host my-npu --reconnect-tunnel   # tunnel 抖了重连
+scripts/ar_cli.py worker --remote-host my-npu --stop
+```
 
-`config.yaml` host 字段：
+去掉 `--remote-host <alias>` 即在本机直接起 daemon，无 SSH / tunnel。
+
+### 参数
+
+`--start` / `--stop` / `--status` / `--reconnect-tunnel` 四选一，互斥。
+
+| flag | 类型 | 默认 | 必填 | 说明 |
+|---|---|---|---|---|
+| `--backend` | `ascend` / `cuda` / `cpu` | — | `--start` 必填 | 硬件后端 |
+| `--devices` | csv，如 `0,1,2` | — | `--start` 必填 | device id 列表 |
+| `--arch` | 字符串，如 `ascend910b3` | auto（`npu-smi info` 推断）| 可省 | 硬件 arch |
+| `--port` | int | `config.yaml: worker.port`，否则 `9001` | 可省 | TCP 端口 |
+| `--host` | IP | `127.0.0.1` | 可省 | 监听 / 探测地址 |
+| `--remote-host` | alias | — | 可省 | 走 SSH 远端模式；alias 在 `config.yaml: remote_worker.hosts.<alias>` 定义 |
+
+`config.yaml: remote_worker.hosts` 字段：
 
 ```yaml
 remote_worker:
   hosts:
     my-npu:
-      repo_path:  /home/<user>/AscendOpGenAgent/autoresearch  # 必填
-      env_script: /home/<user>/env.sh                         # 必填
-      python:     python                                      # 可选，默认 python
-      ssh_alias:  my-npu                                      # 可选，默认 = key
+      repo_path:  /abs/path/to/repo   # 必填
+      env_script: /abs/path/env.sh    # 必填
+      ssh_alias:  my-npu              # 可省，默认 = key
 ```
 
 ## 9. Skills 库

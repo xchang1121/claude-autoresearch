@@ -270,6 +270,50 @@ async def status():
     return payload
 
 
+@app.get("/api/v1/health")
+async def health():
+    """深度健康检查 —— 比 /status 多一步：实际 acquire+release 一个 device，
+    暴露 device 队列卡死 / 事件循环死锁 / 锁竞争之类只在请求路径上才显形
+    的问题。整体 5 秒内必须返回；超时即视为 degraded。
+
+    /status 只验证 HTTP server 在线；/health 走一遍 worker 真实接 /run
+    时要走的最短路径，能够发现"status 回 200 但 /run 永远挂"那类
+    handler 死锁。"""
+    if "queue" not in _state:
+        return {"status": "initializing", "healthy": False}
+
+    base = {
+        "status": "ready",
+        "backend": _state["backend"],
+        "arch": _state["arch"],
+        "devices": _state["devices"],
+        "free": _state["queue"].qsize(),
+        "healthy": False,
+    }
+
+    async def _probe():
+        device_id = await _state["queue"].get()
+        try:
+            return device_id
+        finally:
+            await _state["queue"].put(device_id)
+
+    try:
+        device_id = await asyncio.wait_for(_probe(), timeout=5.0)
+        base["probed_device"] = device_id
+        base["healthy"] = True
+        logger.info(f"健康探活通过：device queue 正常 (probed device={device_id})")
+        return base
+    except asyncio.TimeoutError:
+        base["error"] = "device acquire/release timed out (>5s) —— device queue 可能锁死或所有设备被长时间占用"
+        logger.warning("健康探活超时：device queue 5 秒内未响应")
+        return base
+    except Exception as e:
+        base["error"] = f"健康探活异常：{type(e).__name__}: {e}"
+        logger.warning(f"健康探活异常：{e}")
+        return base
+
+
 @app.post("/api/v1/run")
 async def run(
     request: Request,

@@ -1,24 +1,70 @@
 import httpx
 import logging
 import json
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Callable, Optional
 
 from .interface import WorkerInterface
+from .manager import get_akg_env_var
 
 logger = logging.getLogger(__name__)
+
+
+# Connect / write / pool phase budgets and transient-retry count are read
+# from the standard ``AKG_AGENTS_WORKER_*`` env var layer. Operators can
+# tune for flaky tunnels via ``export AKG_AGENTS_WORKER_CONNECT_TIMEOUT_S=10``
+# etc. without touching code. Defaults: connect short (5s) so dead ssh
+# -L tunnels surface as ConnectError quickly; write/pool moderate;
+# read timeout always comes from the per-call ``timeout`` arg because
+# verify legitimately runs minutes on heavy DSLs.
+def _connect_timeout_s() -> float:
+    return float(get_akg_env_var("WORKER_CONNECT_TIMEOUT_S", "5.0"))
+
+
+def _write_timeout_s() -> float:
+    return float(get_akg_env_var("WORKER_WRITE_TIMEOUT_S", "30.0"))
+
+
+def _pool_timeout_s() -> float:
+    return float(get_akg_env_var("WORKER_POOL_TIMEOUT_S", "5.0"))
+
+
+def _transient_retry_attempts() -> int:
+    """Max attempts (incl. first) for the ConnectError retry path. Only
+    consulted when ``on_transient_failure`` is wired. Default 2 = one
+    retry after invoking the callback. Set to 1 for fail-fast."""
+    return max(1, int(get_akg_env_var("WORKER_TRANSIENT_ATTEMPTS", "2")))
+
+
+def _http_timeout(read_seconds: float) -> httpx.Timeout:
+    """httpx.Timeout with connect/read/write/pool split so a hung daemon
+    or dead tunnel can't make a single call swallow the full read budget."""
+    return httpx.Timeout(
+        connect=_connect_timeout_s(),
+        read=read_seconds,
+        write=_write_timeout_s(),
+        pool=_pool_timeout_s(),
+    )
+
 
 class RemoteWorker(WorkerInterface):
     """
     Remote implementation of WorkerInterface.
     Delegates verification tasks to a remote VerificationService via HTTP.
-    
+
     RemoteWorker 通过 HTTP API 管理远程服务器的设备池：
     - acquire_device(): 向远程服务器请求分配设备
     - release_device(): 归还设备给远程服务器
     - verify()/profile(): 发送任务到远程服务器执行
+
+    ``on_transient_failure``: optional callback the worker invokes once
+    after a ConnectError on long-running calls (verify/profile). Caller
+    wires it to e.g. ``ar_cli worker --reconnect-tunnel`` so a dead ssh
+    -L tunnel auto-heals between attempts.
     """
-    def __init__(self, worker_url: str):
+    def __init__(self, worker_url: str,
+                 on_transient_failure: Optional[Callable[[], None]] = None):
         self.worker_url = worker_url.rstrip('/')
+        self.on_transient_failure = on_transient_failure
     
     async def acquire_device(self, task_id: str = "unknown", timeout: float = None) -> int:
         """
@@ -97,40 +143,70 @@ class RemoteWorker(WorkerInterface):
             logger.warning("Unexpected error when fetching remote doc '%s': %s", doc_name, e)
             return ""
 
+    async def _post_with_reconnect(self, url: str, files, data,
+                                   read_timeout: float, task_id: str):
+        """POST helper: attempt up to ``_transient_retry_attempts()`` times;
+        on each ConnectError invoke ``on_transient_failure`` (if set) and
+        retry. Other HTTP errors and read timeouts bubble up to the
+        caller so per-endpoint error handling can shape the response."""
+        attempts = (_transient_retry_attempts()
+                    if self.on_transient_failure is not None else 1)
+        last_exc = None
+        for attempt in range(attempts):
+            try:
+                async with httpx.AsyncClient(timeout=_http_timeout(read_timeout)) as client:
+                    response = await client.post(url, files=files, data=data)
+                    response.raise_for_status()
+                    return response.json()
+            except httpx.ConnectError as e:
+                last_exc = e
+                if attempt + 1 < attempts:
+                    logger.warning(
+                        f"[{task_id}] 连接 worker {self.worker_url} 失败 "
+                        f"（第 {attempt + 1}/{attempts} 次）；调用 "
+                        f"on_transient_failure 后重试"
+                    )
+                    try:
+                        self.on_transient_failure()
+                    except Exception as cb_err:
+                        logger.error(
+                            f"[{task_id}] on_transient_failure 抛异常：{cb_err}"
+                        )
+                    continue
+                raise
+        raise last_exc
+
     async def verify(self, package_data: bytes, task_id: str, op_name: str, timeout: int = 300) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Send verification task to remote worker.
-        
+
         Returns:
             Tuple[bool, str, Dict[str, Any]]: (success, log, artifacts)
         """
         verify_url = f"{self.worker_url}/api/v1/verify"
-        
+
         try:
-            async with httpx.AsyncClient(timeout=timeout + 10) as client:
-                # Prepare multipart form data - use .tar extension
-                files = {'package': ('package.tar', package_data, 'application/x-tar')}
-                data = {
-                    'task_id': task_id, 
-                    'op_name': op_name,
-                    'timeout': str(timeout)
-                }
-                
-                logger.info(f"[{task_id}] Sending verification request to {verify_url}")
-                
-                response = await client.post(verify_url, files=files, data=data)
-                response.raise_for_status()
-                
-                result = response.json()
-                success = result.get('success', False)
-                log = result.get('log', '')
-                artifacts = result.get('artifacts', {})
-                
-                if artifacts:
-                    logger.info(f"[{task_id}] Received {len(artifacts)} artifact files from remote worker")
-                
-                return success, log, artifacts
-                
+            files = {'package': ('package.tar', package_data, 'application/x-tar')}
+            data = {
+                'task_id': task_id,
+                'op_name': op_name,
+                'timeout': str(timeout)
+            }
+            logger.info(f"[{task_id}] Sending verification request to {verify_url}")
+
+            result = await self._post_with_reconnect(
+                verify_url, files=files, data=data,
+                read_timeout=timeout + 10, task_id=task_id,
+            )
+            success = result.get('success', False)
+            log = result.get('log', '')
+            artifacts = result.get('artifacts', {})
+
+            if artifacts:
+                logger.info(f"[{task_id}] Received {len(artifacts)} artifact files from remote worker")
+
+            return success, log, artifacts
+
         except httpx.RequestError as e:
             error_msg = f"Network error communicating with worker at {self.worker_url}: {e}. Please check if the worker service is running and accessible."
             logger.error(f"[{task_id}] {error_msg}")
@@ -147,69 +223,61 @@ class RemoteWorker(WorkerInterface):
     async def profile(self, package_data: bytes, task_id: str, op_name: str, profile_settings: Dict[str, Any]) -> Dict[str, Any]:
         """
         Send profiling task to remote worker.
-        
+
         Returns:
             Dict[str, Any]: 包含 gen_time, base_time, speedup, artifacts 等字段
         """
         profile_url = f"{self.worker_url}/api/v1/profile"
-        
+        timeout = profile_settings.get('timeout', 300)
         try:
-            # 获取 timeout 设置，默认为 300s (5分钟)
-            # 加上 10s 缓冲时间用于网络传输等
-            timeout = profile_settings.get('timeout', 300)
-            async with httpx.AsyncClient(timeout=timeout + 10) as client:
-                files = {'package': ('package.tar', package_data, 'application/x-tar')}
-                data = {
-                    'task_id': task_id, 
-                    'op_name': op_name,
-                    'profile_settings': json.dumps(profile_settings)
-                }
-                
-                logger.info(f"[{task_id}] Sending profiling request to {profile_url}")
-                
-                response = await client.post(profile_url, files=files, data=data)
-                response.raise_for_status()
-                
-                result = response.json()
-                artifacts = result.get('artifacts', {})
-                if artifacts:
-                    logger.info(f"[{task_id}] Received {len(artifacts)} artifact files from remote worker")
-                
-                return result
-                
+            files = {'package': ('package.tar', package_data, 'application/x-tar')}
+            data = {
+                'task_id': task_id,
+                'op_name': op_name,
+                'profile_settings': json.dumps(profile_settings)
+            }
+            logger.info(f"[{task_id}] Sending profiling request to {profile_url}")
+
+            result = await self._post_with_reconnect(
+                profile_url, files=files, data=data,
+                read_timeout=timeout + 10, task_id=task_id,
+            )
+            artifacts = result.get('artifacts', {})
+            if artifacts:
+                logger.info(f"[{task_id}] Received {len(artifacts)} artifact files from remote worker")
+
+            return result
+
         except Exception as e:
             logger.error(f"[{task_id}] Remote profiling failed: {e}")
             return {'artifacts': {}}
 
-    async def profile_single_task(self, package_data: bytes, task_id: str, op_name: str, 
+    async def profile_single_task(self, package_data: bytes, task_id: str, op_name: str,
                                    profile_settings: Dict[str, Any]) -> Dict[str, Any]:
         """
         Send single task profiling request to remote worker.
-        
+
         单独测量某段代码的执行性能，不进行 base vs generation 对比。
-        
+
         Returns:
             Dict[str, Any]: 包含 time_us, success, log 等字段
         """
         profile_url = f"{self.worker_url}/api/v1/profile_single_task"
-        
+        timeout = profile_settings.get('timeout', 300)
         try:
-            timeout = profile_settings.get('timeout', 300)
-            async with httpx.AsyncClient(timeout=timeout + 10) as client:
-                files = {'package': ('package.tar', package_data, 'application/x-tar')}
-                data = {
-                    'task_id': task_id, 
-                    'op_name': op_name,
-                    'profile_settings': json.dumps(profile_settings)
-                }
-                
-                logger.info(f"[{task_id}] Sending profile_single_task request to {profile_url}")
-                
-                response = await client.post(profile_url, files=files, data=data)
-                response.raise_for_status()
-                
-                result = response.json()
-                return result
+            files = {'package': ('package.tar', package_data, 'application/x-tar')}
+            data = {
+                'task_id': task_id,
+                'op_name': op_name,
+                'profile_settings': json.dumps(profile_settings)
+            }
+            logger.info(f"[{task_id}] Sending profile_single_task request to {profile_url}")
+
+            result = await self._post_with_reconnect(
+                profile_url, files=files, data=data,
+                read_timeout=timeout + 10, task_id=task_id,
+            )
+            return result
                 
         except httpx.RequestError as e:
             error_msg = f"Network error communicating with worker at {self.worker_url}: {e}"

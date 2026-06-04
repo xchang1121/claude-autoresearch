@@ -8,7 +8,7 @@ Two clean branches, no fallback chains:
   ``.ar_state/state.json`` ancestor) → that task's ``phase`` +
   ``editable_files`` rules apply via ``phase_machine.check_edit``. Session
   ownership is irrelevant here — file path is a hard fact, state.owner is
-  a soft hint that can go stale (machine sleep, TUI restart, etc.).
+  a soft hint that can drift out of sync with the live process.
 
   Branch 2: edit target is outside every AR task_dir. If the current
   session owns a task in flight, this is an off-flow edit ("the agent's
