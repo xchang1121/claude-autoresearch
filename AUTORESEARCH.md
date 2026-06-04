@@ -606,15 +606,16 @@ Worker 是个 FastAPI HTTP daemon，跑 eval 子进程。`scripts/ar_cli.py work
 ```bash
 scripts/ar_cli.py worker --remote-host my-npu --start --backend ascend --devices 0,1
 scripts/ar_cli.py worker --remote-host my-npu --status
-scripts/ar_cli.py worker --remote-host my-npu --reconnect-tunnel   # tunnel 抖了重连
 scripts/ar_cli.py worker --remote-host my-npu --stop
 ```
 
 去掉 `--remote-host <alias>` 即在本机直接起 daemon，无 SSH / tunnel。
 
+`--start` 幂等：daemon 已在跑就不再 spawn；tunnel 抖了再跑一次 `--start` 即可恢复。`--status` 是纯查询，不做任何 spawn / 重连副作用。
+
 ### 参数
 
-`--start` / `--stop` / `--status` / `--reconnect-tunnel` 四选一，互斥。
+`--start` / `--stop` / `--status` 三选一，互斥。
 
 | flag | 类型 | 默认 | 必填 | 说明 |
 |---|---|---|---|---|
@@ -622,7 +623,6 @@ scripts/ar_cli.py worker --remote-host my-npu --stop
 | `--devices` | csv，如 `0,1,2` | — | `--start` 必填 | device id 列表 |
 | `--arch` | 字符串，如 `ascend910b3` | auto（`npu-smi info` 推断）| 可省 | 硬件 arch |
 | `--port` | int | `config.yaml: worker.port`，否则 `9001` | 可省 | TCP 端口 |
-| `--host` | IP | `127.0.0.1` | 可省 | 监听 / 探测地址 |
 | `--remote-host` | alias | — | 可省 | 走 SSH 远端模式；alias 在 `config.yaml: remote_worker.hosts.<alias>` 定义 |
 
 `config.yaml: remote_worker.hosts` 字段：

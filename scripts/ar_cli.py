@@ -173,78 +173,78 @@ def cmd_worker_start(args) -> int:
             return 2
         args.arch = derived
 
+    # Idempotency: skip spawn if daemon already alive.
+    if _curl_status("127.0.0.1", args.port):
+        print(f"[ar_cli] daemon already alive on :{args.port}; nothing to do")
+        return 0
+
+    if os.name != "posix":
+        print("[ar_cli] worker --start requires POSIX (detached process "
+              "group). On Windows, use --remote-host or run "
+              "`python -m worker.server` directly.", file=sys.stderr)
+        return 2
+
     env = os.environ.copy()
     env["WORKER_BACKEND"] = args.backend
     env["WORKER_ARCH"] = args.arch
     env["WORKER_DEVICES"] = args.devices
-    env["WORKER_HOST"] = args.host
+    env["WORKER_HOST"] = "0.0.0.0"
     env["WORKER_PORT"] = str(args.port)
     env["PYTHONIOENCODING"] = "utf-8"  # propagates UTF-8 to worker.server + its eval subprocs
 
     cmd = [sys.executable, "-m", "worker.server"]
 
-    if args.bg:
-        if os.name != "posix":
-            print("[ar_cli] --bg requires POSIX (detached process group). "
-                  "On Windows, run without --bg and redirect output.",
-                  file=sys.stderr)
-            return 2
+    log_path = _worker_log_path(args.port)
+    log_fh = open(log_path, "ab", buffering=0)
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(SCRIPT_DIR),
+        env=env,
+        stdout=log_fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        preexec_fn=os.setsid,
+    )
 
-        log_path = _worker_log_path(args.port)
-        log_fh = open(log_path, "ab", buffering=0)
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(SCRIPT_DIR),
-            env=env,
-            stdout=log_fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            preexec_fn=os.setsid,
-        )
+    # Poll /status until ready or timeout — gives a clear failure
+    # message instead of "fork succeeded, daemon crashed silently".
+    ready_timeout = worker_ready_timeout()
+    deadline = time.time() + ready_timeout
+    ready = False
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break  # process died during boot
+        if _curl_status("127.0.0.1", args.port,
+                        timeout=worker_ready_probe_timeout()):
+            ready = True
+            break
+        time.sleep(worker_ready_poll_interval())
 
-        # Poll /status until ready or timeout — gives a clear failure
-        # message instead of "fork succeeded, daemon crashed silently".
-        ready_timeout = worker_ready_timeout()
-        deadline = time.time() + ready_timeout
-        ready = False
-        while time.time() < deadline:
-            if proc.poll() is not None:
-                break  # process died during boot
-            if _curl_status("127.0.0.1", args.port,
-                            timeout=worker_ready_probe_timeout()):
-                ready = True
-                break
-            time.sleep(worker_ready_poll_interval())
+    if not ready:
+        rc = proc.poll()
+        tail = ""
+        try:
+            with open(log_path, "rb") as f:
+                tail = f.read()[-1500:].decode(errors="replace")
+        except Exception:
+            pass
+        print(f"[ar_cli] worker on :{args.port} did not become ready "
+              f"within {ready_timeout:g}s (process rc={rc}). "
+              f"Log tail:\n{tail}",
+              file=sys.stderr)
+        return 1
 
-        if not ready:
-            rc = proc.poll()
-            tail = ""
-            try:
-                with open(log_path, "rb") as f:
-                    tail = f.read()[-1500:].decode(errors="replace")
-            except Exception:
-                pass
-            print(f"[ar_cli] worker on :{args.port} did not become ready "
-                  f"within {ready_timeout:g}s (process rc={rc}). "
-                  f"Log tail:\n{tail}",
-                  file=sys.stderr)
-            return 1
-
-        print("=" * 56)
-        print("AutoResearch Worker (daemon)")
-        print("-" * 56)
-        print(f"  Backend : {args.backend}")
-        print(f"  Arch    : {args.arch}")
-        print(f"  Devices : {args.devices}")
-        print(f"  Host    : {args.host}")
-        print(f"  Port    : {args.port}")
-        print(f"  PID     : {proc.pid}")
-        print(f"  Log     : {log_path}")
-        print("-" * 56)
-        print(f"  Stop: ar_cli worker --stop --port {args.port}")
-        print("=" * 56)
-        return 0
-
-    # Foreground
-    return subprocess.call(cmd, cwd=str(SCRIPT_DIR), env=env)
+    print("=" * 56)
+    print("AutoResearch Worker (daemon)")
+    print("-" * 56)
+    print(f"  Backend : {args.backend}")
+    print(f"  Arch    : {args.arch}")
+    print(f"  Devices : {args.devices}")
+    print(f"  Port    : {args.port}")
+    print(f"  PID     : {proc.pid}")
+    print(f"  Log     : {log_path}")
+    print("-" * 56)
+    print(f"  Stop: ar_cli worker --stop --port {args.port}")
+    print("=" * 56)
+    return 0
 
 
 def cmd_worker_stop(args) -> int:
@@ -289,12 +289,13 @@ def cmd_worker_stop(args) -> int:
 def cmd_worker_status(args) -> int:
     """status 同时探 /status + /health。/status 只验 HTTP server 在线；
     /health 走一次真实 device acquire/release 抓 handler 死锁。旧版 daemon
-    /health 端点不存在时返 None，退化为只看 /status。"""
-    st = _curl_status(args.host, args.port)
+    /health 端点不存在时返 None，退化为只看 /status。纯查询，无副作用。"""
+    host = "127.0.0.1"
+    st = _curl_status(host, args.port)
     if st is None:
-        print(f"Worker on {args.host}:{args.port} unreachable.")
+        print(f"Worker on {host}:{args.port} unreachable.")
         return 1
-    health = _curl_health(args.host, args.port)
+    health = _curl_health(host, args.port)
     out = dict(st)
     if health is not None:
         out["health"] = {"healthy": bool(health.get("healthy")),
@@ -333,18 +334,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     action = w.add_mutually_exclusive_group(required=True)
     action.add_argument("--start", action="store_true",
-                        help="Start the worker on this machine.")
+                        help="Start the worker. Idempotent: skips spawn "
+                             "if daemon is already alive; rebuilds the "
+                             "ssh -L tunnel on demand for --remote-host.")
     action.add_argument("--stop", action="store_true",
                         help="Stop the daemon listening on --port. "
                              "POSIX-only (uses ss/lsof + SIGTERM/SIGKILL).")
     action.add_argument("--status", action="store_true",
-                        help="Curl /api/v1/status on --host:--port.")
-    action.add_argument("--reconnect-tunnel", action="store_true",
-                        dest="reconnect_tunnel",
-                        help="Only rebuild the local ssh -L tunnel "
-                             "(don't restart remote daemon). Use when a "
-                             "long batch silently lost its tunnel. "
-                             "--remote-host required.")
+                        help="Pure query: probe /api/v1/status + /health. "
+                             "No spawn / reconnect side effects.")
 
     w.add_argument("--backend", choices=["ascend", "cuda", "cpu"],
                    help="Hardware backend (required for --start).")
@@ -356,17 +354,9 @@ def _build_parser() -> argparse.ArgumentParser:
     w.add_argument("--devices",
                    help="Comma-separated device IDs, e.g. '2,5' "
                         "(required for --start).")
-
-    w.add_argument("--host", default=None,
-                   help="Bind / probe address. Default 127.0.0.1 (SSH-only; "
-                        "the worker is reached via an ssh -L tunnel, never "
-                        "bound to a public interface).")
     w.add_argument("--port", type=int, default=worker_port(),
                    help=f"TCP port (default: {worker_port()}, "
                         f"from config.yaml worker.port).")
-    w.add_argument("--bg", action="store_true",
-                   help="Daemon mode for --start (detach, log to "
-                        "/tmp/ar_worker_<port>.log). POSIX-only.")
     w.add_argument("--force", action="store_true",
                    help="For --stop: skip the worker-cmdline safety check.")
 
@@ -384,10 +374,6 @@ def _validate_worker_args(args) -> Optional[str]:
     if args.start and not (args.backend and args.devices):
         return ("--start requires --backend and --devices "
                 "(--arch is auto-derived from npu-smi when omitted).")
-    if args.host is None:
-        # SSH-only: always loopback. The worker is reached through an
-        # ssh -L tunnel, never by binding a public interface.
-        args.host = "127.0.0.1"
     return None
 
 
@@ -400,10 +386,6 @@ def _dispatch_worker(args) -> int:
     if args.remote_host:
         return _dispatch_remote_worker(args)
 
-    if args.reconnect_tunnel:
-        print("[ar_cli] --reconnect-tunnel only meaningful with --remote-host.",
-              file=sys.stderr)
-        return 2
     if args.start:
         return cmd_worker_start(args)
     if args.stop:
@@ -461,7 +443,11 @@ def _build_remote_ar_cli_cmd(host_cfg: dict, ar_cli_args: list[str]) -> str:
 def _strip_remote_flags(args) -> list[str]:
     """Reconstruct the non-remote ar_cli worker args for the remote side.
     Mirrors the parser flags exactly so the remote ar_cli runs the same
-    code path as if the user typed it directly there."""
+    code path as if the user typed it directly there.
+
+    The remote daemon always binds 0.0.0.0 (by env in cmd_worker_start);
+    the local ssh -L tunnel reaches it via the remote's 127.0.0.1 anyway.
+    """
     out = ["worker"]
     if args.start:
         out.append("--start")
@@ -476,12 +462,6 @@ def _strip_remote_flags(args) -> list[str]:
         out += ["--arch", args.arch]
     if args.devices:
         out += ["--devices", args.devices]
-    # SSH-only: bind the remote worker to loopback. The dev-side ssh -L
-    # tunnel forwards to the remote's 127.0.0.1:<port>, so loopback is
-    # both sufficient and the only exposure we want — never a public
-    # interface.
-    if args.start:
-        out += ["--host", "127.0.0.1", "--bg"]
     out += ["--port", str(args.port)]
     if args.force:
         out.append("--force")
@@ -634,70 +614,64 @@ def _dispatch_remote_worker(args) -> int:
 
     ssh_alias = host_cfg.get("ssh_alias") or args.remote_host
 
-    # Tunnel-only reconnect: rebuild the local ssh -L without SSH-ing to
-    # the remote daemon. Use when a long batch silently lost the tunnel
-    # but the daemon is still alive.
-    if args.reconnect_tunnel:
-        _tunnel_stop_silent(args.port, ssh_alias)
-        pid = _tunnel_start(ssh_alias, args.port)
-        if pid:
-            print(f"[ar_cli] ssh -L 127.0.0.1:{args.port} -> "
-                  f"{ssh_alias}:{args.port} reconnected (tunnel pid={pid})")
+    if args.status:
         st = _curl_status("127.0.0.1", args.port)
         if st is None:
-            print(f"[ar_cli] tunneled status probe failed after reconnect; "
-                  f"remote daemon may have died too — use --stop + --start.",
-                  file=sys.stderr)
-            return 1
-        print(json.dumps(st, indent=2))
-        return 0
-
-    remote_args = _strip_remote_flags(args)
-    remote_cmd = _build_remote_ar_cli_cmd(host_cfg, remote_args)
-
-    print(f"[ar_cli] remote ({ssh_alias}): {remote_cmd}", file=sys.stderr)
-    # Pass the bash command as a SINGLE ssh arg so OpenSSH ships it
-    # verbatim to the remote shell. Splitting `bash`, `-lc`, remote_cmd
-    # into separate args makes ssh join them with spaces, and the
-    # remote shell parses `bash -lc source ...` — `source` becomes the
-    # -c body and the rest are $0, $1, ..., which silently drops the
-    # env_script path.
-    rc = subprocess.call(["ssh", ssh_alias, f"bash -lc {shlex.quote(remote_cmd)}"])
-    if rc != 0:
-        print(f"[ar_cli] remote ar_cli exited rc={rc}", file=sys.stderr)
-        return rc
-
-    # Tunnel management is paired with daemon lifecycle.
-    if args.start:
-        pid = _tunnel_start(ssh_alias, args.port)
-        if pid:
-            print(f"[ar_cli] ssh -L 127.0.0.1:{args.port} -> "
-                  f"{ssh_alias}:{args.port} (tunnel pid={pid})")
-        # Verify the tunneled endpoint actually answers.
-        st = _curl_status("127.0.0.1", args.port)
-        if st is None:
-            print(f"[ar_cli] tunneled status probe failed; remote daemon may "
-                  f"not be ready or tunnel didn't bind.", file=sys.stderr)
+            print(f"Worker tunnel 127.0.0.1:{args.port} unreachable "
+                  f"(run `--start` to (re)build it).")
             return 1
         print(json.dumps(st, indent=2))
         return 0
 
     if args.stop:
+        remote_args = _strip_remote_flags(args)
+        remote_cmd = _build_remote_ar_cli_cmd(host_cfg, remote_args)
+        print(f"[ar_cli] remote ({ssh_alias}): {remote_cmd}", file=sys.stderr)
+        rc = subprocess.call(
+            ["ssh", ssh_alias, f"bash -lc {shlex.quote(remote_cmd)}"])
         _tunnel_stop_silent(args.port, ssh_alias)
         print(f"[ar_cli] tore down local tunnel for :{args.port}")
-        return 0
+        return rc
 
-    if args.status:
-        # Hit the local tunnel (assumes --start set it up).
-        st = _curl_status("127.0.0.1", args.port)
-        if st is None:
-            print(f"Worker tunnel 127.0.0.1:{args.port} unreachable "
-                  f"(--start may not have been called, or tunnel died).")
-            return 1
+    # args.start path — idempotent:
+    #   1. probe 127.0.0.1:port via existing tunnel → alive: done
+    #   2. rebuild tunnel + re-probe → alive: daemon was fine, tunnel was dead
+    #   3. SSH-spawn remote daemon, then ensure tunnel is up
+    st = _curl_status("127.0.0.1", args.port)
+    if st is not None:
+        print(f"[ar_cli] daemon at 127.0.0.1:{args.port} already alive; "
+              f"nothing to do")
         print(json.dumps(st, indent=2))
         return 0
 
-    return 2
+    _tunnel_stop_silent(args.port, ssh_alias)
+    pid = _tunnel_start(ssh_alias, args.port)
+    if pid:
+        print(f"[ar_cli] ssh -L 127.0.0.1:{args.port} -> "
+              f"{ssh_alias}:{args.port} (tunnel pid={pid})")
+    st = _curl_status("127.0.0.1", args.port)
+    if st is not None:
+        print(f"[ar_cli] tunnel rebuilt; daemon was already running remotely")
+        print(json.dumps(st, indent=2))
+        return 0
+
+    # Need to actually spawn the remote daemon.
+    remote_args = _strip_remote_flags(args)
+    remote_cmd = _build_remote_ar_cli_cmd(host_cfg, remote_args)
+    print(f"[ar_cli] remote ({ssh_alias}): {remote_cmd}", file=sys.stderr)
+    rc = subprocess.call(
+        ["ssh", ssh_alias, f"bash -lc {shlex.quote(remote_cmd)}"])
+    if rc != 0:
+        print(f"[ar_cli] remote ar_cli exited rc={rc}", file=sys.stderr)
+        return rc
+    st = _curl_status("127.0.0.1", args.port)
+    if st is None:
+        print(f"[ar_cli] tunneled status probe failed after spawn; remote "
+              f"daemon may not be ready or tunnel didn't bind.",
+              file=sys.stderr)
+        return 1
+    print(json.dumps(st, indent=2))
+    return 0
 
 
 def main() -> int:
