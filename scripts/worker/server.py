@@ -272,41 +272,49 @@ async def status():
 
 @app.get("/api/v1/health")
 async def health():
-    """深度健康检查 —— 比 /status 多一步：实际 acquire+release 一个 device，
-    暴露 device 队列卡死 / 事件循环死锁 / 锁竞争之类只在请求路径上才显形
-    的问题。整体 5 秒内必须返回；超时即视为 degraded。
+    """非阻塞健康探活 —— 验"daemon 接 /run 时的请求路径还活着"，但
+    不抢占设备：
 
-    /status 只验证 HTTP server 在线；/health 走一遍 worker 真实接 /run
-    时要走的最短路径，能够发现"status 回 200 但 /run 永远挂"那类
-    handler 死锁。"""
+      - 用 ``asyncio.Queue.get_nowait()`` 试取一次 device，能取就立刻
+        放回；空队列（满载）当作 healthy（"忙不是坏"），不报 degraded
+      - 整个 handler 5s 超时；超时仅当事件循环本身卡了
+
+    /status 只验证 HTTP server 在线；/health 走一遍真实的 queue 操作
+    路径，能抓出"event loop 卡住"或"queue 锁竞争"那类故障。**不会**
+    阻塞等设备，所以满载 worker 不会被误判 degraded。"""
     if "queue" not in _state:
-        return {"status": "initializing", "healthy": False}
+        return {"status": "initializing", "healthy": False, "free": 0}
 
+    queue = _state["queue"]
     base = {
         "status": "ready",
         "backend": _state["backend"],
         "arch": _state["arch"],
         "devices": _state["devices"],
-        "free": _state["queue"].qsize(),
+        "free": queue.qsize(),
         "healthy": False,
     }
 
     async def _probe():
-        device_id = await _state["queue"].get()
         try:
-            return device_id
-        finally:
-            await _state["queue"].put(device_id)
+            device_id = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            # All devices busy — daemon is fine, just at capacity.
+            return None
+        queue.put_nowait(device_id)
+        return device_id
 
     try:
         device_id = await asyncio.wait_for(_probe(), timeout=5.0)
-        base["probed_device"] = device_id
         base["healthy"] = True
-        logger.info(f"健康探活通过：device queue 正常 (probed device={device_id})")
+        if device_id is not None:
+            base["probed_device"] = device_id
+        else:
+            base["note"] = "all devices busy (healthy, just at capacity)"
         return base
     except asyncio.TimeoutError:
-        base["error"] = "device acquire/release timed out (>5s) —— device queue 可能锁死或所有设备被长时间占用"
-        logger.warning("健康探活超时：device queue 5 秒内未响应")
+        base["error"] = "event loop unresponsive (>5s) —— 事件循环可能卡死"
+        logger.warning("健康探活超时：event loop 5 秒内未响应")
         return base
     except Exception as e:
         base["error"] = f"健康探活异常：{type(e).__name__}: {e}"
