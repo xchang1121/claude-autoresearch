@@ -45,9 +45,17 @@ import yaml
 from utils.ref_ast import validate_ref  # noqa: E402, F401  (re-export)
 from utils.settings import (  # noqa: E402
     default_max_rounds, default_eval_timeout, default_metric,
-    default_code_checker_enabled, target_backend,
+    default_code_checker_enabled, target_backend, target_dsl,
 )
 from task_config import REF_FILE_DEFAULT  # noqa: E402
+
+
+# DSL-aware scaffold dispatch: every per-DSL knob (does --kernel take a
+# directory, what files beyond kernel.py are editable, what extra source
+# tree gets copied into task_dir) is owned by the DSL adapter.
+def _scaffold_dsl_adapter():
+    from eval.adapters.factory import get_dsl_adapter
+    return get_dsl_adapter(target_dsl())
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +74,8 @@ def scaffold_task_dir(
     eval_timeout: int | None = None,
     output_dir: str | None = None,
     editable_filename: str = "kernel.py",
+    editable_files: list | None = None,
+    kernel_project_src: str | None = None,
     code_checker_enabled: bool | None = None,
     ref_source_path: str | None = None,
     worker_url: str = "",
@@ -90,6 +100,7 @@ def scaffold_task_dir(
     # Write reference.py and the seed kernel.py from the user's files.
     _write(task_dir, REF_FILE_DEFAULT, ref_code)
     _write(task_dir, editable_filename, kernel_code)
+    _scaffold_dsl_adapter().materialize_project_tree(task_dir, kernel_project_src)
 
     # NPUKernelBench-style refs read shape lists from a sibling JSON via
     # `os.path.join(os.path.dirname(__file__), "<basename>.json")`;
@@ -161,7 +172,7 @@ def scaffold_task_dir(
         "name": op_name,
         "description": desc or f"Optimize {op_name}",
         "arch": arch or None,
-        "editable_files": [editable_filename],
+        "editable_files": editable_files or [editable_filename],
         "eval": eval_block,
         "metric": {
             "primary": default_metric()["primary"],
@@ -260,7 +271,8 @@ def _make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ref", required=True,
                         help="Path to reference.py (Model/get_inputs format)")
     parser.add_argument("--kernel", required=True,
-                        help="Path to seed kernel file")
+                        help="Path to seed kernel file, or a DSL project "
+                             "directory when the configured DSL supports it")
     parser.add_argument("--op-name", default=None,
                         help="Operator name (required)")
     # The repo is locked to triton_ascend on Ascend NPU + PyTorch by
@@ -348,12 +360,19 @@ def main():
         print(json.dumps({"status": "error", "error": str(e)}))
         sys.exit(1)
 
-    if not os.path.isfile(args.kernel):
+    kernel_path = os.path.abspath(args.kernel)
+    if not os.path.exists(kernel_path):
         print(json.dumps({"status": "error",
-                          "error": f"Kernel file not found: {args.kernel}"}))
+                          "error": f"--kernel path not found: {args.kernel}"}))
         sys.exit(1)
-    with open(args.kernel, "r", encoding="utf-8") as f:
-        kernel_code = f.read()
+    adapter = _scaffold_dsl_adapter()
+    try:
+        kernel_code, kernel_project_src = adapter.read_kernel_source(
+            kernel_path, op_name=args.op_name)
+    except FileNotFoundError as e:
+        print(json.dumps({"status": "error", "error": str(e)}))
+        sys.exit(1)
+    editable_files = ["kernel.py"] + list(adapter.kernel_project_files)
 
     # devices_list was resolved above.
     print(f"[scaffold] Creating task directory for {args.op_name}...", file=sys.stderr)
@@ -370,6 +389,8 @@ def main():
         code_checker_enabled=args.code_checker,  # None -> config default
         ref_source_path=args.ref,
         worker_url=args.worker_url,
+        kernel_project_src=kernel_project_src,
+        editable_files=editable_files,
     )
 
     print(f"[scaffold] Task directory created: {task_dir}", file=sys.stderr)

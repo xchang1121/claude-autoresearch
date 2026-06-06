@@ -166,6 +166,10 @@ class TaskConfig:
     the task package via HTTP POST to the first reachable worker. Local
     devices are the fallback."""
 
+    # ascendc_catlass: optional paths (else CATLASS_ROOT env + task_dir/catlass_op/)
+    catlass_root: Optional[str] = None
+    catlass_op_dir: str = "catlass_op"
+
 
 # ---------------------------------------------------------------------------
 # YAML loader
@@ -255,6 +259,14 @@ def load_task_config(task_dir: str) -> Optional[TaskConfig]:
               f"if this isn't what you intended.", file=_sys.stderr)
         raw_ref = REF_FILE_DEFAULT
 
+    catlass_block = raw.get("catlass") or {}
+    catlass_root = catlass_block.get("root")
+    catlass_op_dir = (
+        catlass_block.get("op_dir")
+        or catlass_block.get("catlass_op_dir")
+        or "catlass_op"
+    )
+
     config = TaskConfig(
         name=name,
         description=raw.get("description", ""),
@@ -278,6 +290,8 @@ def load_task_config(task_dir: str) -> Optional[TaskConfig]:
         max_rounds=agent_block.get("max_rounds", default_max_rounds()),
         devices=devices,
         worker_urls=worker_urls,
+        catlass_root=catlass_root,
+        catlass_op_dir=catlass_op_dir,
     )
     # editable_files drives kernel-file resolution in eval (local + remote).
     # Reject an empty list (e.g. an 'editable_file' typo in task.yaml) at
