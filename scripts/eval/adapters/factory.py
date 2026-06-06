@@ -62,6 +62,9 @@ def get_dsl_adapter(dsl: str):
     elif dsl_lower == "ascendc":
         from .dsl.ascendc import DSLAdapterAscendC
         return DSLAdapterAscendC()
+    elif dsl_lower == "ascendc_catlass":
+        from .dsl.ascendc_catlass import DSLAdapterAscendC_Catlass
+        return DSLAdapterAscendC_Catlass()
     elif dsl_lower == "cpp":
         from .dsl.cpp import DSLAdapterCpp
         return DSLAdapterCpp()

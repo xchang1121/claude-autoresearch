@@ -67,7 +67,8 @@ RUN_TEMPLATE_PATH = os.path.join(get_project_root(), "compile", "ascend", "run.s
 # 类型定义
 FrameworkType = Literal["torch", "mindspore", "numpy"]
 ImplType = Literal["triton_cuda", "triton_ascend", "triton-russia", "swft",
-                   "cuda_c", "cpp", "tilelang_npuir", "tilelang_cuda", "ascendc", "torch"]
+                   "cuda_c", "cpp", "tilelang_npuir", "tilelang_cuda", "ascendc",
+                   "ascendc_catlass", "torch"]
 BackendType = Literal["cuda", "ascend", "cpu"]
 ArchType = Literal[
     "a100", "v100", "h20", "l20", "rtx3090",
