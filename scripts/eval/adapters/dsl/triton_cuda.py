@@ -21,6 +21,9 @@ from .base import DSLAdapter
 
 class DSLAdapterTritonCuda(DSLAdapter):
     """Adapter for Triton CUDA DSL."""
+
+    profile_via_python_script = True
+    impl_func_name_template = "ModelNew"
     
     def get_import_statements(self, framework: str) -> str:
         """Return Triton import statements."""

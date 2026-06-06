@@ -21,6 +21,8 @@ from .base import DSLAdapter
 
 
 class DSLAdapterPypto(DSLAdapter):
+    profile_via_python_script = True
+
     """Adapter for PyPTO DSL.
     
     PyPTO 是一种用于生成 NPU 算子的新语言，使用 @pypto.jit 装饰器和切片语法。

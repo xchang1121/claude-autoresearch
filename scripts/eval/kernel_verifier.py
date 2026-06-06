@@ -24,7 +24,7 @@ from jinja2 import Template
 from pathlib import Path
 
 from . import get_project_root
-from .config_utils import normalize_dsl
+from .config_utils import normalize_dsl, check_backend_arch
 from .adapters.factory import (
     get_framework_adapter, get_dsl_adapter, get_backend_adapter
 )
@@ -167,6 +167,9 @@ class KernelVerifier:
         else:
             raise ValueError("config is required for KernelVerifier")
         self.config["bench_type"] = bench_type
+        self.config["arch"] = self.arch
+        # Some adapters keep prepared state, so keep one instance per verifier.
+        self.dsl_adapter = get_dsl_adapter(self.dsl)
 
         aux_files = self.config.get("framework_aux_files") or {}
         factory_names = self.config.get("framework_factory_names") or {}
@@ -182,36 +185,12 @@ class KernelVerifier:
             )
         self.framework_aux_files: Dict[str, str] = aux_files
         self.framework_factory_names: Dict[str, Any] = factory_names
-        if "triton_cuda" in self.dsl or "triton_ascend" in self.dsl:
-            # 对于 triton_cuda 和 triton_ascend，统一使用 ModelNew 类格式
-            self.impl_func_name = impl_func_name or "ModelNew"
-        elif self.dsl == "torch":
-            # 对于 torch DSL (Kernel → PyTorch 转换，支持 Triton/CUDA C 等)，统一使用 ModelNew 类格式
-            self.impl_func_name = impl_func_name or "ModelNew"
-        elif self.dsl == "ascendc":
-            self.impl_func_name = impl_func_name or f"{op_name}_kernel"
-        else:
-            self.impl_func_name = impl_func_name or f"{op_name}_{dsl}_{framework}"
+        self.impl_func_name = impl_func_name or self.dsl_adapter.impl_func_name_template.format(
+            op_name=op_name, dsl=self.dsl, framework=framework,
+        )
 
         # 验证backend和arch的组合是否有效
-        if self.backend == "cuda" and self.arch not in ["a100", "v100", "h20", "l20", "rtx3090"]:
-            raise ValueError(f"cuda后端只支持a100、v100、h20、l20和rtx3090架构，当前架构: {self.arch}")
-        if self.backend == "ascend":
-            supported_ascend_archs = [
-                "ascend910b1", "ascend910b2", "ascend910b2c", "ascend910b3", "ascend910b4",
-                "ascend310p3",
-                "ascend910_9362", "ascend910_9372", "ascend910_9381",
-                "ascend910_9382", "ascend910_9391", "ascend910_9392",
-                "ascend950dt_95a",
-                "ascend950pr_950z", "ascend950pr_9572", "ascend950pr_9574", "ascend950pr_9575",
-                "ascend950pr_9576", "ascend950pr_9577", "ascend950pr_9578", "ascend950pr_9579",
-                "ascend950pr_957b", "ascend950pr_957d", "ascend950pr_9581", "ascend950pr_9582",
-                "ascend950pr_9584", "ascend950pr_9587", "ascend950pr_9588", "ascend950pr_9589",
-                "ascend950pr_958a", "ascend950pr_958b", "ascend950pr_9591", "ascend950pr_9592",
-                "ascend950pr_9599",
-            ]
-            if self.arch not in supported_ascend_archs:
-                raise ValueError(f"ascend后端不支持架构: {self.arch}，支持的架构: {supported_ascend_archs}")
+        check_backend_arch(self.backend, self.arch)
 
         # 保存Worker实例（可以在运行时动态设置）
         self.worker = worker
@@ -1046,6 +1025,25 @@ if __name__ == "__main__":
             return normalized.split("\n")
         raise TypeError(f"Unsupported code snippet type: {type(code_snippet)}")
 
+    @staticmethod
+    def _adapter_flag(adapter: Any, name: str, default: bool = False) -> bool:
+        value = getattr(adapter, name, default)
+        if callable(value):
+            value = value()
+        return bool(value)
+
+    def _project_artifacts_ready(self, verify_dir: str) -> bool:
+        if self.bench_type == "sol":
+            artifacts = [
+                os.path.join(verify_dir, "definition.json"),
+                os.path.join(verify_dir, f"{self.op_name}_{self.dsl}_impl.py"),
+            ]
+        else:
+            artifacts = self.dsl_adapter.expected_artifacts(
+                verify_dir, self.op_name, self.framework, self.bench_type, self.dsl,
+            )
+        return all(os.path.isfile(path) for path in artifacts)
+
     def _get_data_cache_config(self):
         return load_verifier_data_cache_config(self.config)
 
@@ -1436,31 +1434,16 @@ if __name__ == "__main__":
             raise
         self._write_framework_aux_files(verify_dir)
 
-        # 创建具体实现文件
-        if "ascendc" in self.dsl:
-            logger.info(f"[{self.op_name}] 检测到AscendC DSL，生成编译项目")
-            self.generate_ascendc_project(impl_code, verify_dir)
-        else:
-            # 统一使用 _impl 后缀，与 framework 文件区分
-            file_name = f"{self.op_name}_{self.dsl}_impl.py"
-            impl_file = os.path.join(verify_dir, file_name)
-
-            # 使用adapter生成import语句
-            try:
-                dsl_adapter = get_dsl_adapter(self.dsl)
-                import_statements = dsl_adapter.get_import_statements(self.framework)
-                logger.debug(f"[{self.op_name}] DSL import语句生成成功")
-            except Exception as e:
-                logger.error(f"[{self.op_name}] DSL import语句生成失败: {e}")
-                raise
-
-            try:
-                with open(impl_file, "w", encoding="utf-8") as f:
-                    f.write(import_statements + impl_code)
-                logger.debug(f"[{self.op_name}] 实现文件已创建: {impl_file}")
-            except Exception as e:
-                logger.error(f"[{self.op_name}] 实现文件创建失败: {impl_file}, 错误: {e}")
-                raise
+        # 创建具体实现文件/项目树，由 DSL adapter 决定落盘结构。
+        self.dsl_adapter.materialize_impl(
+            impl_code=impl_code,
+            verify_dir=verify_dir,
+            op_name=self.op_name,
+            framework=self.framework,
+            dsl_name=self.dsl,
+            task_info=None,
+            config=self.config,
+        )
 
         # 生成验证脚本
         verify_file = os.path.join(verify_dir, f"verify_{self.op_name}.py")
@@ -1483,7 +1466,7 @@ if __name__ == "__main__":
         logger.debug(f"[{self.op_name}] 初始化adapters: framework={self.framework}, dsl={self.dsl}, backend={self.backend}")
         try:
             framework_adapter = get_framework_adapter(self.framework)
-            dsl_adapter = get_dsl_adapter(self.dsl)
+            dsl_adapter = self.dsl_adapter
             backend_adapter = get_backend_adapter(self.backend)
             logger.debug(f"[{self.op_name}] Adapters初始化成功")
         except Exception as e:
@@ -1505,15 +1488,15 @@ if __name__ == "__main__":
 
             dsl_imports = dsl_adapter.get_import_statements(self.framework)
             logger.debug(f"[{self.op_name}] DSL imports生成成功 (长度: {len(dsl_imports)})")
-            if self.dsl == "pypto" and hasattr(dsl_adapter, "get_runtime_env_override_code"):
-                dsl_imports += dsl_adapter.get_runtime_env_override_code(
-                    pypto_run_mode=self.config.get("pypto_run_mode"),
-                    pypto_runtime_debug_mode=0,
-                )
+            dsl_imports += dsl_adapter.get_runtime_env_override_code(
+                pypto_run_mode=self.config.get("pypto_run_mode"),
+                pypto_runtime_debug_mode=0,
+            )
 
             dsl_impl_import = dsl_adapter.get_impl_import(self.op_name, self.impl_func_name)
             logger.debug(f"[{self.op_name}] DSL impl import生成成功 (长度: {len(dsl_impl_import)})")
 
+            dsl_adapter.prepare_config(self.config, task_info=None)
             special_setup_code = dsl_adapter.get_special_setup_code(framework=self.framework)
             logger.debug(f"[{self.op_name}] Special setup code生成成功 (长度: {len(special_setup_code)})")
 
@@ -1545,7 +1528,7 @@ if __name__ == "__main__":
 
             # 生成binary I/O函数（如果需要）
             binary_io_functions = ""
-            needs_binary_io = dsl_adapter.needs_binary_io()
+            needs_binary_io = self._adapter_flag(dsl_adapter, "needs_binary_io")
             if needs_binary_io:
                 binary_io_functions = framework_adapter.get_binary_io_functions(self.op_name)
                 logger.info(f"[{self.op_name}] Binary I/O函数生成成功 (长度: {len(binary_io_functions)})")
@@ -1755,7 +1738,7 @@ if __name__ == "__main__":
         # 获取adapters
         try:
             framework_adapter = get_framework_adapter(self.framework)
-            dsl_adapter = get_dsl_adapter(self.dsl)
+            dsl_adapter = self.dsl_adapter
             backend_adapter = get_backend_adapter(self.backend)
             logger.debug(f"[{self.op_name}] 性能测试Adapters初始化成功")
         except Exception as e:
@@ -1772,12 +1755,12 @@ if __name__ == "__main__":
                 inputs_factory_name=self.framework_factory_names.get("inputs_factory"),
             )
             dsl_imports = dsl_adapter.get_import_statements(self.framework)
-            if self.dsl == "pypto" and hasattr(dsl_adapter, "get_runtime_env_override_code"):
-                dsl_imports += dsl_adapter.get_runtime_env_override_code(
-                    pypto_run_mode=self.config.get("pypto_run_mode"),
-                    pypto_runtime_debug_mode=1,
-                )
+            dsl_imports += dsl_adapter.get_runtime_env_override_code(
+                pypto_run_mode=self.config.get("pypto_run_mode"),
+                pypto_runtime_debug_mode=1,
+            )
             dsl_impl_import = dsl_adapter.get_impl_import(self.op_name, self.impl_func_name)
+            dsl_adapter.prepare_config(self.config, task_info=None)
             special_setup_code = dsl_adapter.get_special_setup_code(framework=self.framework)
 
             # 生成设备设置代码
@@ -1796,7 +1779,7 @@ if __name__ == "__main__":
 
             # 生成binary I/O函数（如果需要）
             binary_io_functions = ""
-            needs_binary_io = dsl_adapter.needs_binary_io()
+            needs_binary_io = self._adapter_flag(dsl_adapter, "needs_binary_io")
             if needs_binary_io:
                 binary_io_functions = framework_adapter.get_binary_io_functions(self.op_name)
                 logger.info(f"[{self.op_name}] 性能测试Binary I/O函数生成成功")
@@ -1811,8 +1794,13 @@ if __name__ == "__main__":
             # 生成benchmark代码
             if is_base_template:
                 # Base模板：benchmark framework model
-                benchmark_code = self._generate_base_benchmark_code(framework_adapter, dsl_adapter,
-                                                                    warmup_times, run_times)
+                benchmark_code = self._generate_base_benchmark_code(
+                    framework_adapter, dsl_adapter,
+                    warmup_times, run_times,
+                    clear_l2_cache=self._adapter_flag(
+                        dsl_adapter, "benchmark_requires_l2_clear", True
+                    ),
+                )
                 logger.debug(f"[{self.op_name}] Base benchmark代码生成成功 (长度: {len(benchmark_code)})")
             else:
                 # Generation模板：benchmark implementation
@@ -2127,6 +2115,7 @@ if __name__ == "__main__":
             logger.info(f"[{self.op_name}] Using device {actual_device_id} (no worker, deprecated flow)")
 
         try:
+            self.dsl_adapter.prepare_config(self.config, task_info=task_info)
             run_times = profile_settings.get("run_times", 50)
             warmup_times = profile_settings.get("warmup_times", 5)
             effective_profile_settings = dict(profile_settings)
@@ -2148,16 +2137,7 @@ if __name__ == "__main__":
             os.makedirs(verify_dir, exist_ok=True)
 
             # 检查是否需要先生成代码文件（独立调用 profile 时需要）
-            if self.bench_type == "sol":
-                # SOL: 检查 definition.json 和 impl 文件
-                needed_file = os.path.join(verify_dir, "definition.json")
-                impl_file = os.path.join(verify_dir, f"{self.op_name}_{self.dsl}_impl.py")
-            else:
-                # KernelBench: 检查框架实现文件和 DSL 实现文件
-                needed_file = os.path.join(verify_dir, f"{self.op_name}_{self.framework}.py")
-                impl_file = os.path.join(verify_dir, f"{self.op_name}_{self.dsl}_impl.py")
-
-            if not os.path.exists(needed_file) or not os.path.exists(impl_file):
+            if not self._project_artifacts_ready(verify_dir):
                 # 代码文件不存在，需要先生成
                 impl_code = task_info.get("coder_code", "")
                 if not impl_code:
@@ -2678,6 +2658,8 @@ if __name__ == "__main__":
         if not target_code:
             logger.error("No target code found for verification")
             return False, "No target code found for verification"
+
+        self.dsl_adapter.prepare_config(self.config, task_info=task_info)
 
         # 动态创建验证目录
         verify_dir = self._create_verify_dir(current_step)

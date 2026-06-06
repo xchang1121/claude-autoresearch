@@ -26,6 +26,7 @@ from eval.roofline_utils import (
     compute_roofline_profile,
     write_roofline_profile_result,
 )
+from eval.adapters.factory import get_dsl_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -219,8 +220,11 @@ class LocalWorker(WorkerInterface):
                 
                 # 4. Execute profiling based on backend/dsl
                 try:
-                    if "pypto" in dsl or "triton_cuda" in dsl or "triton_ascend" in dsl or backend == "cpu":
-                        # PyPTO/Triton/CPU: run profile scripts directly (in sync context)
+                    profile_via_python_script = False
+                    if dsl:
+                        profile_via_python_script = get_dsl_adapter(dsl).profile_via_python_script
+                    if profile_via_python_script or backend == "cpu":
+                        # DSL-selected Python profile path, plus CPU.
                         loop = asyncio.get_running_loop()
                         base_time, gen_time = await loop.run_in_executor(
                             None,

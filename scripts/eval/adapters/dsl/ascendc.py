@@ -14,14 +14,36 @@
 
 """AscendC DSL adapter."""
 
-from typing import Any, Optional
+import logging
+import os
+import shutil
+from typing import Any, Dict, Optional
 
+from jinja2 import Template
+
+from eval import get_project_root
 from .base import DSLAdapter
+
+logger = logging.getLogger(__name__)
+
+# Templates for the AscendC compile project. The impl_code is exec'd in an
+# isolated namespace; it must populate ``host_tiling_src`` /
+# ``python_bind_src`` / ``kernel_src`` strings, which are then dropped
+# alongside a rendered CMakeLists.txt + copied run.sh.
+_CMAKE_TEMPLATE_PATH = os.path.join(
+    get_project_root(), "templates", "cmake_template.j2"
+)
+_RUN_TEMPLATE_PATH = os.path.join(
+    get_project_root(), "compile", "ascend", "run.sh"
+)
 
 
 class DSLAdapterAscendC(DSLAdapter):
     """Adapter for AscendC DSL."""
-    
+
+    impl_func_name_template = "{op_name}_kernel"
+    needs_compilation = True
+
     def get_import_statements(self, framework: str) -> str:
         """Return AscendC import statements."""
         return "import sys, os\nimport torch_npu\nimport subprocess\n"
@@ -107,14 +129,55 @@ class DSLAdapterAscendC(DSLAdapter):
 """
         return code
     
-    def needs_binary_io(self) -> bool:
-        """AscendC doesn't need binary I/O."""
-        return False
-    
-    def needs_compilation(self) -> bool:
-        """AscendC needs compilation."""
-        return True
-    
+    static_check_via_python_ast = False  # C++ kernel src, no Python AST
+
+    def materialize_impl(self, impl_code: str, verify_dir: str,
+                         op_name: str, framework: str,
+                         dsl_name: str,
+                         task_info: Optional[Dict[str, Any]] = None,
+                         config: Optional[Dict[str, Any]] = None) -> None:
+        """渲染 CMakeLists.txt + 拷 run.sh，并把 impl_code 在隔离 namespace
+        中 exec，取 ``host_tiling_src`` / ``python_bind_src`` / ``kernel_src``
+        三段字符串写到对应文件。"""
+        try:
+            cmake_file = os.path.join(verify_dir, "CMakeLists.txt")
+            with open(_CMAKE_TEMPLATE_PATH, "r", encoding="utf-8") as f:
+                template = Template(f.read())
+            cmake_code = template.render(op_name=op_name)
+            with open(cmake_file, "w", encoding="utf-8") as f:
+                f.write(cmake_code)
+            shutil.copy(_RUN_TEMPLATE_PATH, verify_dir)
+
+            ns: Dict[str, Any] = {}
+            try:
+                compile(impl_code, "<string>", "exec")
+                exec(impl_code, ns)
+            except Exception as e:
+                raise Exception(f"Error in generated code: {e}")
+
+            host_tiling_src = ns.get('host_tiling_src')
+            python_binding_src = ns.get('python_bind_src')
+            kernel_src = ns.get('kernel_src')
+
+            if host_tiling_src is None:
+                raise Exception("host_tiling_src is None - 生成的代码中缺少host侧tiling部分")
+            if python_binding_src is None:
+                raise Exception("python_bind_src is None - 生成的代码中缺少内核调用python_bind部分")
+            if kernel_src is None:
+                raise Exception("kernel_src is None - 生成的代码中缺少kernel主函数部分")
+
+            with open(os.path.join(verify_dir, f"{op_name}_tiling.cpp"), "w") as f:
+                f.write(host_tiling_src)
+            with open(os.path.join(verify_dir, "pybind11.cpp"), "w") as f:
+                f.write(python_binding_src)
+            with open(os.path.join(verify_dir, f"{op_name}_kernel.cpp"), "w") as f:
+                f.write(kernel_src)
+
+            logger.info(f"[{op_name}] AscendC项目文件生成完成")
+        except Exception as e:
+            logger.error(f"AscendC项目生成失败: {e}")
+            raise Exception(f"AscendC项目生成失败: {e}")
+
     def benchmark_impl(self, impl_func_name: str, inputs: str, 
                       warmup: int, runs: int, backend: str, op_name: str,
                       case_idx: int = 0, framework_model: Optional[str] = None,
@@ -128,4 +191,3 @@ class DSLAdapterAscendC(DSLAdapter):
         # AscendC profiling is handled by msprof in kernel_verifier
         # This method is not used for ascendc
         return ""
-

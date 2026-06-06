@@ -29,6 +29,8 @@ from .base import DSLAdapter
 
 
 class DSLAdapterTorch(DSLAdapter):
+    impl_func_name_template = "ModelNew"
+
     """Adapter for PyTorch DSL (Kernel → PyTorch conversion, supports Triton/CUDA C/etc.)."""
     
     def get_import_statements(self, framework: str) -> str:
