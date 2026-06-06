@@ -45,7 +45,7 @@ import yaml
 from utils.ref_ast import validate_ref  # noqa: E402, F401  (re-export)
 from utils.settings import (  # noqa: E402
     default_max_rounds, default_eval_timeout, default_metric,
-    default_code_checker_enabled,
+    default_code_checker_enabled, target_backend,
 )
 from task_config import REF_FILE_DEFAULT  # noqa: E402
 
@@ -297,12 +297,12 @@ def main():
     args = parser.parse_args()
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from utils.hw_detect import derive_arch
+    from utils.hw_detect import derive_arch, probe_hint
 
     # Hardware resolution: --devices is required unless --worker-url routes
-    # eval to a remote machine. The repo is locked to triton_ascend / torch
-    # / ascend by construction — those constants live in TaskConfig defaults
-    # / generated templates, not on `args`.
+    # eval to a remote machine. backend / framework / dsl are pinned in
+    # config.yaml; arch varies per machine and is probed from --devices.
+    backend = target_backend()
     devices_list: list = []
     args.arch = None
 
@@ -322,12 +322,13 @@ def main():
         devices_list = [0]
 
     if not has_remote:
-        args.arch = derive_arch(devices_list[0])
+        args.arch = derive_arch(devices_list[0], backend=backend)
         if not args.arch:
             print(json.dumps({"status": "error",
                               "error": (f"could not derive arch from "
-                                        f"device {devices_list[0]} "
-                                        f"(is npu-smi on PATH?)")}))
+                                        f"device {devices_list[0]} for "
+                                        f"backend={backend!r} "
+                                        f"({probe_hint(backend)})")}))
             sys.exit(1)
 
     if not args.op_name:

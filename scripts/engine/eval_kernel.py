@@ -332,6 +332,19 @@ async def _run_eval(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if scripts_dir and scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    try:
+        from utils.settings import target_backend, target_framework, target_dsl
+        default_backend = target_backend()
+        default_framework = target_framework()
+        default_dsl = target_dsl()
+    except Exception:
+        default_backend = "ascend"
+        default_framework = "torch"
+        default_dsl = "triton_ascend"
+
     ap = argparse.ArgumentParser(
         description="autoresearch eval orchestrator — thin wrapper around "
                     "scripts/eval/KernelVerifier (verify + profile)")
@@ -356,13 +369,13 @@ def main() -> None:
                          "we copy into the sidecar")
     ap.add_argument("--output", default=None,
                     help="JSON sidecar path (default: <task_dir>/.eval_result.json)")
-    ap.add_argument("--framework", default="torch",
+    ap.add_argument("--framework", default=default_framework,
                     choices=["torch", "mindspore", "numpy"])
-    ap.add_argument("--dsl", default="triton_ascend",
+    ap.add_argument("--dsl", default=default_dsl,
                     help="DSL the kernel is written in (triton_ascend, "
                          "triton_cuda, swft, ascendc, ...; see "
                          "scripts/eval/adapters/factory.py)")
-    ap.add_argument("--backend", default="ascend",
+    ap.add_argument("--backend", default=default_backend,
                     choices=["ascend", "cuda", "cpu"])
     ap.add_argument("--arch", default="ascend910b4",
                     help="hardware arch (ascend910b1..b4, ascend310p3, "
@@ -384,10 +397,6 @@ def main() -> None:
         print(f"unknown phase(s): {sorted(bad)}; valid: {sorted(valid)}",
               file=sys.stderr)
         sys.exit(2)
-
-    scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if scripts_dir and scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
 
     sys.exit(asyncio.run(_run_eval(args)))
 

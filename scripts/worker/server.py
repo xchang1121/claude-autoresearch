@@ -47,6 +47,7 @@ from utils.json_io import sanitize_floats as _sanitize_floats  # noqa: E402
 from utils.settings import (  # noqa: E402
     worker_port as _worker_port,
     default_eval_timeout as _default_eval_timeout,
+    target_backend as _target_backend,
 )
 
 logger = logging.getLogger(__name__)
@@ -215,7 +216,7 @@ def _drift_is_clean(drift: dict) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    backend = os.environ.get("WORKER_BACKEND", "ascend")
+    backend = os.environ.get("WORKER_BACKEND", _target_backend())
     arch = os.environ.get("WORKER_ARCH", "")
     devices = _parse_devices(os.environ.get("WORKER_DEVICES", "0"))
     q: asyncio.Queue = asyncio.Queue()

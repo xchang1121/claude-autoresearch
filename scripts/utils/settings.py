@@ -90,6 +90,21 @@ def skill_dsl() -> str:
     return str(_get("defaults", "skill_dsl"))
 
 
+def target_backend() -> str:
+    """Backend name pinned for this repo (ascend / cuda / cpu)."""
+    return str(_get("defaults", "backend"))
+
+
+def target_framework() -> str:
+    """Reference framework pinned for this repo (torch / mindspore / numpy)."""
+    return str(_get("defaults", "framework"))
+
+
+def target_dsl() -> str:
+    """Snake-form DSL adapter name consumed by KernelVerifier."""
+    return str(_get("defaults", "dsl"))
+
+
 # --- eval timing measurement (read where the timing runs: on remote eval
 #     that is the WORKER's config.yaml) ----------------------------------
 def eval_warmup() -> int:

@@ -207,7 +207,13 @@ def local_eval(task_dir: str, op_name: str,
     """
     # config.yaml is the single source for measurement counts; settings.py
     # is a sibling under utils/. None means "use config".
-    from .settings import eval_warmup, eval_repeats
+    from .settings import (
+        eval_warmup,
+        eval_repeats,
+        target_backend,
+        target_framework,
+        target_dsl,
+    )
     if warmup is None:
         warmup = eval_warmup()
     if repeats is None:
@@ -260,6 +266,9 @@ def local_eval(task_dir: str, op_name: str,
             "--warmup", str(warmup),
             "--repeats", str(repeats),
             "--phases", ",".join(phases),
+            "--backend", target_backend(),
+            "--framework", target_framework(),
+            "--dsl", target_dsl(),
             "--output", out_path,
         ]
         if task_arch:
@@ -463,7 +472,13 @@ async def local_eval_async(task_dir: str, op_name: str,
     # boot because worker.server only adds `scripts/` to sys.path, no
     # top-level `settings.py` exists. Sync sibling at line 210 already
     # used the relative form — keep them in lockstep.
-    from .settings import eval_warmup, eval_repeats
+    from .settings import (
+        eval_warmup,
+        eval_repeats,
+        target_backend,
+        target_framework,
+        target_dsl,
+    )
     if warmup is None:
         warmup = eval_warmup()
     if repeats is None:
@@ -507,6 +522,9 @@ async def local_eval_async(task_dir: str, op_name: str,
             "--warmup", str(warmup),
             "--repeats", str(repeats),
             "--phases", ",".join(phases),
+            "--backend", target_backend(),
+            "--framework", target_framework(),
+            "--dsl", target_dsl(),
             "--output", out_path,
         ]
         if task_arch:

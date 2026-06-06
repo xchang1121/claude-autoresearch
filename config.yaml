@@ -150,6 +150,14 @@ remote_worker:
 #                                       path opens. Was
 #                                       `DIAGNOSE_ATTEMPTS_CAP = 5` in
 #                                       state_store.py.
+#   backend / framework / dsl (str)     Workspace target triple, pinned
+#                                       per repo. Local scaffold uses
+#                                       backend to choose the arch probe;
+#                                       eval dispatch passes the triple to
+#                                       KernelVerifier. Snake-form `dsl`
+#                                       names the eval adapter, while
+#                                       `skill_dsl` below names the
+#                                       kebab-case skills directory.
 # ---------------------------------------------------------------------------
 defaults:
   max_rounds: 30
@@ -161,6 +169,9 @@ defaults:
     lower_is_better: true
     improvement_threshold: 0.0
   skill_dsl: triton-ascend
+  backend: ascend
+  framework: torch
+  dsl: triton_ascend
   consecutive_fail_threshold: 3
   diagnose_max_attempts: 5
 
