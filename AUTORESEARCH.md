@@ -133,19 +133,19 @@ python scripts/dashboard.py <task_dir> --watch
 
 | 在哪 | 做什么 |
 |---|---|
-| 远端 NPU 机 | (1) 把 claude-autoresearch 仓库 clone 到 `<repo_path>`（B.2 会把这条路径写进 config）。(2) 写 `~/env.sh`：source 完毕后 `python -c "import torch_npu, triton"` 不抛异常，模板见 [§7](#7-envsh-契约)。(3) `npu-smi info` 能列出设备。**无需** Claude Code CLI（远端只跑 worker，不跑 claude）。 |
-| 本机 | (1) 装 Python ≥ 3.10、PyYAML、Claude Code CLI。(2) **无需** torch_npu / CANN / NPU 硬件（eval 全部走远端）。(3) `~/.ssh/config` 配好 alias（下文以 `my-npu` 为例）+ 密钥免密登录远端。 |
+| 远端 NPU 机 | 负责 worker/eval。准备一个可执行 worker CLI 的工程路径 `<repo_path>`：可以是 claude-autoresearch checkout，也可以是提供 `akg_cli` 的 akg_agents 工程；准备 `env_script`，source 完毕后 `python -c "import torch_npu, triton"` 退出码为 0；`npu-smi info` 能列出设备。 |
+| 本机 | 负责 Claude Code / orchestrator。安装 Python ≥ 3.10、PyYAML、Claude Code CLI；`~/.ssh/config` 配好 alias（下文以 `my-npu` 为例）+ 密钥免密登录远端。 |
 
 <details><summary><code>~/.ssh/config</code> 怎么配 + 跑前自检</summary>
 
-**第一步：本机 `~/.ssh/config` 给远端机起个别名**。别名是为了让后续命令短一点（不用每次敲 IP + 用户名），叫什么都行，下面用 `my-npu`。
+**第一步：本机 `~/.ssh/config` 给远端机起个别名**。别名是为了让后续命令短一点（少敲 IP + 用户名），叫什么都行，下面用 `my-npu`。
 
 ```text
 # 文件路径：本机 ~/.ssh/config（没有就新建，注意是 config 不是 config.txt）
 Host my-npu                            # 这是别名，自己看的，叫什么都行
     HostName 192.168.x.x               # 远端机真实 IP 或域名
     User <remote-user>                 # 登录远端用的账号，比如 root
-    # 私钥若在本机 ~/.ssh/ 下的默认位置（id_rsa / id_ed25519 / id_ecdsa 任一），下一行不用写；
+    # 私钥若在本机 ~/.ssh/ 下的默认位置（id_rsa / id_ed25519 / id_ecdsa 任一），下一行可省略；
     # 私钥放在本机别处才需要补这行，路径换成本机实际位置：
     # IdentityFile <本机私钥绝对路径>
     # 如果中间要过跳板机/堡垒机：
@@ -190,27 +190,53 @@ ssh my-npu 'source /home/<远端账号>/env.sh \
 
 `autoresearch/config.yaml`：
 
+通用模板：
+
 ```yaml
 remote_worker:
   hosts:
     my-npu:
       repo_path:  /home/<user>/claude-autoresearch
       env_script: /home/<user>/env.sh
+      # remote_cli: akg_cli
 ```
+
+AKG 工程入口示例：
+
+```yaml
+remote_worker:
+  hosts:
+    my-npu:
+      repo_path: /abs/path/to/akg/akg_agents
+      env_script: /abs/path/to/env.sh
+      remote_cli: akg_cli
+```
+
+`remote_cli` 会在 `source env_script && cd repo_path` 之后作为远端入口运行；上面的配置会拼出 `akg_cli worker ...`。
 
 字段语义见 [参考 §8](#8-远程-worker-内部)。
 
-### B.3 [本机] 启动远端 worker（ar_cli 自动开 SSH tunnel）
+### B.3 [本机] 检查并启动远端 worker（ar_cli 自动开 SSH tunnel）
+
+轻量检查：
 
 ```bash
 cd autoresearch
+python scripts/ar_cli.py list
+python scripts/ar_cli.py doctor --remote-host my-npu \
+    --backend ascend --dsl ascendc_catlass
+```
+
+启动远端 worker：
+
+```bash
 python scripts/ar_cli.py worker --remote-host my-npu --start \
-    --backend ascend --devices <NPU-id>
+    --backend ascend --devices <NPU-id> --dsl ascendc_catlass
 ```
 
 一条命令做两件事：(1) SSH 到远端启动 daemon (2) 本机起 `ssh -L 9111:127.0.0.1:9111`。后续所有调用透传 tunnel。
 
-`--arch` 不传时由远端 ar_cli 用 `npu-smi info` 自动推断。如需覆盖，加 `--arch ascend910b<N>` 即可。
+省略 `--arch` 时由远端 CLI 用 `npu-smi info` 自动推断。如需覆盖，加 `--arch ascend910b<N>` 即可。
 
 验证：
 ```bash
@@ -269,11 +295,11 @@ mkdir -p $BATCH_DIR/refs $BATCH_DIR/kernels
 cp workspace/*_ref.py    $BATCH_DIR/refs/
 cp workspace/*_kernel.py $BATCH_DIR/kernels/
 
-# 2. Tier-1 预检：纯静态（语法 / import / 必备 export），任意机器可跑、不需要 NPU 或 torch_npu
+# 2. Tier-1 预检：纯静态（语法 / import / 必备 export），任意机器可跑，仅做 Python 静态检查
 python scripts/batch/prepare.py $BATCH_DIR
 
 # 3.（可选）Tier-2 预检：在本进程里真跑 ref vs kernel 比对输出
-#    要求当前机器有 NPU + torch_npu（直接 import 进程内执行，不走 worker），
+#    要求当前机器有 NPU + torch_npu（直接 import 进程内执行，worker 路径旁路），
 #    所以双机配置下不能在本机跑，要 SSH 到 NPU 机执行；用本机直跑的方案省略本步。
 python scripts/batch/verify.py $BATCH_DIR --full
 
@@ -294,7 +320,7 @@ python scripts/batch/summarize.py $BATCH_DIR
 如果本机不是 NPU 机（即 B 章场景），批跑改动很小，整体仍按 [C.1](#c1-标准流程) 操作，但有两处差异：
 
 1. **先按 [B.3](#b3-本机-启动远端-worker-ar_cli-自动开-ssh-tunnel) 启动远端 worker 并建立本机 tunnel**（每次开新 batch 前确认 tunnel 还活着：`python scripts/ar_cli.py worker --remote-host my-npu --status`）。
-2. **`run.py` 加 `--worker-url 127.0.0.1:9111`**，且本机 tmux 不需要 `bash --login + source env.sh`（本机没有 torch_npu / CANN，eval 全走远端 worker）。
+2. **`run.py` 加 `--worker-url 127.0.0.1:9111`**，本机 tmux 直接跑 `run.py`；eval 全走远端 worker。
 
 第 4 步的 tmux 命令变为：
 
@@ -350,7 +376,7 @@ A/B/C 均适用：
 
 # 参考
 
-操作部分已经涵盖正常使用。下面是按主题归档的细节，平时不用读，碰到问题时按目录跳转。
+操作部分已经涵盖正常使用。下面是按主题归档的细节，平时可跳过，碰到问题时按目录跳转。
 
 ## 1. CLI 参数
 
@@ -378,13 +404,21 @@ A/B/C 均适用：
 | `--output-dir` | 路径 | ❌ | `ar_tasks` | task_dir 父目录 |
 | `--no-code-checker` | flag | ❌ | (启用) | 关掉 [`engine/quick_check.py`](scripts/engine/quick_check.py) 的 Triton 退化 AST 检查（一般用于调试种子 kernel）|
 
-注：`arch`（如 `ascend910b3`）由 `--devices` 选中的卡经 `npu-smi info` 自动推断，写进 `task.yaml` 仅供 dashboard / report 显示，不需要用户传。
+注：`arch`（如 `ascend910b3`）由 `--devices` 选中的卡经 `npu-smi info` 自动推断，写进 `task.yaml` 仅供 dashboard / report 显示，用户可省略。
 
 ---
 
-### 1.2 `scripts/ar_cli.py worker` （worker 启停 + tunnel）
+### 1.2 `scripts/ar_cli.py`（诊断 + worker 启停 + tunnel）
 
-唯一子命令 `worker`，下面三种模式互斥：
+顶层子命令：
+
+| 子命令 | 用法 |
+|---|---|
+| `list` | 打印 ar_cli 支持的功能与入口 |
+| `doctor` | 检查本机或远端的 env、Python import、NPU 可见性、端口状态 |
+| `worker` | 启停 worker daemon；远端模式会维护本机 `ssh -L` tunnel |
+
+`worker` 三种模式互斥：
 
 | 模式 | 用法 |
 |---|---|
@@ -400,11 +434,21 @@ A/B/C 均适用：
 | `--backend` | `ascend` / `cuda` / `cpu` | `--start` 时必填 | — | 硬件后端 |
 | `--arch` | 字符串（如 `ascend910b3`） | ❌（`--start` 时不传则由 `npu-smi info` 自动推断） | 自动推断 | 写入 worker 自报的 arch |
 | `--devices` | 逗号分隔（如 `2,5`） | `--start` 时必填 | — | worker 管理的卡集合 |
+| `--dsl` | 字符串（如 `ascendc_catlass` / `triton_ascend`） | ❌ | — | 目标 DSL；远端诊断会据此决定 triton 缺失是 warning 还是 fatal |
 | `--port` | int | ❌ | 9111（[config.yaml](config.yaml): `worker.port`） | TCP 端口 |
 | `--host` | IP | ❌ | `127.0.0.1` | 绑定地址，**默认强制 loopback**（worker 只能经 SSH tunnel 访问，禁止暴露公网） |
 | `--bg` | flag | ❌ | (前台) | daemon 模式，detach 并把 log 写 `/tmp/ar_worker_<port>.log`，POSIX-only |
 | `--force` | flag | ❌ | (校验) | `--stop` 时跳过 worker 进程 cmdline 校验 |
 | `--remote-host` | SSH alias | ❌ | (本机) | 通过 SSH 在 `config.yaml: remote_worker.hosts.<alias>` 定义的远端机执行同样命令；`--start` 时额外打通本机 tunnel |
+
+`doctor` 常用 flag：
+
+| flag | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `--remote-host` | alias | 本机 | 读取 `config.yaml: remote_worker.hosts.<alias>` 并通过 SSH 检查远端 |
+| `--backend` | `ascend` / `cuda` / `cpu` | `config.yaml: defaults.backend` | 目标硬件后端 |
+| `--dsl` | 字符串 | — | `triton_*` 会把 triton import 失败视作 fatal，其它 DSL 作为 warning |
+| `--port` | int | 9111 | 检查 worker 端口占用状态 |
 
 ---
 
@@ -599,19 +643,21 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
 ## 8. ar_cli worker
 
-Worker 是个 FastAPI HTTP daemon，跑 eval 子进程。`scripts/ar_cli.py worker` 子命令负责本机/远端起停、ssh -L tunnel 维护、探活。
+Worker 是个 FastAPI HTTP daemon，跑 eval 子进程。`scripts/ar_cli.py` 提供 `list` / `doctor` / `worker` 三个入口：`list` 展示功能列表，`doctor` 做本机或远端运行环境诊断，`worker` 负责本机/远端起停、ssh -L tunnel 维护、探活。
 
-### 启动示例
+### 常用示例
 
 ```bash
-scripts/ar_cli.py worker --remote-host my-npu --start --backend ascend --devices 0,1
+scripts/ar_cli.py list
+scripts/ar_cli.py doctor --remote-host my-npu --backend ascend --dsl ascendc_catlass
+scripts/ar_cli.py worker --remote-host my-npu --start --backend ascend --devices 0,1 --dsl ascendc_catlass
 scripts/ar_cli.py worker --remote-host my-npu --status
 scripts/ar_cli.py worker --remote-host my-npu --stop
 ```
 
-去掉 `--remote-host <alias>` 即在本机直接起 daemon，无 SSH / tunnel。
+本机模式使用同一组 `worker` 命令，省略 `--remote-host <alias>` 即可。
 
-`--start` 幂等：daemon 已在跑就不再 spawn；tunnel 抖了再跑一次 `--start` 即可恢复。`--status` 是纯查询，不做任何 spawn / 重连副作用。
+`--start` 幂等：daemon 已在跑时返回现有状态；tunnel 抖了再跑一次 `--start` 即可恢复。`--status` 是纯查询。
 
 ### 参数
 
@@ -622,8 +668,11 @@ scripts/ar_cli.py worker --remote-host my-npu --stop
 | `--backend` | `ascend` / `cuda` / `cpu` | — | `--start` 必填 | 硬件后端 |
 | `--devices` | csv，如 `0,1,2` | — | `--start` 必填 | device id 列表 |
 | `--arch` | 字符串，如 `ascend910b3` | auto（`npu-smi info` 推断）| 可省 | 硬件 arch |
+| `--dsl` | 字符串，如 `ascendc_catlass` / `triton_ascend` | — | 可省 | 目标 DSL；远端诊断按 DSL 确定 triton 策略 |
 | `--port` | int | `config.yaml: worker.port`，否则 `9001` | 可省 | TCP 端口 |
 | `--remote-host` | alias | — | 可省 | 走 SSH 远端模式；alias 在 `config.yaml: remote_worker.hosts.<alias>` 定义 |
+
+`doctor` 常用参数同 `worker` 的 `--remote-host` / `--backend` / `--dsl` / `--port`，适合在启动 worker 前确认 env、import、NPU、磁盘空间和端口状态。
 
 `config.yaml: remote_worker.hosts` 字段：
 
@@ -633,8 +682,11 @@ remote_worker:
     my-npu:
       repo_path:  /abs/path/to/repo   # 必填
       env_script: /abs/path/env.sh    # 必填
+      remote_cli: akg_cli             # 可省；在 repo_path 内运行的 CLI 入口
       ssh_alias:  my-npu              # 可省，默认 = key
 ```
+
+`repo_path` 指远端工作目录。`remote_cli` 指远端 CLI 入口，例如 `akg_cli` 会生成 `akg_cli worker --start ...`；默认入口是 `python scripts/ar_cli.py`。
 
 ## 9. Skills 库
 
@@ -699,7 +751,7 @@ hook_stop_save (Claude 试图 Stop 时)
 
 下面列出几种典型并发场景：哪些框架已经挡住、哪些需要你自己避开、撞到了怎么排错。
 
-### 11.1 框架已挡住的（你不用担心）
+### 11.1 框架已挡住的
 
 | 场景 | 保护机制 | 行为 |
 |---|---|---|

@@ -223,6 +223,20 @@ the current state.
      - Removed the extra `akg_npu` host alias and made `npu` itself point
        at the akg project, as requested.
 
+10. AUTORESEARCH.md remote CLI usage docs.
+   - Status: complete.
+   - Scope:
+     - Update `AUTORESEARCH.md` B-section remote worker setup to document
+       `list`, `doctor`, `worker --remote-host`, `--dsl`, and `remote_cli`.
+     - Add a generic AKG project entry example using placeholders and
+       `remote_cli: akg_cli`.
+     - Refresh the ar_cli reference sections so `list` / `doctor` / `worker`
+       match the current CLI surface.
+   - Local checks:
+     - `git diff --check -- AUTORESEARCH.md` passed on 2026-06-07.
+     - Generic-example and discouraged-wording scan passed for
+       `AUTORESEARCH.md`.
+
 ## Latest Known Repo State
 
 - This file is committed as part of the Step 7 cleanup changes; use
