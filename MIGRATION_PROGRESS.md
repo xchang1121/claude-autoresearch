@@ -222,8 +222,8 @@ the current state.
      - `python -m py_compile scripts/ar_cli.py` passed.
      - `git diff --check -- scripts/ar_cli.py config.yaml
        MIGRATION_PROGRESS.md` passed.
-     - No `host_cfg.get("python")` / optional python config docs remain in
-       the standalone repo.
+     - No removed remote-python override references remain in the
+       standalone repo.
      - AKG-side `misc.py` / `remote_dispatch.py` py_compile and diff check
        passed locally.
    - NPU sync/checks:
@@ -236,6 +236,37 @@ the current state.
        diagnostics without logo output.
      - NPU scans confirmed both repos no longer reference the removed
        `python` remote-worker override.
+
+10. Documentation and YAML contract alignment.
+   - Status: complete.
+   - Scope:
+     - Align standalone YAML comments and docs with the env-owned remote
+       interpreter contract: `env_script` prepares PATH, then remote dispatch
+       invokes plain `python`.
+     - Align the sibling workspace docs and YAML comments with the same
+       remote worker contract and remove stale `python` field examples.
+     - Keep wording focused on usage and behavior, with neutral technical
+       phrasing in the migration-facing docs.
+   - Local checks:
+     - Standalone `git diff --check -- scripts/ar_cli.py config.yaml
+       CLAUDE.md AUTORESEARCH.md MIGRATION_PROGRESS.md` passed.
+     - Standalone `python -m py_compile scripts/ar_cli.py` passed.
+     - Sibling workspace `git diff --check -- workspace_autoresearch/
+       config.yaml workspace_autoresearch/AGENTS.md
+       workspace_autoresearch/AUTORESEARCH.md` passed.
+     - Local scans found no removed remote-python override references or
+       migration-facing colloquial terms targeted by this cleanup.
+   - NPU sync/checks:
+     - Synced standalone docs/YAML/progress and `scripts/ar_cli.py` via
+       exact `scp` destinations.
+     - Synced sibling workspace docs/YAML via `scp`.
+     - NPU `git diff --check` passed for all synced files after CRLF
+       normalization.
+     - NPU standalone `python -m py_compile scripts/ar_cli.py` passed.
+     - NPU sibling worker-related py_compile passed for `misc.py` and
+       `remote_dispatch.py`.
+     - NPU grep scans found no removed remote-python override references or
+       migration-facing colloquial terms targeted by this cleanup.
 
 ## Latest Known Repo State
 

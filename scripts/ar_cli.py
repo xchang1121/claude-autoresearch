@@ -166,10 +166,10 @@ def _curl_status(host: str, port: int,
 def _curl_health(host: str, port: int,
                  timeout: float = 6.0) -> Optional[dict]:
     """GET /api/v1/health —— /status 只验 HTTP 在线，/health 真走一遍
-    device acquire/release，能抓出 "status 回 200 但 /run 永远挂" 类的
-    handler 死锁。timeout 比 worker 侧的 5s 探活多 1s 给网络往返用。
+    device acquire/release，能抓出 "status 回 200 但 /run 永远卡住" 类的
+    handler deadlock。timeout 比 worker 侧的 5s 探活多 1s 给网络往返用。
     旧版 daemon 没有 /health 端点 → urlopen 抛 HTTPError 404 → 返回 None，
-    调用方退化为只看 /status 即可，无需特判版本。"""
+    调用方退化为只看 /status。"""
     url = f"http://{host}:{port}/api/v1/health"
     try:
         with urlopen(Request(url, method="GET"), timeout=timeout) as resp:
@@ -365,7 +365,7 @@ def cmd_worker_stop(args) -> int:
 
 def cmd_worker_status(args) -> int:
     """status 同时探 /status + /health。/status 只验 HTTP server 在线；
-    /health 走一次真实 device acquire/release 抓 handler 死锁。旧版 daemon
+    /health 走一次真实 device acquire/release 抓 handler deadlock。旧版 daemon
     /health 端点不存在时返 None，退化为只看 /status。纯查询，无副作用。"""
     host = "127.0.0.1"
     st = _curl_status(host, args.port)
@@ -388,7 +388,7 @@ def cmd_worker_status(args) -> int:
     if health is not None and not health.get("healthy"):
         print(
             f"\n[ar_cli] /status OK 但 /health 报 degraded —— "
-            f"daemon handler 可能死锁。错误：{health.get('error')!r}",
+            f"daemon handler 可能处于 deadlock 状态。错误：{health.get('error')!r}",
             file=sys.stderr,
         )
         return 1

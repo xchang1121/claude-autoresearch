@@ -6,7 +6,7 @@ Claude Code 驱动的 Triton-Ascend 算子自动优化框架。
 
 第一次用：按下表选一条「操作」路径走完即可，技术细节都在「参考」里按主题归档。
 
-| 我要做 | 跳转 |
+| 目标 | 跳转 |
 |---|---|
 | 第一次用，本机就是 NPU 机 | [操作 A](#a-单机本机--测评机) |
 | 第一次用，本机没 NPU，要用远端 NPU | [操作 B](#b-双机本机跑-claude无-npu-远端-npu-机跑-eval) |
@@ -138,11 +138,11 @@ python scripts/dashboard.py <task_dir> --watch
 
 <details><summary><code>~/.ssh/config</code> 怎么配 + 跑前自检</summary>
 
-**第一步：本机 `~/.ssh/config` 给远端机起个别名**。别名是为了让后续命令短一点（少敲 IP + 用户名），叫什么都行，下面用 `my-npu`。
+**第一步：本机 `~/.ssh/config` 给远端机起个别名**。别名让后续命令更短，下面用 `my-npu`。
 
 ```text
 # 文件路径：本机 ~/.ssh/config（没有就新建，注意是 config 不是 config.txt）
-Host my-npu                            # 这是别名，自己看的，叫什么都行
+Host my-npu                            # 本地 SSH 别名，可按团队习惯命名
     HostName 192.168.x.x               # 远端机真实 IP 或域名
     User <remote-user>                 # 登录远端用的账号，比如 root
     # 私钥若在本机 ~/.ssh/ 下的默认位置（id_rsa / id_ed25519 / id_ecdsa 任一），下一行可省略；
@@ -152,7 +152,7 @@ Host my-npu                            # 这是别名，自己看的，叫什么
     # ProxyJump bastion
 ```
 
-> 如果本机之前从没生成过 ssh 密钥，可以走最简流程（本机和远端都各有自己的 `~/.ssh/`，下面每一步都标了在哪台机器跑、读/写哪一边的文件）：
+> 如果本机之前从没生成过 ssh 密钥，可以走最简流程（本机和远端都各有独立的 `~/.ssh/`，下面每一步都标了在哪台机器执行、读/写哪一边的文件）：
 >
 > 1. **本机** 命令行跑 `ssh-keygen`（一路回车用默认即可），在 **本机** `~/.ssh/` 下生成两个文件——`id_rsa` 是**私钥**（留本机，永远不要拷给远端、不要发出去），`id_rsa.pub` 是**公钥**（接下来要送到远端的那一份）。
 > 2. **本机** 跑 `ssh-copy-id my-npu`。这条命令做的事情：用密码方式登一次远端，把 **本机** `~/.ssh/id_rsa.pub` 的内容追加到 **远端** `~/.ssh/authorized_keys` 末尾——远端的 ssh 服务一旦在 `authorized_keys` 里看到本机公钥，之后本机用对应私钥连上来时就不再要密码。前提是远端的 ssh 密码登录暂时是开的（系统默认通常开着），运行时会让一次性输入远端账号的密码。
@@ -200,7 +200,7 @@ remote_worker:
       env_script: /home/<user>/env.sh
 ```
 
-`repo_path` 指远端 claude-autoresearch checkout。远端命令会在 `source env_script && cd repo_path` 之后运行 `python scripts/ar_cli.py worker ...`。
+`repo_path` 指远端 claude-autoresearch checkout。远端命令会在 `source env_script && cd repo_path` 之后运行 `python scripts/ar_cli.py worker ...`；解释器由 `env_script` 配好的 PATH 决定。
 
 字段语义见 [参考 §8](#8-远程-worker-内部)。
 
@@ -341,7 +341,7 @@ tmux new -d -s ar_batch \
 - `running`（终止瞬间在跑的 op）下次启动时自动降级为 `error`，note 记 `stale running, demoted on batch restart`
 - **transient 自动续**（同 batch 内）：单个 op 跑到一半 `claude --print` 进程异常退（rc≠0，常见 ECONNRESET / Stream idle timeout / 其他 transient API 错），但 framework state 仍 intact（`progress_initialized=True`，phase 不是 FINISH）时，supervisor 会自动 `/autoresearch --resume <task_dir> --force` 接续，最多 `batch.transient_retries` 次（默认 3，配 [`config.yaml`](config.yaml)）。接续成功的 op `batch_progress.json::cases.<op>.note` 会记 `transient_retries=N`，区分一遍过 vs 靠 wrapper 救活。`rc=0 + phase != FINISH`（LLM 自然 stop）或 `rc != 0 + no progress`（baseline 没 commit）属于真失败，不 retry，直接记 `error` 跳下一个 op。
 
-> 同一 batch_dir **禁止并发** 多个 `run.py`（`.batch.lock` 排它）。死进程残留的 lock 下次启动自动判活清理。
+> 同一 batch_dir **禁止并发** 多个 `run.py`（`.batch.lock` 排它）。已退出进程残留的 lock 会在下次启动时自动判活清理。
 
 完整 batch CLI 参数见 [参考 §1](#1-cli-参数)。
 
@@ -453,7 +453,7 @@ A/B/C 均适用：
 | kernel 文件名 | 单跑任意；批跑严格 `<op>_kernel.py` |
 | ref 暴露 | `class Model(nn.Module)` + `get_init_inputs()`，并二选一：`get_inputs()` 单 shape / `get_input_groups()` 多 shape |
 | kernel 暴露 | `class ModelNew(nn.Module)`，含 `@triton.jit` 且实际 launch；forward 不得用 `torch.*` / `F.*` / tensor 方法 / `@` 算子 / Python 循环完成计算（规则见 [`scripts/eval/validate_triton_impl.py`](scripts/eval/validate_triton_impl.py)） |
-| 同目录数据文件 | ref 通常要从同目录读取 shape 列表 / 缓存（`.json`/`.pt`/`.npz`），scaffold 按这条规则决定哪些一起打包进 task_dir：去掉 ref 文件名的 `.py` 后缀得到一个名字，**同名**的、或者以**它加下划线开头**的同目录 `.json`/`.pt`/`.npz` 会被拷进去；其余的 scaffold 看不见。<br/>例：ref `31_IOU.py` 可配 `31_IOU.json`（同名）或 `31_IOU_cases.json`（加下划线前缀）；但 ref 改叫 `iou_ref.py` 后，原来那个 `31_IOU.json` 就不再匹配，要么把 ref 改回 `31_IOU.py`，要么把数据文件改成 `iou_ref.json`（scaffold 不会自动去掉 `_ref` 后缀帮你认别名）。<br/>没匹配上的数据文件不会进 task_dir，eval 时报 `FileNotFoundError`。NPUKernelBench 原生 `<index>_<CamelCase>.py` + `<index>_<CamelCase>.json` 直接可用。 |
+| 同目录数据文件 | ref 通常要从同目录读取 shape 列表 / 缓存（`.json`/`.pt`/`.npz`），scaffold 按这条规则决定哪些一起打包进 task_dir：去掉 ref 文件名的 `.py` 后缀得到一个名字，**同名**的、或者以**它加下划线开头**的同目录 `.json`/`.pt`/`.npz` 会被拷进去；其余文件不会被 scaffold 识别。<br/>例：ref `31_IOU.py` 可配 `31_IOU.json`（同名）或 `31_IOU_cases.json`（加下划线前缀）；但 ref 改叫 `iou_ref.py` 后，原来那个 `31_IOU.json` 就不再匹配，需要把 ref 改回 `31_IOU.py`，或把数据文件改成 `iou_ref.json`（scaffold 不会自动去掉 `_ref` 后缀识别别名）。<br/>没匹配上的数据文件不会进 task_dir，eval 时报 `FileNotFoundError`。NPUKernelBench 原生 `<index>_<CamelCase>.py` + `<index>_<CamelCase>.json` 直接可用。 |
 | task.yaml 字段 | fixed schema（[loader.py](scripts/task_config/loader.py)）；拼写错误会被默认值覆盖 |
 | task_dir 命名 | scaffold 生成的格式：`ar_tasks/<op_name>_<unix_ts>_<uuid6>/`。三段分别承担：op_name 让人读得懂、unix_ts（`int(time.time())`）保证时间排序、uuid6（`uuid.uuid4().hex[:6]`）防同秒撞名。batch/manifest、resume、dashboard 都按这三段反解，手动 rename 会让它们找不到任务。 |
 
@@ -521,7 +521,7 @@ baseline.py / pipeline.py
                                      utils.eval_runner.local_eval（同上）
 ```
 
-两条路径在 worker 内部共用同一份 `local_eval`，确保本地与远程行为不漂移。eval_kernel 调用拆成 ref / kernel 两个独立子进程，避免 kernel 端 SIGKILL 或设备挂死污染已落盘的 ref 时延。
+两条路径在 worker 内部共用同一份 `local_eval`，确保本地与远程行为不漂移。eval_kernel 调用拆成 ref / kernel 两个独立子进程，避免 kernel 端 SIGKILL 或设备不可用污染已落盘的 ref 时延。
 
 verify 失败时 ref 时延由 `profile_base` 同进程单独测得，与 verify 解耦，dashboard 顶栏始终显示 PyTorch baseline。Sticky baseline 写定（`baseline_metric` 与 `baseline_source=ref` 写入 state.json）后，后续轮 phase 列表不再包含 `profile_base`。
 
@@ -589,7 +589,7 @@ verify（Tier 2 预检）与 `/autoresearch` 每轮 verify 共用 [`correctness.
 
 适用场景：tmux 非 login shell、`ar_cli worker --remote-host` 远端启动、batch `bash --login -c 'source env.sh && python ...'`。三处共用同一脚本，路径填入 `config.yaml: remote_worker.hosts.<alias>.env_script`。
 
-**唯一职责**：source 完成后，`python -c "import torch_npu, triton"` 不抛异常。
+**唯一职责**：source 完成后，PATH 上的 `python` 执行 `python -c "import torch_npu, triton"` 不抛异常。
 
 模板（按本机 Python + CANN 安装方式选一）：
 
@@ -651,7 +651,7 @@ remote_worker:
       ssh_alias:  my-npu              # 可省，默认 = key
 ```
 
-`repo_path` 指远端 claude-autoresearch checkout。远端入口固定为 `python scripts/ar_cli.py`。
+`repo_path` 指远端 claude-autoresearch checkout。远端入口固定为 `python scripts/ar_cli.py`；`python` 来自 `env_script` source 后的 PATH。
 
 ## 9. Skills 库
 
@@ -714,19 +714,19 @@ hook_stop_save (Claude 试图 Stop 时)
 
 ## 11. 并发与冲突
 
-下面列出几种典型并发场景：哪些框架已经挡住、哪些需要你自己避开、撞到了怎么排错。
+下面列出几种典型并发场景：哪些框架已经挡住、哪些需要主动规避、发生冲突时如何排查。
 
 ### 11.1 框架已挡住的
 
 | 场景 | 保护机制 | 行为 |
 |---|---|---|
-| 同一 `<batch_dir>` 两个 `run.py` 同时启动 | `<batch_dir>/.batch.lock`，`O_CREAT\|O_EXCL` 原子创建 | 后启动的立即报错退出。死进程残留的 stale lock 在下次启动时被判活清理 |
+| 同一 `<batch_dir>` 两个 `run.py` 同时启动 | `<batch_dir>/.batch.lock`，`O_CREAT\|O_EXCL` 原子创建 | 后启动的立即报错退出。已退出进程残留的 stale lock 在下次启动时被判活清理 |
 | 同一 `<task_dir>` 两个 claude session 同时 attach | `state.owner.session_id` + heartbeat 新鲜度窗口（`config.yaml: resume.heartbeat_fresh_seconds`，默认 180s） | 后到的 session 在 `set_task_dir` 处被 refuse，stderr 提示对方的 session_id |
 | 用 `/autoresearch --resume` 续一个还在跑的 task | 同上 | 同上拒绝 |
 | 写 `state.json` 中途崩溃 | tmp 文件 + `os.replace` 原子替换 | state.json 永远是上一稳定版或新版，不会读到撕裂内容 |
 | 启动第二个 worker 占同一端口 | 内核 bind 失败 | uvicorn 直接报 `address already in use` 退出，daemon 起不来 |
 
-### 11.2 框架挡不住的（必须你自己避免）
+### 11.2 框架覆盖之外的并发风险
 
 | 场景 | 后果 | 怎么避 |
 |---|---|---|
@@ -741,7 +741,7 @@ hook_stop_save (Claude 试图 Stop 时)
 | 症状 | 可能原因 | 处理 |
 |---|---|---|
 | `[batch] error: another run.py is active (.batch.lock held by pid N)` | 11.1 第 1 行 | 如果对方真在跑，等；不然手动 `rm .batch.lock` |
-| `[state_store] WARNING: refusing to claim <td> — owned by session_id=...` | 11.1 第 2 行（或对方 session 没正常退出，heartbeat 还在新鲜窗口内） | 等 `resume.heartbeat_fresh_seconds` 过期；或确认对方 session 已死后手动清 `state.owner` |
+| `[state_store] WARNING: refusing to claim <td> — owned by session_id=...` | 11.1 第 2 行（或对方 session 未正常退出，heartbeat 还在新鲜窗口内） | 等 `resume.heartbeat_fresh_seconds` 过期；或确认对方 session 已退出后手动清 `state.owner` |
 | eval 输出指标抖动、对照 baseline 时延变 2-3 倍 | 11.2 同卡多用户 | 检查同卡有没有别的 `claude --print` / worker 进程在跑 |
-| `Worker tunnel 127.0.0.1:9111 unreachable` | tunnel 进程死了 / 远端 daemon 死了 / 端口被别的进程占了 | `ar_cli worker --remote-host ... --status` 确认；不行就 `--stop` 再 `--start` |
+| `Worker tunnel 127.0.0.1:9111 unreachable` | tunnel 进程退出 / 远端 daemon 退出 / 端口被其他进程占用 | `ar_cli worker --remote-host ... --status` 确认；失败时执行 `--stop` 后再 `--start` |
 | `/run` 返回 HTTP 503，提示某些 `.py` 改了 | 11.2 worker 源码漂移闸 | 重启 worker |

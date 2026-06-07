@@ -28,6 +28,7 @@ If the local machine has no NPU, eval can run on a remote Ascend box:
 ```bash
 # Start a worker daemon on the remote (SSH-launched + auto ssh -L tunnel).
 # `my-npu` is an entry under remote_worker.hosts in config.yaml.
+# Its env_script selects the remote python via PATH before ar_cli starts.
 # arch is auto-derived from npu-smi on the remote (pass --arch to override).
 python scripts/ar_cli.py worker --remote-host my-npu --start \
     --backend ascend --devices 0 --port 9111
