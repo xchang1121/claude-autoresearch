@@ -297,7 +297,9 @@ def _run_subprocess(*, tier: str, ref: Path, kernel: Path | None,
 def _verify_one(case: dict, full: bool) -> dict:
     op = case["op_name"]
     ref = Path(case["ref"])
-    kernel = Path(case["kernel"])
+    # Multi-file DSLs pass a project directory as case["kernel"] to
+    # /autoresearch, but verification imports the sibling Python wrapper.
+    kernel = Path(case.get("kernel_module") or case["kernel"])
 
     out: dict = {"op_name": op, "tier1_ref": None, "tier1_kernel": None,
                  "tier2": None}

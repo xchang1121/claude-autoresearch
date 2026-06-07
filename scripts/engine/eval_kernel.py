@@ -246,7 +246,12 @@ async def _run_eval(args: argparse.Namespace) -> int:
             None, f"read kernel failed: {type(e).__name__}: {e}", False)
         return _write(1)
 
-    task_info = {"coder_code": kernel_src}
+    catlass_meta: dict = {"task_dir": task_dir}
+    if args.catlass_root:
+        catlass_meta["catlass_root"] = args.catlass_root
+    if args.catlass_op_dir:
+        catlass_meta["catlass_op_dir"] = args.catlass_op_dir
+    task_info = {"coder_code": kernel_src, **catlass_meta}
 
     # --- Build worker + verifier ---
     log_dir = os.path.join(task_dir, ".eval_logs")
@@ -254,6 +259,7 @@ async def _run_eval(args: argparse.Namespace) -> int:
     config = {
         "log_dir": log_dir,
         "verify_timeout": args.verify_timeout,
+        **catlass_meta,
     }
     try:
         device_pool = DevicePool([args.device_id])
@@ -380,6 +386,11 @@ def main() -> None:
     ap.add_argument("--arch", default="ascend910b4",
                     help="hardware arch (ascend910b1..b4, ascend310p3, "
                          "a100, v100, h20, l20, rtx3090, ...)")
+    ap.add_argument("--catlass-root", default=None,
+                    help="CATLASS repo root for ascendc_catlass tasks")
+    ap.add_argument("--catlass-op-dir", default=None,
+                    help="task-local CATLASS project directory "
+                         "(default: catlass_op)")
     ap.add_argument("--task-id", default="0",
                     help="task identifier — used in verify_dir naming so "
                          "concurrent eval runs on the same task_dir don't "

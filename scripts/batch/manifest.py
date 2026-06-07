@@ -1,12 +1,17 @@
 """Manifest loading + progress JSON I/O for the batch runner.
 
-Workspace convention:
+Workspace convention for single-file DSLs:
     <batch_dir>/
         manifest.yaml | manifest.json    # user-authored
         batch_progress.json              # written here
         batch.log                        # written here
         <ref_dir>/<op_name>_ref.py
         <kernel_dir>/<op_name>_kernel.py
+
+Multi-file DSL convention (for adapters whose kernel handoff is a directory):
+    <kernel_dir>/<op_name>/
+        kernel.py | <op_name>_kernel.py  # Python wrapper
+        <adapter.kernel_project_dir_name>/
 
 YAML support is optional (requires pyyaml). JSON works with stdlib only.
 """
@@ -69,11 +74,53 @@ def load_manifest(manifest_path: Path) -> dict:
     return data
 
 
-def resolve_cases(batch_dir: Path, manifest: dict, mode: str) -> list[dict]:
-    """Apply the <op_name>_{ref,kernel}.py naming convention and return resolved
-    case dicts. Pre-flight check that every referenced file exists.
+def _resolve_kernel_paths_for_op(kernel_dir: Path,
+                                 op_name: str) -> tuple[Path, Path]:
+    """Return (kernel_arg, python_module) for one op.
 
-    Returns a list of dicts with keys: op_name, ref (abs path), kernel (abs path).
+    kernel_arg is what batch/run.py passes to /autoresearch --kernel. It
+    is a file for single-file DSLs and a project directory for multi-file
+    DSLs. python_module is always the importable wrapper used by
+    batch/verify.py.
+    """
+    scripts_dir = str(Path(__file__).resolve().parent.parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from utils.settings import target_dsl  # noqa: E402
+    from eval.adapters.factory import get_dsl_adapter  # noqa: E402
+
+    adapter = get_dsl_adapter(target_dsl())
+    if not adapter.kernel_arg_is_directory:
+        py = kernel_dir / f"{op_name}_kernel.py"
+        if not py.is_file():
+            raise ManifestError(f"{py.name} not found under {kernel_dir.name}/")
+        return py, py
+
+    subdir = adapter.kernel_project_dir_name
+    if not subdir:
+        raise ManifestError(
+            f"DSL adapter {type(adapter).__name__} sets "
+            "kernel_arg_is_directory=True but has no kernel_project_dir_name")
+    op_root = kernel_dir / op_name
+    kernel_arg = op_root / subdir
+    if not kernel_arg.is_dir():
+        raise ManifestError(
+            f"{kernel_arg.relative_to(kernel_dir.parent)} not found")
+
+    for name in ("kernel.py", f"{op_name}_kernel.py"):
+        py = op_root / name
+        if py.is_file():
+            return kernel_arg, py
+    raise ManifestError(
+        f"{op_root.name}/ has no sibling kernel.py or {op_name}_kernel.py")
+
+
+def resolve_cases(batch_dir: Path, manifest: dict, mode: str) -> list[dict]:
+    """Apply the per-DSL naming convention and return resolved case dicts.
+    Pre-flight check that every referenced file exists.
+
+    Returns dicts with keys: op_name, ref, kernel, kernel_module. For
+    single-file DSLs kernel_module == kernel.
     """
     if mode not in VALID_MODES:
         raise ManifestError(f"mode must be one of {VALID_MODES}, got {mode!r}")
@@ -114,16 +161,14 @@ def resolve_cases(batch_dir: Path, manifest: dict, mode: str) -> list[dict]:
         if not ref_path.is_file():
             raise ManifestError(f"{ref_path.relative_to(batch_dir)} not found")
 
-        kernel_path = kernel_dir / f"{op_name}_kernel.py"
-        if not kernel_path.is_file():
-            raise ManifestError(
-                f"{kernel_path.relative_to(batch_dir)} not found"
-            )
+        kernel_path, kernel_module = _resolve_kernel_paths_for_op(
+            kernel_dir, op_name)
 
         cases.append({
             "op_name": op_name,
             "ref": str(ref_path),
             "kernel": str(kernel_path),
+            "kernel_module": str(kernel_module),
         })
 
     return cases
@@ -174,6 +219,7 @@ def merge_cases(progress: dict, resolved_cases: list[dict],
                 "op_name": op,
                 "ref": c["ref"],
                 "kernel": c["kernel"],
+                "kernel_module": c.get("kernel_module", c["kernel"]),
                 "status": "pending",
                 "task_dir": None,
                 "started_at": None,
@@ -191,6 +237,7 @@ def merge_cases(progress: dict, resolved_cases: list[dict],
         else:
             existing["ref"] = c["ref"]
             existing["kernel"] = c["kernel"]
+            existing["kernel_module"] = c.get("kernel_module", c["kernel"])
             new_cases[op] = existing
     progress["cases"] = new_cases
     return progress, dropped

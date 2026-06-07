@@ -23,7 +23,7 @@ from urllib.request import Request, urlopen
 
 from .eval_assemble import assemble_eval_result as _assemble_eval_result
 from .eval_request import build_eval_request
-from .loader import TaskConfig, py_stem
+from .loader import TaskConfig, py_stem, pick_kernel_module_file
 from .metric_policy import EvalOutcome, EvalResult
 
 
@@ -246,8 +246,7 @@ def run_eval(task_dir: str, config: TaskConfig,
     request = build_eval_request(task_dir, config)
     _log_request("local_eval", request)
 
-    kernel_basename = (py_stem(config.editable_files[0])
-                       if config.editable_files else "kernel")
+    kernel_basename = py_stem(pick_kernel_module_file(config.editable_files))
     ref_basename = py_stem(config.ref_file)
     print(f"[local_eval] device={dev}; eval_kernel.py "
           f"(verify + profile_gen"

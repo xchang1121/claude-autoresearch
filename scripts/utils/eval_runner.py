@@ -168,6 +168,23 @@ def _avg_us(d: Optional[dict]) -> Optional[float]:
     return None
 
 
+def _load_task_eval_metadata(abs_task: str) -> dict:
+    """Best-effort task.yaml metadata needed by eval_kernel.py."""
+    try:
+        from task_config import load_task_config
+        cfg = load_task_config(abs_task)
+    except Exception:
+        return {}
+    if cfg is None:
+        return {}
+    meta = {
+        "arch": getattr(cfg, "arch", None),
+        "catlass_root": getattr(cfg, "catlass_root", None),
+        "catlass_op_dir": getattr(cfg, "catlass_op_dir", None),
+    }
+    return {k: v for k, v in meta.items() if v}
+
+
 # ---------------------------------------------------------------------------
 # Verify + profile (two subprocesses: ref first, then kernel)
 # ---------------------------------------------------------------------------
@@ -230,18 +247,11 @@ def local_eval(task_dir: str, op_name: str,
     abs_task = os.path.abspath(task_dir)
     env = _build_env(device_id)
 
-    # eval_kernel.py's --arch is honored by KernelVerifier's ctor validation
-    # (e.g. ascend910b1..b4, ascend310p3, ...). task.yaml may carry a
-    # machine-specific arch; pass it through so the spawned subprocess
-    # doesn't fall back to the CLI default (ascend910b4) for a host with
-    # a different chip. Missing / unparseable -> let eval_kernel default.
-    task_arch: Optional[str] = None
-    try:
-        from task_config import load_task_config
-        _cfg = load_task_config(abs_task)
-        task_arch = getattr(_cfg, "arch", None) if _cfg is not None else None
-    except Exception:
-        task_arch = None
+    # eval_kernel.py's --arch is honored by KernelVerifier's ctor validation.
+    # CATLASS also needs task.yaml's catlass.* fields so its adapter can
+    # locate the project tree and CATLASS root inside the eval subprocess.
+    task_meta = _load_task_eval_metadata(abs_task)
+    task_arch = task_meta.get("arch")
 
     # Distinct sidecars per pass so the second pass can't overwrite the
     # first. Both files persist under task_dir for forensics; downstream
@@ -273,6 +283,10 @@ def local_eval(task_dir: str, op_name: str,
         ]
         if task_arch:
             cmd += ["--arch", task_arch]
+        if task_meta.get("catlass_root"):
+            cmd += ["--catlass-root", task_meta["catlass_root"]]
+        if task_meta.get("catlass_op_dir"):
+            cmd += ["--catlass-op-dir", task_meta["catlass_op_dir"]]
         rc, stdout, stderr = _run_subprocess(
             cmd, cwd=task_dir, env=env, timeout=timeout)
         log = (stdout + ("\n" + stderr if stderr else "")).strip()
@@ -494,14 +508,9 @@ async def local_eval_async(task_dir: str, op_name: str,
     env = _build_env(device_id)
 
     # See sync `local_eval` for the rationale on propagating task.yaml's
-    # arch into the subprocess.
-    task_arch: Optional[str] = None
-    try:
-        from task_config import load_task_config
-        _cfg = load_task_config(abs_task)
-        task_arch = getattr(_cfg, "arch", None) if _cfg is not None else None
-    except Exception:
-        task_arch = None
+    # arch and CATLASS metadata into the subprocess.
+    task_meta = _load_task_eval_metadata(abs_task)
+    task_arch = task_meta.get("arch")
 
     ref_path = os.path.join(abs_task, ".eval_result_ref.json")
     kernel_path = os.path.join(abs_task, ".eval_result_kernel.json")
@@ -529,6 +538,10 @@ async def local_eval_async(task_dir: str, op_name: str,
         ]
         if task_arch:
             cmd += ["--arch", task_arch]
+        if task_meta.get("catlass_root"):
+            cmd += ["--catlass-root", task_meta["catlass_root"]]
+        if task_meta.get("catlass_op_dir"):
+            cmd += ["--catlass-op-dir", task_meta["catlass_op_dir"]]
         rc, stdout, stderr = await _run_subprocess_async(
             cmd, cwd=task_dir, env=env, timeout=timeout)
         log = (stdout + ("\n" + stderr if stderr else "")).strip()

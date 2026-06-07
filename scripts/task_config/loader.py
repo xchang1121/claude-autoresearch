@@ -39,6 +39,22 @@ def py_stem(name: str) -> str:
     return name[:-3] if name.endswith(".py") else name
 
 
+def pick_kernel_module_file(editable_files: list,
+                            default: str = "kernel.py") -> str:
+    """Return the importable Python wrapper from task.yaml editable_files.
+
+    Multi-file DSLs may list project directories or headers alongside
+    the wrapper. Eval still needs a Python module name for eval_kernel.py,
+    so prefer the first `.py` entry and fall back to the legacy
+    `kernel.py` convention.
+    """
+    for path in editable_files or []:
+        s = str(path)
+        if s.endswith(".py"):
+            return s
+    return default
+
+
 def _is_contained(path: str) -> bool:
     """Return True iff `path` is a relative path that doesn't escape its
     parent. False for absolute paths (any platform), drive-letter forms,

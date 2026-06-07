@@ -41,7 +41,9 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from task_config import load_task_config, py_stem  # noqa: E402
+from task_config import (  # noqa: E402
+    load_task_config, py_stem, pick_kernel_module_file,
+)
 from utils.eval_runner import local_eval_async  # noqa: E402
 from utils.json_io import sanitize_floats as _sanitize_floats  # noqa: E402
 from utils.settings import (  # noqa: E402
@@ -509,8 +511,7 @@ async def _run_eval_async(package_bytes: bytes, task_id: str, op_name: str,
             return _error_response(device_id,
                                    "task.yaml missing in package")
 
-        kernel_file = (py_stem(config.editable_files[0])
-                       if config.editable_files else "kernel")
+        kernel_file = py_stem(pick_kernel_module_file(config.editable_files))
         ref_file = py_stem(config.ref_file)
 
         verify_resp, profile_resp = await local_eval_async(

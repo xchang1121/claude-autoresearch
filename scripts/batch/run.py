@@ -83,9 +83,10 @@ CRITICAL rules — read carefully, this session is non-interactive:
    session_id). Every later hook keys off get_task_dir() / state.owner.
    THIS IS THE SINGLE MOST IMPORTANT STEP.
 
-2. The kernel.py we passed via --kernel is a verified seed. Scaffold's
-   --run-baseline runs it; on PASS the phase advances to PLAN in
-   state.json immediately. Your job is PERFORMANCE OPTIMIZATION via
+2. The kernel handoff we passed via --kernel is a verified seed (a .py
+   file for single-file DSLs, or a project directory for multi-file DSLs).
+   Scaffold's --run-baseline runs it; on PASS the phase advances to PLAN
+   in state.json immediately. Your job is PERFORMANCE OPTIMIZATION via
    PLAN -> EDIT -> VERIFY for the configured max-rounds: propose
    targeted incremental edits to ModelNew (block sizes, memory layout,
    vectorization, fewer DRAM round-trips) and let pipeline.py measure

@@ -25,7 +25,7 @@ reach into the submodule explicitly when you need them.
 # fmt: off
 from .loader import (
     TaskConfig, load_task_config,
-    REF_FILE_DEFAULT, py_stem,
+    REF_FILE_DEFAULT, py_stem, pick_kernel_module_file,
 )
 from .metric_policy import (
     EvalOutcome, EvalResult, check_constraints, is_improvement, format_result_summary,
