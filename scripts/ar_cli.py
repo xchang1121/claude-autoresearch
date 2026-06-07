@@ -135,6 +135,18 @@ def _config_default(name: str, default=None):
     return (data.get("defaults") or {}).get(name, default)
 
 
+def _guess_remote_alias() -> Optional[str]:
+    """If exactly one entry exists under remote_worker.hosts, return its
+    alias. Used by _dispatch_worker to silently route Windows callers
+    that omit --remote-host. Returns None when the config has zero or
+    multiple hosts (ambiguous)."""
+    data, _ = _load_config_yaml()
+    hosts = ((data.get("remote_worker") or {}).get("hosts") or {})
+    if len(hosts) == 1:
+        return next(iter(hosts))
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Tunnel pid file helpers (used by --remote-host in Phase 2C)
 # ---------------------------------------------------------------------------
@@ -255,12 +267,6 @@ def cmd_worker_start(args) -> int:
         print(f"[ar_cli] daemon already alive on :{args.port}; nothing to do")
         return 0
 
-    if os.name != "posix":
-        print("[ar_cli] worker --start requires POSIX (detached process "
-              "group). On Windows, use --remote-host or run "
-              "`python -m worker.server` directly.", file=sys.stderr)
-        return 2
-
     env = os.environ.copy()
     env["WORKER_BACKEND"] = args.backend
     env["WORKER_ARCH"] = args.arch
@@ -318,22 +324,18 @@ def cmd_worker_start(args) -> int:
     print(f"  Port    : {args.port}")
     print(f"  PID     : {proc.pid}")
     print(f"  Log     : {log_path}")
-    print("-" * 56)
-    print(f"  Stop: ar_cli worker --stop --port {args.port}")
     print("=" * 56)
     return 0
 
 
 def cmd_worker_stop(args) -> int:
-    if os.name != "posix":
-        print("[ar_cli] --stop requires POSIX (uses ss/lsof + SIGTERM). "
-              "On Windows, find the process manually.", file=sys.stderr)
-        return 2
-
     pid = _find_pid_on_port(args.port)
     if pid is None:
+        # Already stopped → idempotent success. Matches systemctl stop /
+        # docker stop convention so `--stop; --stop` doesn't pretend the
+        # second call failed.
         print(f"[ar_cli] no listener on :{args.port}", file=sys.stderr)
-        return 1
+        return 0
 
     if not args.force and not _cmdline_contains_worker(pid):
         print(f"[ar_cli] pid {pid} on :{args.port} does not look like a "
@@ -725,8 +727,7 @@ def _build_parser() -> argparse.ArgumentParser:
                              "if daemon is already alive; rebuilds the "
                              "ssh -L tunnel on demand for --remote-host.")
     action.add_argument("--stop", action="store_true",
-                        help="Stop the daemon listening on --port. "
-                             "POSIX-only (uses ss/lsof + SIGTERM/SIGKILL).")
+                        help="Stop the daemon listening on --port.")
     action.add_argument("--status", action="store_true",
                         help="Probe /api/v1/status + /health. If the "
                              "worker is unreachable, print local or remote "
@@ -776,6 +777,28 @@ def _dispatch_worker(args) -> int:
 
     if args.start:
         _print_logo_once()
+
+    # Windows: local worker has no implementation (the daemon needs
+    # os.setsid; the stop path needs ss/lsof+SIGTERM). Force every
+    # `python scripts/ar_cli.py worker --...` through the remote
+    # dispatcher. Auto-fill --remote-host from the only configured
+    # alias; if zero or multiple, surface the config issue directly
+    # instead of leaking POSIX details into the error.
+    if os.name != "posix" and not args.remote_host:
+        alias = _guess_remote_alias()
+        if alias:
+            args.remote_host = alias
+        else:
+            data, _ = _load_config_yaml()
+            hosts = ((data.get("remote_worker") or {}).get("hosts") or {})
+            if not hosts:
+                print("[ar_cli] no remote_worker.hosts in config.yaml.",
+                      file=sys.stderr)
+            else:
+                print(f"[ar_cli] multiple remote_worker.hosts configured "
+                      f"({', '.join(hosts)}); pass --remote-host <alias>.",
+                      file=sys.stderr)
+            return 2
 
     if args.remote_host:
         return _dispatch_remote_worker(args)
@@ -863,11 +886,24 @@ def _strip_remote_flags(args) -> list[str]:
 
 
 def _tunnel_start(host: str, port: int) -> int:
-    """Start `ssh -L <port>:127.0.0.1:<port> <host> -N -f`. The forked
-    ssh writes its PID to <STATE_DIR>/tunnels/<port>.pid (via `-o
-    PidFile=`-equivalent — actually ssh has no such option, we shell out
-    and grep for the pid via pgrep after fork). Returns the pid on
-    success, 0 on failure."""
+    """Start `ssh -f -N -T -L <port>:127.0.0.1:<port> <host>`, stash the
+    forked pid. Returns the pid on success, 0 on soft failure.
+
+    On Windows, `ssh -f` doesn't reliably daemonize when invoked via
+    Python subprocess — the parent ssh.exe stays attached and
+    subprocess.call() blocks forever even with all 3 std streams to
+    DEVNULL. Sidestep with DETACHED_PROCESS + NEW_PROCESS_GROUP via
+    Popen so ssh.exe runs independently from ar_cli's console, then
+    poll for the tunnel pid via cmdline scan. On POSIX, ssh -f
+    detaches correctly via setsid + we can keep subprocess.call.
+
+    This mirrors akg_agents/python/akg_agents/cli/service/tunnel.py so
+    both CLIs spawn the worker tunnel the same way.
+
+    Does NOT pass `ExitOnForwardFailure=yes` — user `~/.ssh/config`
+    may declare unrelated RemoteForward entries whose failure shouldn't
+    take down the -L we need. Readiness is confirmed via a curl probe
+    to /api/v1/status after the spawn."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     (STATE_DIR / "tunnels").mkdir(exist_ok=True)
     pid_path = _tunnel_pid_path(port)
@@ -875,18 +911,8 @@ def _tunnel_start(host: str, port: int) -> int:
     # If a stale tunnel exists, tear it down first so the new one binds.
     _tunnel_stop_silent(port, host)
 
-    # `-f` forks; `-N` no remote command; `-T` no pty. We deliberately do
-    # NOT pass `ExitOnForwardFailure=yes` here: the user's `~/.ssh/config`
-    # may declare unrelated forwards (RemoteForward for IDE relays, etc.)
-    # whose failure would take down the -L we actually need. Readiness is
-    # confirmed via a curl probe to /api/v1/status after the fork.
-    #
-    # Keepalive: ping every 30s, drop after 10 missed (~5 min idle
-    # tolerance). Default OpenSSH (60s / 3x) drops idle long-running
-    # tunnels on flaky multi-tenant networks; bumped because a long
-    # autoresearch batch can sit in PLAN for several minutes without
-    # using the tunnel, and we don't want the next eval call to find a
-    # dead tunnel.
+    # Keepalive bumped from OpenSSH default 60s/3x → 30s/10x (~5min idle
+    # tolerance) so long PLAN phases don't lose the tunnel between evals.
     cmd = [
         "ssh", "-f", "-N", "-T",
         "-o", "ServerAliveInterval=30",
@@ -894,21 +920,35 @@ def _tunnel_start(host: str, port: int) -> int:
         "-L", f"{port}:127.0.0.1:{port}",
         host,
     ]
-    try:
-        rc = subprocess.call(cmd)
-    except Exception as e:
-        print(f"[ar_cli] ssh tunnel launch failed: {e}", file=sys.stderr)
-        return 0
-    # Don't bail on rc — unrelated forwards may have failed but our -L
-    # could still be live. The status probe below is the real readiness
-    # check. (If `-L` itself failed, the probe fails and the caller
-    # surfaces that.)
-    if rc != 0:
-        print(f"[ar_cli] ssh exited rc={rc} (unrelated forward may have "
-              f"failed; checking -L {port} via status probe).",
-              file=sys.stderr)
+    kwargs = dict(
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if os.name == "posix":
+        try:
+            rc = subprocess.call(cmd, **kwargs)
+        except Exception as e:
+            print(f"[ar_cli] ssh tunnel launch failed: {e}", file=sys.stderr)
+            return 0
+        if rc != 0:
+            print(f"[ar_cli] ssh exited rc={rc} (unrelated forward may have "
+                  f"failed; checking -L {port} via status probe).",
+                  file=sys.stderr)
+    else:
+        flags = (subprocess.CREATE_NEW_PROCESS_GROUP
+                 | getattr(subprocess, "DETACHED_PROCESS", 0x00000008))
+        try:
+            subprocess.Popen(cmd, creationflags=flags, **kwargs)
+        except Exception as e:
+            print(f"[ar_cli] ssh tunnel spawn failed: {e}", file=sys.stderr)
+            return 0
+        # Poll up to ~5s for ssh to authenticate + bind the local port.
+        for _ in range(10):
+            time.sleep(0.5)
+            if _find_tunnel_pid(port, host):
+                break
 
-    # ssh -f forks itself; find the child by cmdline pattern.
     pid = _find_tunnel_pid(port, host)
     if pid:
         pid_path.write_text(str(pid))
