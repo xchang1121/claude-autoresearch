@@ -172,6 +172,33 @@ the current state.
        `catlass step7 npu smoke ok`.
      - Temporary smoke harness was removed after the run.
 
+8. ar_cli UX and diagnostics follow-up.
+   - Status: complete.
+   - Scope:
+     - Compare `ar_cli` against `akg_cli` worker UX/diagnostics behavior.
+     - Add human-facing logo/list/doctor output while keeping
+       `worker --status` machine-readable.
+     - Add remote preflight checks before spawning a remote worker:
+       ssh/env_script, torch_npu, triton policy, npu-smi, arch/device
+       visibility, disk space, and remote port ownership.
+     - Sync via `scp` and smoke on `npu`.
+   - Local checks:
+     - `python -m py_compile scripts/ar_cli.py` passed on 2026-06-07.
+     - `python scripts/ar_cli.py list` passed and prints the new logo.
+     - `python scripts/ar_cli.py doctor --help` passed.
+     - `python scripts/ar_cli.py doctor --remote-host npu --backend ascend --dsl ascendc_catlass --port 65534`
+       passed; all remote diagnostics were OK.
+   - NPU sync/checks:
+     - `scripts/ar_cli.py` and `MIGRATION_PROGRESS.md` synced via `scp`.
+     - `python -m py_compile scripts/ar_cli.py` passed on `npu`.
+     - `python scripts/ar_cli.py list` passed on `npu`.
+     - `python scripts/ar_cli.py doctor --backend ascend --dsl ascendc_catlass --port 65534`
+       passed on `npu`.
+   - Notes:
+     - A full remote `worker --start` smoke on port 65534 exceeded the
+       command timeout; follow-up checks found no remote worker/listener
+       or worker log, and the local 65534 ssh tunnel was cleaned up.
+
 ## Latest Known Repo State
 
 - This file is committed as part of the Step 7 cleanup changes; use

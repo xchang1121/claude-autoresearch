@@ -39,6 +39,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from urllib.error import URLError
@@ -56,6 +57,86 @@ AR_ROOT = SCRIPT_DIR.parent
 
 STATE_DIR = Path(os.environ.get(
     "AR_STATE_DIR", str(Path.home() / ".autoresearch_state")))
+
+_LOGO_PRINTED = False
+_LOGO = r"""
+    _         _        ____                               _
+   / \  _   _| |_ ___ |  _ \ ___  ___  ___  __ _ _ __ ___| |__
+  / _ \| | | | __/ _ \| |_) / _ \/ __|/ _ \/ _` | '__/ __| '_ \
+ / ___ \ |_| | || (_) |  _ <  __/\__ \  __/ (_| | | | (__| | | |
+/_/   \_\__,_|\__\___/|_| \_\___||___/\___|\__,_|_|  \___|_| |_|
+"""
+
+
+def _color(text: str, code: str) -> str:
+    if (not sys.stdout.isatty()
+            or os.environ.get("NO_COLOR")
+            or os.environ.get("AR_CLI_PLAIN") == "1"):
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _print_logo_once() -> None:
+    """Print the human-facing CLI banner once per process.
+
+    Keep machine-readable commands quiet: callers can also set
+    AR_CLI_QUIET=1 for recursive remote invocations.
+    """
+    global _LOGO_PRINTED
+    if _LOGO_PRINTED or os.environ.get("AR_CLI_QUIET") == "1":
+        return
+    _LOGO_PRINTED = True
+    print(_color(_LOGO.rstrip("\n"), "36"))
+    print(_color("AutoResearch CLI", "1;37"))
+
+
+@dataclass(frozen=True)
+class Finding:
+    severity: str  # ok / info / warn / fatal
+    check: str
+    result: str
+    suggest: str = ""
+
+
+def _has_fatal(findings: list[Finding]) -> bool:
+    return any(f.severity == "fatal" for f in findings)
+
+
+def _render_findings(findings: list[Finding], *,
+                     title: str = "Diagnostics",
+                     log_tail: str = "",
+                     stream=None) -> None:
+    stream = stream or sys.stdout
+    print(f"\n{title}", file=stream)
+    print("-" * max(12, len(title)), file=stream)
+    sym = {"ok": "OK", "info": "INFO", "warn": "WARN", "fatal": "FAIL"}
+    for f in findings:
+        tag = sym.get(f.severity, f.severity.upper())
+        line = f"[{tag:<4}] {f.check:<16} {f.result}"
+        if f.suggest:
+            line += f"  -> {f.suggest}"
+        print(line, file=stream)
+    if log_tail and log_tail.strip() and not log_tail.strip().startswith("(no log"):
+        print("\nRemote daemon log tail:", file=stream)
+        print(log_tail, file=stream)
+
+
+def _load_config_yaml() -> tuple[dict, Optional[str]]:
+    cfg_path = AR_ROOT / "config.yaml"
+    if not cfg_path.is_file():
+        return {}, None
+    try:
+        import yaml  # type: ignore
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}, str(cfg_path)
+    except Exception as e:
+        print(f"[ar_cli] failed to read {cfg_path}: {e}", file=sys.stderr)
+        return {}, str(cfg_path)
+
+
+def _config_default(name: str, default=None):
+    data, _ = _load_config_yaml()
+    return (data.get("defaults") or {}).get(name, default)
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +393,343 @@ def cmd_worker_status(args) -> int:
     return 0
 
 
+_REMOTE_PROBE_BASH = r"""
+env_script={env_script}
+port={port}
+log_file={log_file}
+echo "ENV_PATH:$env_script"
+if [ -n "$env_script" ]; then
+  [ -f "$env_script" ] && echo "ENV_OK:yes" || echo "ENV_OK:no"
+else
+  echo "ENV_OK:"
+fi
+if [ -n "$env_script" ] && [ -f "$env_script" ]; then
+  source "$env_script" >/dev/null 2>&1
+fi
+TORCH_NPU_OUT=$(python -c 'import torch_npu' 2>&1); TORCH_NPU_RC=$?
+if [ $TORCH_NPU_RC -eq 0 ]; then
+  echo "TORCH_NPU:ok"
+else
+  echo "TORCH_NPU:$(echo "$TORCH_NPU_OUT" | tail -1)"
+fi
+TRITON_OUT=$(python -c 'import triton' 2>&1); TRITON_RC=$?
+if [ $TRITON_RC -eq 0 ]; then
+  echo "TRITON:ok"
+else
+  echo "TRITON:$(echo "$TRITON_OUT" | tail -1)"
+fi
+echo "NPU_SMI:$(command -v npu-smi >/dev/null 2>&1 && echo ok || echo missing)"
+echo "ARCH:$(npu-smi info 2>/dev/null | awk '/^\| +[0-9]+ +[0-9A-Z]/{{print $3; exit}}')"
+echo "DEVICES:$(npu-smi info 2>/dev/null | grep -cE '^\| +[0-9]+ +[0-9A-Z]')"
+if command -v lsof >/dev/null 2>&1; then
+  echo "PORT_PID:$(lsof -ti :$port -sTCP:LISTEN 2>/dev/null | head -1)"
+elif command -v ss >/dev/null 2>&1; then
+  echo "PORT_PID:$(ss -ltnp "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
+else
+  echo "PORT_PID:"
+fi
+echo "DISK_FREE_MB:$(df -kP /tmp / 2>/dev/null | awk 'NR>1 {{print int($4/1024)}}' | sort -n | head -1)"
+echo "LOG_TAIL_BEGIN"
+[ -f "$log_file" ] && tail -20 "$log_file" || echo "(no log: $log_file)"
+"""
+
+
+def _probe_remote(ssh_alias: str, env_script: Optional[str],
+                  port: int) -> dict:
+    probe = _REMOTE_PROBE_BASH.format(
+        env_script=shlex.quote(env_script or ""),
+        port=int(port),
+        log_file=shlex.quote(_worker_log_path(port)),
+    )
+    try:
+        out = subprocess.run(
+            [
+                "ssh",
+                "-o", "ConnectTimeout=10",
+                "-o", "BatchMode=yes",
+                ssh_alias,
+                f"bash -lc {shlex.quote(probe)}",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=35,
+        )
+    except subprocess.TimeoutExpired:
+        return {"_SSH_ERROR": "ssh probe timed out after 35s"}
+    except Exception as e:
+        return {"_SSH_ERROR": str(e)[:200]}
+
+    if out.returncode != 0:
+        err = (out.stderr or "").strip() or f"ssh exit rc={out.returncode}"
+        return {"_SSH_ERROR": err[:200]}
+
+    facts: dict = {}
+    log_lines: list[str] = []
+    in_log = False
+    for line in out.stdout.splitlines():
+        if in_log:
+            log_lines.append(line)
+        elif line == "LOG_TAIL_BEGIN":
+            in_log = True
+        elif ":" in line:
+            key, value = line.split(":", 1)
+            facts[key] = value.strip()
+    facts["LOG_TAIL"] = "\n".join(log_lines)
+    return facts
+
+
+def _ssh_suggestion(err: str) -> str:
+    low = err.lower()
+    if "could not resolve hostname" in low or "name or service not known" in low:
+        return "check ~/.ssh/config alias"
+    if "timed out" in low or "no route to host" in low:
+        return "check VPN/network/routing"
+    if "permission denied" in low or "publickey" in low:
+        return "check ssh key / authorized_keys"
+    if "host key verification failed" in low:
+        return "run ssh-keygen -R <host> if host key changed"
+    return "try `ssh <alias>` manually for the raw error"
+
+
+def _classify_probe(facts: dict, port: int, *,
+                    backend: Optional[str],
+                    dsl: Optional[str],
+                    for_start: bool) -> list[Finding]:
+    ssh_err = facts.get("_SSH_ERROR")
+    if ssh_err:
+        return [Finding("fatal", "ssh", ssh_err, _ssh_suggestion(ssh_err))]
+
+    backend_n = (backend or "").strip().lower()
+    ascendish = backend_n in ("", "ascend")
+    needs_triton = (dsl or "").strip().lower().startswith("triton")
+    findings: list[Finding] = []
+
+    env_path = facts.get("ENV_PATH") or ""
+    env_ok = facts.get("ENV_OK") or ""
+    if not env_path:
+        findings.append(Finding(
+            "info", "env_script", "not configured",
+            "ok only if the remote login shell already initializes CANN",
+        ))
+    elif env_ok == "yes":
+        findings.append(Finding("ok", "env_script", env_path))
+    else:
+        findings.append(Finding(
+            "fatal", "env_script", f"{env_path} missing",
+            "fix config.yaml remote_worker.hosts.<alias>.env_script",
+        ))
+
+    torch_npu = facts.get("TORCH_NPU") or ""
+    if torch_npu == "ok":
+        findings.append(Finding("ok", "torch_npu", "importable"))
+    elif ascendish:
+        findings.append(Finding(
+            "fatal", "torch_npu", torch_npu[:120] or "import failed",
+            "source CANN env or install torch_npu",
+        ))
+    else:
+        findings.append(Finding("info", "torch_npu", "not required"))
+
+    triton = facts.get("TRITON") or ""
+    if triton == "ok":
+        findings.append(Finding("ok", "triton", "importable"))
+    else:
+        findings.append(Finding(
+            "fatal" if needs_triton else "warn",
+            "triton",
+            triton[:100] or "import failed",
+            "required for triton_* DSLs",
+        ))
+
+    if facts.get("NPU_SMI") == "ok":
+        findings.append(Finding("ok", "npu-smi", "in PATH"))
+    elif ascendish:
+        findings.append(Finding(
+            "fatal", "npu-smi", "missing",
+            "source CANN set_env.sh in env_script",
+        ))
+    else:
+        findings.append(Finding("info", "npu-smi", "not required"))
+
+    arch = (facts.get("ARCH") or "").strip()
+    if arch:
+        findings.append(Finding("ok", "npu arch", f"ascend{arch.lower()}"))
+    elif ascendish:
+        findings.append(Finding(
+            "warn", "npu arch", "not detected",
+            "pass --arch explicitly if auto-detect fails",
+        ))
+
+    try:
+        ndev = int(facts.get("DEVICES") or "0")
+    except ValueError:
+        ndev = 0
+    if ndev > 0:
+        findings.append(Finding("ok", "npu devices", f"{ndev} visible"))
+    elif ascendish:
+        findings.append(Finding(
+            "fatal", "npu devices", "0 visible",
+            "check driver and `npu-smi info` on the remote",
+        ))
+
+    try:
+        free_mb = int(facts.get("DISK_FREE_MB") or "0")
+    except ValueError:
+        free_mb = 0
+    if free_mb >= 500:
+        findings.append(Finding("ok", "disk free", f"{free_mb} MB"))
+    elif free_mb > 0:
+        findings.append(Finding(
+            "fatal", "disk free", f"only {free_mb} MB",
+            "clear /tmp or remote logs before starting worker",
+        ))
+
+    port_pid = (facts.get("PORT_PID") or "").strip()
+    if port_pid:
+        findings.append(Finding(
+            "fatal" if for_start else "warn",
+            f"remote :{port}",
+            f"held by PID {port_pid}",
+            "stop stale daemon or choose another --port",
+        ))
+    else:
+        findings.append(Finding("ok", f"remote :{port}", "free"))
+
+    return findings
+
+
+def _run_remote_diagnostics(alias: str, host_cfg: dict, port: int, *,
+                            backend: Optional[str],
+                            dsl: Optional[str],
+                            for_start: bool,
+                            stream=None) -> bool:
+    ssh_alias = host_cfg.get("ssh_alias") or alias
+    facts = _probe_remote(ssh_alias, host_cfg.get("env_script"), port)
+    findings = _classify_probe(
+        facts, port, backend=backend, dsl=dsl, for_start=for_start)
+    _render_findings(
+        findings,
+        title=f"Remote diagnostics: {alias}",
+        log_tail=facts.get("LOG_TAIL", ""),
+        stream=stream or sys.stdout,
+    )
+    return not _has_fatal(findings)
+
+
+def _run_local_diagnostics(port: int, *,
+                           backend: Optional[str],
+                           dsl: Optional[str]) -> bool:
+    backend_n = (backend or _config_default("backend", "") or "").lower()
+    dsl_n = (dsl or _config_default("dsl", "") or "")
+    findings: list[Finding] = []
+    _, cfg_path = _load_config_yaml()
+    findings.append(Finding(
+        "ok" if cfg_path else "warn",
+        "config.yaml",
+        cfg_path or "not found",
+        "" if cfg_path else "run from repo root or pass explicit flags",
+    ))
+    findings.append(Finding(
+        "ok", "python",
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+    ))
+    status = _curl_status("127.0.0.1", port)
+    findings.append(Finding(
+        "ok" if status else "info",
+        f"local :{port}",
+        "worker reachable" if status else "no worker responding",
+    ))
+
+    if backend_n == "ascend":
+        try:
+            smi = subprocess.run(
+                ["npu-smi", "info"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=8,
+            )
+            findings.append(Finding(
+                "ok" if smi.returncode == 0 else "fatal",
+                "npu-smi",
+                "ok" if smi.returncode == 0 else (smi.stderr or "failed")[:100],
+                "" if smi.returncode == 0 else "source CANN set_env.sh",
+            ))
+        except Exception as e:
+            findings.append(Finding(
+                "fatal", "npu-smi", str(e)[:100],
+                "source CANN set_env.sh",
+            ))
+        torch = subprocess.run(
+            [sys.executable, "-c", "import torch_npu"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=20,
+        )
+        findings.append(Finding(
+            "ok" if torch.returncode == 0 else "fatal",
+            "torch_npu",
+            "importable" if torch.returncode == 0 else (torch.stderr or "failed")[-120:],
+        ))
+
+    if str(dsl_n).startswith("triton"):
+        tri = subprocess.run(
+            [sys.executable, "-c", "import triton"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=20,
+        )
+        findings.append(Finding(
+            "ok" if tri.returncode == 0 else "fatal",
+            "triton",
+            "importable" if tri.returncode == 0 else (tri.stderr or "failed")[-120:],
+        ))
+
+    _render_findings(findings, title="Local diagnostics")
+    return not _has_fatal(findings)
+
+
+def cmd_list(args) -> int:
+    _print_logo_once()
+    print("\nCommands")
+    print("--------")
+    print("worker --start   Start local or remote worker daemon")
+    print("worker --status  Probe /api/v1/status plus /health when available")
+    print("worker --stop    Stop worker and tear down remote tunnel")
+    print("doctor           Run local/remote environment diagnostics")
+    print("list             Show this command summary")
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    _print_logo_once()
+    if args.remote_host:
+        host_cfg = _load_remote_host_config(args.remote_host)
+        if host_cfg is None:
+            print(f"[ar_cli] no remote_worker.hosts.{args.remote_host} entry "
+                  f"in config.yaml", file=sys.stderr)
+            return 2
+        if "repo_path" not in host_cfg:
+            print(f"[ar_cli] remote_worker.hosts.{args.remote_host} missing "
+                  f"`repo_path`.", file=sys.stderr)
+            return 2
+        ok = _run_remote_diagnostics(
+            args.remote_host,
+            host_cfg,
+            args.port,
+            backend=args.backend,
+            dsl=args.dsl,
+            for_start=False,
+        )
+        return 0 if ok else 1
+
+    ok = _run_local_diagnostics(args.port, backend=args.backend, dsl=args.dsl)
+    return 0 if ok else 1
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -319,9 +737,31 @@ def cmd_worker_status(args) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="ar_cli",
-        description="AutoResearch CLI (worker daemon control).",
+        description="AutoResearch CLI.",
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    l = sub.add_parser("list", help="List supported ar_cli commands.")
+    l.set_defaults(func=cmd_list)
+
+    d = sub.add_parser(
+        "doctor",
+        help="Run local or remote environment diagnostics.",
+        description=(
+            "Check config, Python/runtime imports, device visibility, "
+            "remote ssh/env_script, disk space, and worker port state."
+        ),
+    )
+    d.add_argument("--remote-host", default=None,
+                   help="SSH alias under config.yaml:remote_worker.hosts.")
+    d.add_argument("--backend", choices=["ascend", "cuda", "cpu"],
+                   default=None,
+                   help="Target backend. Defaults to config.yaml defaults.backend.")
+    d.add_argument("--dsl", default=None,
+                   help="Target DSL. triton_* makes missing triton fatal.")
+    d.add_argument("--port", type=int, default=worker_port(),
+                   help=f"Worker port (default: {worker_port()}).")
+    d.set_defaults(func=cmd_doctor)
 
     w = sub.add_parser(
         "worker",
@@ -354,6 +794,9 @@ def _build_parser() -> argparse.ArgumentParser:
     w.add_argument("--devices",
                    help="Comma-separated device IDs, e.g. '2,5' "
                         "(required for --start).")
+    w.add_argument("--dsl",
+                   help="Target DSL for remote diagnostics. triton_* makes "
+                        "missing triton fatal; other DSLs warn only.")
     w.add_argument("--port", type=int, default=worker_port(),
                    help=f"TCP port (default: {worker_port()}, "
                         f"from config.yaml worker.port).")
@@ -387,8 +830,10 @@ def _dispatch_worker(args) -> int:
         return _dispatch_remote_worker(args)
 
     if args.start:
+        _print_logo_once()
         return cmd_worker_start(args)
     if args.stop:
+        _print_logo_once()
         return cmd_worker_stop(args)
     if args.status:
         return cmd_worker_status(args)
@@ -430,6 +875,7 @@ def _build_remote_ar_cli_cmd(host_cfg: dict, ar_cli_args: list[str]) -> str:
     env_script = host_cfg.get("env_script")
 
     parts: list[str] = []
+    parts.append("export AR_CLI_QUIET=1")
     if env_script:
         parts.append(f"source {shlex.quote(env_script)}")
     parts.append(f"cd {shlex.quote(repo_path)}")
@@ -462,6 +908,8 @@ def _strip_remote_flags(args) -> list[str]:
         out += ["--arch", args.arch]
     if args.devices:
         out += ["--devices", args.devices]
+    if getattr(args, "dsl", None):
+        out += ["--dsl", args.dsl]
     out += ["--port", str(args.port)]
     if args.force:
         out.append("--force")
@@ -602,6 +1050,9 @@ def _tunnel_stop_silent(port: int, host: str = "") -> None:
 
 
 def _dispatch_remote_worker(args) -> int:
+    if not args.status:
+        _print_logo_once()
+
     host_cfg = _load_remote_host_config(args.remote_host)
     if host_cfg is None:
         print(f"[ar_cli] no remote_worker.hosts.{args.remote_host} entry "
@@ -654,6 +1105,22 @@ def _dispatch_remote_worker(args) -> int:
         print(f"[ar_cli] tunnel rebuilt; daemon was already running remotely")
         print(json.dumps(st, indent=2))
         return 0
+
+    print(f"[ar_cli] running remote preflight for {args.remote_host}...",
+          file=sys.stderr)
+    ok = _run_remote_diagnostics(
+        args.remote_host,
+        host_cfg,
+        args.port,
+        backend=args.backend,
+        dsl=getattr(args, "dsl", None),
+        for_start=True,
+        stream=sys.stderr,
+    )
+    if not ok:
+        print("[ar_cli] remote preflight failed; worker was not spawned.",
+              file=sys.stderr)
+        return 1
 
     # Need to actually spawn the remote daemon.
     remote_args = _strip_remote_flags(args)
