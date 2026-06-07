@@ -863,7 +863,7 @@ def _load_remote_host_config(alias: str) -> Optional[dict]:
 
 def _build_remote_ar_cli_cmd(host_cfg: dict, ar_cli_args: list[str]) -> str:
     """Compose the bash command we send through ssh: source env, cd repo,
-    invoke the remote ar_cli.py with the equivalent (non-remote) args.
+    invoke the remote CLI with the equivalent (non-remote) args.
 
     All values are shlex-quoted; the resulting string is passed to ssh
     AS A SINGLE ARG so the remote shell parses it as one command. The
@@ -873,14 +873,24 @@ def _build_remote_ar_cli_cmd(host_cfg: dict, ar_cli_args: list[str]) -> str:
     python = host_cfg.get("python") or "python"
     repo_path = host_cfg["repo_path"]  # required; KeyError surfaces cleanly
     env_script = host_cfg.get("env_script")
+    remote_cli = str(host_cfg.get("remote_cli") or "").strip()
+    if remote_cli:
+        remote_entry = " ".join(
+            shlex.quote(part) for part in shlex.split(remote_cli)
+        )
+    else:
+        remote_entry = (
+            f"{shlex.quote(python)} scripts/ar_cli.py"
+        )
 
     parts: list[str] = []
     parts.append("export AR_CLI_QUIET=1")
+    parts.append("export AKG_CLI_QUIET=1")
     if env_script:
         parts.append(f"source {shlex.quote(env_script)}")
     parts.append(f"cd {shlex.quote(repo_path)}")
     parts.append(
-        f"{shlex.quote(python)} scripts/ar_cli.py "
+        f"{remote_entry} "
         + " ".join(shlex.quote(a) for a in ar_cli_args)
     )
     return " && ".join(parts)

@@ -199,6 +199,30 @@ the current state.
        command timeout; follow-up checks found no remote worker/listener
        or worker log, and the local 65534 ssh tunnel was cleaned up.
 
+9. npu remote akg host configuration.
+   - Status: complete.
+   - Scope:
+     - Configure local `ar_cli` host `npu` to target the remote akg project
+       at `/home/yyz/cxy/akg/akg_agents` with `/home/yyz/env.sh`.
+     - Add `remote_cli: akg_cli` support so `ar_cli` can dispatch to the
+       upstream akg project layout instead of requiring `scripts/ar_cli.py`.
+   - Local checks:
+     - `python -m py_compile scripts/ar_cli.py` passed on 2026-06-07.
+     - `python scripts/ar_cli.py doctor --remote-host npu --backend ascend --dsl ascendc_catlass --port 65534`
+       passed; all remote diagnostics were OK.
+     - `_build_remote_ar_cli_cmd(...)` constructed
+       `akg_cli worker --stop --port 65534` with `AKG_CLI_QUIET=1`.
+   - NPU sync/checks:
+     - Synced `config.yaml`, `MIGRATION_PROGRESS.md`, and `scripts/ar_cli.py`
+       to `/home/yyz/cxy/claude-autoresearch`.
+     - `git diff --check -- scripts/ar_cli.py config.yaml MIGRATION_PROGRESS.md`
+       and `python -m py_compile scripts/ar_cli.py` passed on NPU.
+     - Remote config contains `npu` -> `/home/yyz/cxy/akg/akg_agents`
+       with `/home/yyz/env.sh` and `remote_cli: akg_cli`.
+   - Adjustment:
+     - Removed the extra `akg_npu` host alias and made `npu` itself point
+       at the akg project, as requested.
+
 ## Latest Known Repo State
 
 - This file is committed as part of the Step 7 cleanup changes; use
