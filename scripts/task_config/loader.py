@@ -158,7 +158,7 @@ class TaskConfig:
     smoke_test_script: Optional[str] = None
     smoke_test_timeout: int = 10
 
-    # Triton regression check (validate_triton_impl) on editable files.
+    # DSL-aware static check (CodeChecker) on editable files.
     # Default on; disable per-task via `code_checker.enabled: false` in
     # task.yaml or scaffold's --no-code-checker flag. The yaml key name
     # is kept as `code_checker.enabled` for back-compat with existing

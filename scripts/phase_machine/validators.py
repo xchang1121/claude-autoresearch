@@ -2,8 +2,8 @@
 
 Validators (each: "is this artifact OK enough to advance the phase?"):
 
-  - validate_kernel: Triton regression check (delegates to
-    validate_triton_impl.validate via quick_check).
+  - validate_kernel: DSL-aware static code check (delegates to
+    engine.quick_check.check_editable_files).
   - validate_plan: structural check on plan.md (≥3 items, rationale length,
     exactly one ACTIVE).
   - validate_diagnose: marker + sections on diagnose_v<N>.md.
@@ -40,7 +40,7 @@ from .state_store import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Kernel static check (Triton regression check)
+# Kernel static check (DSL-aware code check)
 # ---------------------------------------------------------------------------
 
 def validate_kernel(task_dir: str) -> tuple:
@@ -48,9 +48,8 @@ def validate_kernel(task_dir: str) -> tuple:
 
     Delegates to quick_check.check_editable_files (the public lib API —
     same call the quick_check CLI makes). The check runs
-    validate_triton_impl.validate on each editable file to detect Triton
-    regressions (no kernel / kernel unlaunched / PyTorch compute in
-    forward()).
+    CodeChecker on each editable file to detect DSL regressions (for
+    example no Triton kernel, or CATLASS wrapper without torch.ops.catlass).
 
     Never raises. Returns (True, "") on success, (False, reason) otherwise.
     """
@@ -81,7 +80,7 @@ def validate_kernel(task_dir: str) -> tuple:
     try:
         issues = check_editable_files(task_dir, config)
     except Exception as e:
-        return False, f"Triton regression check crashed: {e}"
+        return False, f"DSL static code check crashed: {e}"
 
     if not issues:
         return True, ""
@@ -89,7 +88,7 @@ def validate_kernel(task_dir: str) -> tuple:
     parts = []
     for it in issues:
         parts.append(f"- {it.get('file', '?')}: {it.get('report', '(no report)')}")
-    return False, "Triton regression check found issues:\n" + "\n".join(parts)
+    return False, "DSL static code check found issues:\n" + "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

@@ -291,8 +291,8 @@ def _make_arg_parser() -> argparse.ArgumentParser:
     # presence yields False (pinned into task.yaml as enabled: false).
     parser.add_argument("--no-code-checker", dest="code_checker",
                         action="store_const", const=False, default=None,
-                        help=("Disable the static Triton regression check "
-                              "(validate_triton_impl) for this task. "
+                        help=("Disable the static DSL code check "
+                              "(CodeChecker) for this task. "
                               "Useful when the regression rules are too "
                               "strict for the chosen kernel style. Writes "
                               "`code_checker: {enabled: false}` into "

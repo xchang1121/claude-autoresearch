@@ -68,7 +68,9 @@ the current state.
 
 ### Step 4b: Package / Worker / Batch Multi-File Flow
 
-- Status: local implementation complete; NPU sync/smoke pending.
+- Local commit: `2f34319 Support multi-file DSL task packaging`
+- NPU commit: `4dac92a Support multi-file DSL task packaging`
+- Status: complete.
 - Scope:
   - `scripts/task_config/package_builder.py`: package task-local
     directory entries safely when editable/data/extra files name a
@@ -87,17 +89,34 @@ the current state.
   - Local no-hardware behavior smoke passed on 2026-06-07:
     `catlass 4b local smoke ok`.
 - NPU sync/smoke:
-  - Pending.
+  - `python -m compileall` passed for all touched 4b Python files on
+    `npu` on 2026-06-07.
+  - `catlass 4b npu smoke ok` passed on `npu` on 2026-06-07.
 
 ## Pending
 
-5. Step 4b packaging / worker / batch path resolution for multi-file DSLs.
-7. Multi-DSL CodeChecker/static checks.
-8. End-to-end local + NPU verification and final migration notes.
+5. Multi-DSL CodeChecker/static checks.
+   - Status: local implementation complete; NPU sync/smoke pending.
+   - Scope:
+     - `scripts/utils/code_checker.py`: local `CodeChecker` compatibility
+       wrapper with Triton delegation and CATLASS `torch.ops.catlass.*`
+       checks.
+     - `scripts/engine/quick_check.py`: use `CodeChecker` instead of
+       direct `validate_triton_impl`.
+     - `scripts/batch/verify.py`: use `CodeChecker` for tier-1 kernel
+       static checks.
+     - User-facing static-check text updated away from Triton-only wording.
+   - Local checks:
+     - `python -m compileall` / `py_compile` passed for touched Step 5
+       files on 2026-06-07.
+     - `git diff --check` passed for touched Step 5 files on 2026-06-07.
+     - Local behavior smoke passed on 2026-06-07:
+       `code checker local smoke ok`.
+6. End-to-end local + NPU verification and final migration notes.
 
 ## Latest Known Repo State
 
-- Local `claude-autoresearch` head: `8450532 wip commit`
-- NPU `/home/yyz/cxy/claude-autoresearch` head: `5a3ac7e`
+- Local `claude-autoresearch` head: `2f34319`
+- NPU `/home/yyz/cxy/claude-autoresearch` head: `4dac92a`
 - NPU tracked files were clean after Step 3; only runtime dirs were untracked:
   `.autoresearch/`, `.session_tasks/`, `.task_dir_pointers/`, `extra-info/`.

@@ -1,18 +1,13 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Quick static check for editable files before eval.
 
-Delegates to `utils.validate_triton_impl.validate`, which re-exports the
-in-tree regression checker at `scripts/eval/validate_triton_impl.py`.
-It catches the three Triton-regression patterns before we pay the cost
-of a real eval:
+Delegates to `utils.code_checker.CodeChecker`, which applies the current
+target DSL's static checks before we pay the cost of a real eval.
+Triton still uses validate_triton_impl; CATLASS checks that ModelNew.forward
+calls torch.ops.catlass.*.
 
-  Type 1: no @triton.jit kernel at all (pure PyTorch impl)
-  Type 2: kernel defined but ModelNew.forward() never launches it
-  Type 3: forward() launches the kernel but still does compute via
-          torch.* / F.* / tensor methods / @ operator / Python loops
-
-Honors `config.code_checker_enabled` — when off (task.yaml
+Honors `config.code_checker_enabled` 鈥?when off (task.yaml
 `code_checker.enabled: false` or scaffold's `--no-code-checker`), only
 file existence + the optional smoke test run. The flag name predates
 this rewrite; it toggles the static check itself, not any specific
@@ -33,7 +28,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from task_config import load_task_config
-from utils.validate_triton_impl import validate as validate_triton_impl
+from utils.code_checker import CodeChecker
+from utils.settings import target_backend, target_dsl
 
 
 def _format_regression_report(result: dict) -> str:
@@ -47,7 +43,7 @@ def _format_regression_report(result: dict) -> str:
     }.get(rtype, "(unknown regression type)")
 
     lines = [
-        f"## Triton regression check failed — Type {rtype}: {type_desc}",
+        f"## Triton regression check failed 鈥?Type {rtype}: {type_desc}",
         "",
     ]
     for name, sub in result.get("checks", {}).items():
@@ -58,7 +54,7 @@ def _format_regression_report(result: dict) -> str:
         if name == "no_forbidden_torch_ops":
             for v in sub.get("violations", []) or []:
                 lines.append(
-                    f"  - line {v.get('line', '?')}: {v.get('call', '?')} — "
+                    f"  - line {v.get('line', '?')}: {v.get('call', '?')} 鈥?"
                     f"{v.get('reason', '')}"
                 )
         lines.append("")
@@ -89,7 +85,7 @@ def _regression_to_errors(result: dict) -> list:
             errors.append({
                 "line": v.get("line", 0),
                 "error_type": f"regression_type_{rtype}_{name}",
-                "detail": f"{v.get('call', '?')} — {v.get('reason', '')}",
+                "detail": f"{v.get('call', '?')} 鈥?{v.get('reason', '')}",
                 "suggestion": result.get("suggestion", ""),
                 "code_snippet": "",
             })
@@ -99,7 +95,7 @@ def _regression_to_errors(result: dict) -> list:
 def check_editable_files(task_dir: str, config) -> list:
     """Run validate_triton_impl on every editable .py.
 
-    Honors `config.code_checker_enabled` — when off, only the
+    Honors `config.code_checker_enabled` 鈥?when off, only the
     file-existence check fires; the AST regression check is skipped.
     This is the single gate consulted by both the runtime quick check
     and `phase_machine.validate_kernel`. Public lib API (no leading
@@ -119,12 +115,14 @@ def check_editable_files(task_dir: str, config) -> list:
             continue
         with open(fpath, "r", encoding="utf-8") as f:
             code = f.read()
-        result = validate_triton_impl(code, filepath=fpath)
-        if not result.get("valid"):
+        passed, error_msg, errors = CodeChecker(
+            backend=target_backend(), dsl=target_dsl()
+        ).check(code)
+        if not passed:
             issues.append({
                 "file": fname,
-                "report": _format_regression_report(result),
-                "errors": _regression_to_errors(result),
+                "report": error_msg or "code check failed",
+                "errors": errors or [],
             })
     return issues
 
@@ -164,7 +162,7 @@ def main():
         sys.exit(1)
 
     if not config.code_checker_enabled:
-        print("[quick_check] Triton regression check disabled in task.yaml — "
+        print("[quick_check] static code check disabled in task.yaml 鈥?"
               "only file-existence and smoke test will run.", file=sys.stderr)
 
     file_issues = check_editable_files(task_dir, config)

@@ -2,9 +2,9 @@
 
 Tier 1 (default, no hardware): compile + import + required-symbol check
 on ref.py (Model + get_inputs + get_init_inputs) and kernel.py (ModelNew).
-Kernel.py also runs the triton-impl validator (`utils.validate_triton_impl`):
-must use @triton.jit, forward() must launch it, no host-side for/while
-loops, no forbidden torch.X / F.X / @ matmul.
+Kernel.py also runs the DSL-aware static CodeChecker. Triton kernels must
+use and launch @triton.jit kernels; CATLASS wrappers must call
+torch.ops.catlass.* instead of replacing the kernel with torch compute.
 
 Tier 2 (--full): LOCAL smoke test. Loads both modules on `torch.npu:0`
 (or CPU), runs them, allclose via `utils.correctness`. NOT a proxy for
@@ -35,8 +35,10 @@ import manifest as mf
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.correctness import compare_outputs_per_case  # noqa: E402
 from utils.input_groups import resolve as _resolve_groups  # noqa: E402
-from utils.validate_triton_impl import validate as _validate_kernel_code  # noqa: E402
-from utils.settings import batch_tier1_timeout, batch_tier2_timeout  # noqa: E402
+from utils.code_checker import CodeChecker  # noqa: E402
+from utils.settings import (  # noqa: E402
+    batch_tier1_timeout, batch_tier2_timeout, target_backend, target_dsl,
+)
 
 VERIFY_RESULTS = "verify_results.json"
 # Timeouts (seconds) from config.yaml `batch:`. tier2 cold JIT across ~50
@@ -58,7 +60,7 @@ KERNEL_REQUIRED = ("ModelNew",)
 # ---------------------------------------------------------------------------
 def _tier1_inspect(path: Path, required: tuple[str, ...]) -> dict:
     """Compile, import, check required attrs are present, and (for
-    kernel files only) run the triton-impl regression validator."""
+    kernel files only) run the DSL-aware static checker."""
     out: dict = {"path": str(path), "compile": "skip", "import": "skip",
                  "exports": "skip", "validate": "skip", "missing": [], "msg": ""}
     try:
@@ -106,27 +108,27 @@ def _tier1_inspect(path: Path, required: tuple[str, ...]) -> dict:
         return out
     out["exports"] = "PASS"
 
-    # Step 4: regression validator (kernel-only). Refs legitimately use
-    # torch native; the validator is about ensuring `ModelNew.forward`
-    # actually drives a triton kernel rather than fall back to torch.
+    # Step 4: DSL-aware static check (kernel-only). Refs legitimately use
+    # framework-native code; kernels must satisfy the selected DSL's
+    # anti-cheat rule.
     if required is KERNEL_REQUIRED:
-        v = _validate_kernel_code(src, filepath=str(path))
-        if v["valid"]:
+        passed, error_msg, errors = CodeChecker(
+            backend=target_backend(), dsl=target_dsl()
+        ).check(src)
+        if passed:
             out["validate"] = "PASS"
         else:
             out["validate"] = "FAIL"
-            rtype = v.get("regression_type")
-            violations = (v.get("checks", {})
-                          .get("no_forbidden_torch_ops", {})
-                          .get("violations", []))
-            if violations:
-                head = "; ".join(
-                    f"L{x['line']} {x['call']}" for x in violations[:3])
-                if len(violations) > 3:
-                    head += f" (+{len(violations) - 3} more)"
-                out["msg"] = f"Type {rtype}: {head}"
+            if errors:
+                first = errors[0]
+                out["msg"] = (
+                    f"L{first.get('line', 0)} "
+                    f"{first.get('error_type', '?')}: "
+                    f"{first.get('detail', '')}"
+                )[:160]
             else:
-                out["msg"] = (v.get("suggestion") or "regression detected")[:160]
+                out["msg"] = (error_msg.splitlines()[0] if error_msg
+                              else "static check failed")[:160]
     return out
 
 
