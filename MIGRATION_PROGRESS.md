@@ -9,8 +9,7 @@ the current state.
 - Treat this file as the source of truth for migration state.
 - Keep commits small and run smoke tests on `npu` after each code commit.
 - Do not rely on conversation context to remember what has landed.
-- Avoid complicated file transfer/compression flows; prefer git-native or
-  direct small-file sync.
+- Sync changed files to `npu` with `scp` before remote smoke tests.
 
 ## Completed
 
@@ -29,7 +28,7 @@ the current state.
    - NPU commit: `2f25816 Add AscendC CATLASS adapter`
    - Smoke: `catlass adapter npu smoke ok` on `npu`.
 
-## In Progress
+## Runtime Flow Completed
 
 4. Multi-file DSL task/scaffold/package flow
    - Goal: allow `ascendc_catlass` tasks to pass `catlass_op/` as the
@@ -93,10 +92,12 @@ the current state.
     `npu` on 2026-06-07.
   - `catlass 4b npu smoke ok` passed on `npu` on 2026-06-07.
 
-## Pending
+## Static Checks and Final Runtime Verification
 
 5. Multi-DSL CodeChecker/static checks.
-   - Status: local implementation complete; NPU sync/smoke pending.
+   - Local commit: `eb537d5 Add DSL-aware static CodeChecker`
+   - NPU commit: `c5a0d37 Add DSL-aware static CodeChecker`
+   - Status: complete.
    - Scope:
      - `scripts/utils/code_checker.py`: local `CodeChecker` compatibility
        wrapper with Triton delegation and CATLASS `torch.ops.catlass.*`
@@ -112,11 +113,68 @@ the current state.
      - `git diff --check` passed for touched Step 5 files on 2026-06-07.
      - Local behavior smoke passed on 2026-06-07:
        `code checker local smoke ok`.
+   - NPU sync/smoke:
+     - Files synced via `scp`.
+     - `python -m compileall` passed for touched Step 5 files on `npu`
+       on 2026-06-07.
+     - `code checker npu smoke ok` passed on `npu` on 2026-06-07.
 6. End-to-end local + NPU verification and final migration notes.
+   - Status: complete.
+   - Local final checks:
+     - `python -m compileall` passed for the migrated runtime files on
+       2026-06-07.
+     - Legacy package/repo import/path scan over `scripts --glob "*.py"`
+       found no runtime imports; remaining hits were comments/docstrings.
+   - NPU final checks:
+     - `catlass final npu integration smoke ok` passed on `npu` on
+       2026-06-07. This smoke exercised CATLASS scaffold, CMake patching,
+       directory packaging, quick_check, batch manifest resolution, and
+       batch tier-1 validation.
+
+## Overall Status
+
+- CATLASS runtime migration is complete through scaffold, packaging/worker/batch
+  path handling, and DSL-aware static checks.
+- Standalone docs/skills cleanup and CATLASS skill sync are complete.
+- Per-code-commit NPU smoke tests passed for Steps 2, 3, 4a, 4b, and 5;
+  the Step 7 cleanup smoke also passed on `npu`.
+
+## Completed Cleanup
+
+7. Standalone docs/skills cleanup.
+   - Status: complete.
+   - Scope:
+     - Remove stale legacy package/repo references from user-facing docs,
+       templates, comments, and logs.
+     - Sync local CATLASS skills to `npu` with `scp`.
+     - Re-run cheap local checks and NPU smoke/static checks after sync.
+   - Local checks:
+     - `python -m compileall` passed for touched Step 7 Python files on
+       2026-06-07.
+     - `git diff --check` passed on 2026-06-07.
+     - Full repo legacy package/repo reference scan returned no matches on
+       2026-06-07.
+   - NPU sync/checks completed:
+     - Changed docs/code files were synced to `/home/yyz/cxy/claude-autoresearch`
+       via `scp`.
+     - `skills/ascendc-catlass/` was synced via `scp`; the four CATLASS
+       skill files are present on `npu`.
+     - `python -m compileall` passed on the touched Step 7 Python files on
+       `npu` on 2026-06-07.
+     - Legacy package/repo reference scans passed on tracked files and
+       `skills/ascendc-catlass/` on `npu` on 2026-06-07.
+     - `scripts/ar_cli.py` on `npu` was updated only for the stale
+       checkout comment after reverting an overly broad scp attempt.
+   - NPU smoke:
+     - `.step7_catlass_smoke.py` was created, fixed for the current
+       `CodeChecker.check` 3-tuple return and YAML dedent, synced to `npu`
+       via `scp`, and executed successfully on 2026-06-07:
+       `catlass step7 npu smoke ok`.
+     - Temporary smoke harness was removed after the run.
 
 ## Latest Known Repo State
 
-- Local `claude-autoresearch` head: `2f34319`
-- NPU `/home/yyz/cxy/claude-autoresearch` head: `4dac92a`
-- NPU tracked files were clean after Step 3; only runtime dirs were untracked:
+- This file is committed as part of the Step 7 cleanup changes; use
+  `git log -1 --oneline` locally and on `npu` for the final cleanup commit IDs.
+- NPU runtime dirs are expected to remain untracked:
   `.autoresearch/`, `.session_tasks/`, `.task_dir_pointers/`, `extra-info/`.

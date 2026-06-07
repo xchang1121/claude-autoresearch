@@ -370,7 +370,7 @@ def patch_driver_benchmarker():
     try:
         from triton.runtime import driver
 
-        if hasattr(driver.active.get_benchmarker, '_akg_agents_patched'):
+        if hasattr(driver.active.get_benchmarker, '_autoresearch_patched'):
             return True
 
         original_get_benchmarker = driver.active.get_benchmarker
@@ -401,7 +401,7 @@ def patch_driver_benchmarker():
             return custom_benchmarker
 
         driver.active.get_benchmarker = patched_get_benchmarker
-        driver.active.get_benchmarker._akg_agents_patched = True
+        driver.active.get_benchmarker._autoresearch_patched = True
         return True
 
     except ImportError:

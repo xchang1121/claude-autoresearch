@@ -2259,7 +2259,7 @@ if __name__ == "__main__":
 
             speedup_percent = speedup * 100.0
             logger.info(f"orig performance is {base_time_display:.2f} us")
-            logger.info(f"akg_agents performance is {gen_time_display:.2f} us")
+            logger.info(f"generated performance is {gen_time_display:.2f} us")
             if roofline_time is not None:
                 logger.info(f"solar roofline performance is {roofline_time:.2f} us")
                 logger.info(f"roofline speedup is {roofline_speedup:.4f}x")

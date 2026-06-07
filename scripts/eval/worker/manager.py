@@ -8,9 +8,8 @@ from .interface import WorkerInterface
 
 def get_akg_env_var(name: str, default=None):
     """Read an env var honoring both the new (AKG_AGENTS_*) and legacy
-    (AIKG_*) prefixes — same precedence as `akg_agents.core_v2.config.
-    settings.get_akg_env_var`. Inlined here to avoid pulling the
-    `core_v2.config` dependency tree into the eval package.
+    (AIKG_*) prefixes with the same precedence as earlier autoresearch
+    releases. Inlined here to keep the eval package standalone.
     """
     import os
     return os.environ.get(f"AKG_AGENTS_{name}",

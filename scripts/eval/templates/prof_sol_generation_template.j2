@@ -6,10 +6,7 @@ import sys
 
 import torch
 {% if backend == "ascend" %}
-try:
-    from eval.profiler import profiler_npu
-except ImportError:
-    from akg_agents.op.verifier.profiler import profiler_npu
+from eval.profiler import profiler_npu
 {% endif %}
 
 # DSL imports

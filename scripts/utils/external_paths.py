@@ -1,27 +1,23 @@
-"""Single source for paths that live OUTSIDE this scripts/ package.
+"""Single source for paths that live outside this scripts/ package.
 
-Layout assumption — for claude-autoresearch the framework code and the
-sibling content trees all sit under the repo root:
+For claude-autoresearch, the framework code and sibling content trees sit
+under the repo root:
 
     <repo_root>/
       scripts/         <- this package (engine/, worker/, hooks/, utils/, ...)
-      scripts/eval/    <- evaluation Python package (KernelVerifier +
-                          adapters/{backend,dsl,framework}; migrated from
-                          akg_agents/op/verifier — see scripts/eval/SPEC.md)
-      skills/          <- per-DSL documentation tree (markdown only; no
-                          executable verify/benchmark scripts live here)
+      scripts/eval/    <- evaluation package (KernelVerifier and adapters)
+      skills/          <- per-DSL documentation tree
 
-Earlier revisions of autoresearch routed verify + benchmark through an
-out-of-tree `skills/triton/kernel-verifier/scripts/` sibling. That CLI
-contract is gone; the new eval entrypoint is the in-tree `scripts/eval`
-package.
+Earlier revisions routed verify and benchmark through an out-of-tree
+skills sibling. That CLI contract is gone; the eval entrypoint is the
+in-tree `scripts/eval` package.
 
-This module is the one place that encodes the layout — a tree move is
-a one-line fix here instead of every consumer.
+This module is the one place that encodes the layout, so a tree move is a
+one-line fix here instead of every consumer.
 """
 import os
 
-# external_paths.py → utils/ → scripts/ → repo root.
+# external_paths.py -> utils/ -> scripts/ -> repo root.
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 

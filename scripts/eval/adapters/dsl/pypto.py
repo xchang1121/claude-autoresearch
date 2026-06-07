@@ -142,33 +142,12 @@ class DSLAdapterPypto(DSLAdapter):
         """
         code = f"""        import os
         import json
-        import sys
-        import subprocess
-        from pathlib import Path
-        
         # 定义性能测试函数
         def pypto_benchmark_fn():
             result = impl_model(*{inputs})
             return result
         
         def _calc_trace_span_us(trace_path):
-            # akg_agents ships a calc_trace_span.py CLI under
-            # akg_agents/op/tools/. claude-autoresearch doesn't carry it
-            # (the pypto DSL isn't exercised by autoresearch); the except
-            # below falls through to the inline trace parser, so this is
-            # a best-effort fast path only.
-            try:
-                from eval import get_project_root
-                proj_root = Path(get_project_root()).parent.parent
-                script = proj_root / "python" / "akg_agents" / "op" / "tools" / "calc_trace_span.py"
-                if script.exists():
-                    out = subprocess.check_output(
-                        [sys.executable, str(script), str(trace_path)],
-                        text=True
-                    )
-                    return float(out.strip())
-            except Exception:
-                pass
             with open(trace_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             events = [e for e in data.get("traceEvents", []) if e.get("ph") == "X"]

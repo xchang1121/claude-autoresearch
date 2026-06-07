@@ -6,14 +6,7 @@ import sys
 
 import torch
 {% if backend == "ascend" %}
-# profiler_npu resolves to whichever package this template renders into:
-# claude-autoresearch ships eval/ in-tree; akg_agents has the same module
-# under akg_agents.op.verifier. Try in-tree first so the template runs as
-# a subprocess without depending on the akg_agents site-package.
-try:
-    from eval.profiler import profiler_npu
-except ImportError:
-    from akg_agents.op.verifier.profiler import profiler_npu
+from eval.profiler import profiler_npu
 {% endif %}
 
 from sol_correctness import set_seed

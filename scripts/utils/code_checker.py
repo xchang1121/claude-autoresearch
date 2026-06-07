@@ -1,8 +1,7 @@
 """Lightweight DSL-aware static checker used by autoresearch.
 
-This keeps the local API compatible with AKG's
-``CodeChecker(backend, dsl).check(code)`` without importing the full
-akg_agents package. Triton delegates to the existing in-tree
+This keeps the local ``CodeChecker(backend, dsl).check(code)`` API shape
+while using only in-tree validators. Triton delegates to the existing
 validate_triton_impl checker; ascendc_catlass adds the core CATLASS
 anti-cheat: ModelNew.forward must call torch.ops.catlass.* and must not
 replace the kernel with hard torch compute operators.

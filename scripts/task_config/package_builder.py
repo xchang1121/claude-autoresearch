@@ -1,6 +1,6 @@
 """Build a tar.gz package for the remote worker.
 
-The worker has its own AscendOpGenAgent checkout, so eval_kernel.py /
+The worker has its own claude-autoresearch checkout, so eval_kernel.py /
 skill modules / utils ride along on the worker side — the package only
 needs the per-task artifacts:
 

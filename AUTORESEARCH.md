@@ -133,7 +133,7 @@ python scripts/dashboard.py <task_dir> --watch
 
 | 在哪 | 做什么 |
 |---|---|
-| 远端 NPU 机 | (1) 把 AscendOpGenAgent 仓库 clone 到 `<repo_path>`（B.2 会把这条路径写进 config）。(2) 写 `~/env.sh`：source 完毕后 `python -c "import torch_npu, triton"` 不抛异常，模板见 [§7](#7-envsh-契约)。(3) `npu-smi info` 能列出设备。**无需** Claude Code CLI（远端只跑 worker，不跑 claude）。 |
+| 远端 NPU 机 | (1) 把 claude-autoresearch 仓库 clone 到 `<repo_path>`（B.2 会把这条路径写进 config）。(2) 写 `~/env.sh`：source 完毕后 `python -c "import torch_npu, triton"` 不抛异常，模板见 [§7](#7-envsh-契约)。(3) `npu-smi info` 能列出设备。**无需** Claude Code CLI（远端只跑 worker，不跑 claude）。 |
 | 本机 | (1) 装 Python ≥ 3.10、PyYAML、Claude Code CLI。(2) **无需** torch_npu / CANN / NPU 硬件（eval 全部走远端）。(3) `~/.ssh/config` 配好 alias（下文以 `my-npu` 为例）+ 密钥免密登录远端。 |
 
 <details><summary><code>~/.ssh/config</code> 怎么配 + 跑前自检</summary>
@@ -194,7 +194,7 @@ ssh my-npu 'source /home/<远端账号>/env.sh \
 remote_worker:
   hosts:
     my-npu:
-      repo_path:  /home/<user>/AscendOpGenAgent/autoresearch
+      repo_path:  /home/<user>/claude-autoresearch
       env_script: /home/<user>/env.sh
 ```
 
@@ -529,7 +529,7 @@ python <repo>/scripts/engine/eval_kernel.py \
 
 ## 5. 精度容差
 
-verify（Tier 2 预检）与 `/autoresearch` 每轮 verify 共用 [`correctness.py`](scripts/utils/correctness.py)，对齐 akg_agents `op/verifier/adapters/framework/torch.py` 中的 CANN MARE/MERE-aligned 分层容差表（已迁移至 [`scripts/eval/adapters/framework/torch.py`](scripts/eval/adapters/framework/torch.py)）：
+verify（Tier 2 预检）与 `/autoresearch` 每轮 verify 共用 [`correctness.py`](scripts/utils/correctness.py)，对齐已迁移至 [`scripts/eval/adapters/framework/torch.py`](scripts/eval/adapters/framework/torch.py) 的 CANN MARE/MERE-aligned 分层容差表：
 
 - 按 ref dtype 取 `(rtol, atol, outlier_rtol, outlier_atol, outlier_ratio)`：fp32 → `(1.22e-4, 1e-5, 1.22e-3, 1e-4, 0.001)`、fp16 → `(9.77e-4, 1e-3, 9.77e-3, 1e-2, 0.005)`、bf16 → `(7.81e-3, 1e-2, 7.81e-2, 1e-1, 0.010)`，未知 dtype 回落 fp32
 - 元素级双带判定：`strict_tol = atol + rtol·|ref|`，`relaxed_tol = outlier_atol + outlier_rtol·|ref|`；`hard_fail`（超 relaxed）> 0 即 FAIL，或 `outlier`（在 strict 与 relaxed 之间）超 `outlier_ratio · total` 即 FAIL

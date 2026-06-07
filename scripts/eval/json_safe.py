@@ -21,7 +21,7 @@ semantics:
 
   - FastAPI HTTP responses (``json.dumps(allow_nan=False)`` by default)
   - On-disk JSON artifacts intended to be read by non-Python tooling
-  - ``history.jsonl`` / ``progress.json`` in workspace_autoresearch
+  - ``history.jsonl`` / ``progress.json`` in autoresearch workspaces
     (external dashboards may parse them strictly)
 
 Producer code (profilers, roofline arithmetic) is free to return
