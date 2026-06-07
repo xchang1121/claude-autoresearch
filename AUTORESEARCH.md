@@ -4,7 +4,7 @@ Claude Code 驱动的 Triton-Ascend 算子自动优化框架。
 
 **主循环**：scaffold → BASELINE → PLAN → EDIT → eval → KEEP/DISCARD → 直到 `max_rounds` → FINISH。
 
-第一次用：按下表选一条「操作」路径走完即可，技术细节都在「参考」里按主题归档。
+第一次用：按下表选一条「操作」路径走完即可，配置说明都在「参考」里按主题归档。
 
 | 目标 | 跳转 |
 |---|---|
@@ -19,10 +19,10 @@ Claude Code 驱动的 Triton-Ascend 算子自动优化框架。
 | 精度判定标准 | [参考 §5](#5-精度容差) |
 | 状态文件在哪 | [参考 §6](#6-文件与状态布局) |
 | env.sh 该写什么 | [参考 §7](#7-envsh-契约) |
-| 远程 worker 怎么联（ar_cli 细节） | [参考 §8](#8-远程-worker-内部) |
+| 远程 worker 怎么配置 | [参考 §8](#8-ar_cli-worker) |
 | Triton 调优 markdown 库 | [参考 §9](#9-skills-库) |
-| 修内部代码前先看 | [参考 §10](#10-hook-与内部机制) |
-| 并发跑 / 多 session / 共用卡的注意事项 | [参考 §11](#11-并发与冲突) |
+| 内部机制入口 | [参考 §10](#10-hook-与内部机制) |
+| 并发跑 / 多 session / 共用卡 | [参考 §11](#11-并发与冲突) |
 
 ---
 
@@ -47,45 +47,9 @@ source ~/env.sh && python -c "import torch_npu, triton" && npu-smi info
 
 在 `autoresearch/workspace/` 下放两个文件。命名硬约束见 [参考 §2](#2-命名契约)。
 
-`workspace/<op>_ref.py`：PyTorch 标准答案，暴露 `class Model(nn.Module)` + `get_inputs()`（或 `get_input_groups()` 多 shape）+ `get_init_inputs()`。
+`workspace/<op>_ref.py`：PyTorch 标准答案，暴露 `class Model(nn.Module)`、`get_inputs()`（或 `get_input_groups()`）和 `get_init_inputs()`。
 
-`workspace/<op>_kernel.py`：种子 kernel，暴露 `class ModelNew(nn.Module)`，必须含 `@triton.jit` 并实际 launch（否则 [`engine/quick_check.py`](scripts/engine/quick_check.py) 拒绝）。
-
-最小可跑示例（relu，仅供首次跑通参考）：
-
-<details><summary>relu_ref.py / relu_kernel.py 示例</summary>
-
-```python
-# workspace/relu_ref.py
-import torch, torch.nn as nn, torch.nn.functional as F
-class Model(nn.Module):
-    def forward(self, x): return F.relu(x)
-def get_inputs():      return [torch.randn(1024, 1024, dtype=torch.float16)]
-def get_init_inputs(): return []
-```
-
-```python
-# workspace/relu_kernel.py
-import torch, torch.nn as nn, triton, triton.language as tl
-
-@triton.jit
-def _relu_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n
-    x = tl.load(x_ptr + offs, mask=mask)
-    tl.store(out_ptr + offs, tl.maximum(x, 0.0), mask=mask)
-
-class ModelNew(nn.Module):
-    def forward(self, x):
-        if not x.is_npu: x = x.npu()
-        x = x.contiguous()
-        out = torch.empty_like(x)
-        n, BLOCK = x.numel(), 1024
-        _relu_kernel[(triton.cdiv(n, BLOCK),)](x, out, n, BLOCK=BLOCK)
-        return out
-```
-</details>
+`workspace/<op>_kernel.py`：种子 kernel，暴露 `class ModelNew(nn.Module)`，forward 内实际调用目标 DSL kernel。命名与接口细节见 [参考 §2](#2-命名契约)。
 
 ### A.3 启动
 
@@ -138,29 +102,22 @@ python scripts/dashboard.py <task_dir> --watch
 
 <details><summary><code>~/.ssh/config</code> 怎么配 + 跑前自检</summary>
 
-**第一步：本机 `~/.ssh/config` 给远端机起个别名**。别名让后续命令更短，下面用 `my-npu`。
+**第一步：本机 `~/.ssh/config` 配远端别名**。下面用 `my-npu`。
 
 ```text
 # 文件路径：本机 ~/.ssh/config（没有就新建，注意是 config 不是 config.txt）
 Host my-npu                            # 本地 SSH 别名，可按团队习惯命名
     HostName 192.168.x.x               # 远端机真实 IP 或域名
     User <remote-user>                 # 登录远端用的账号，比如 root
-    # 私钥若在本机 ~/.ssh/ 下的默认位置（id_rsa / id_ed25519 / id_ecdsa 任一），下一行可省略；
-    # 私钥放在本机别处才需要补这行，路径换成本机实际位置：
+    # 私钥放在本机非默认位置时填写：
     # IdentityFile <本机私钥绝对路径>
-    # 如果中间要过跳板机/堡垒机：
+    # 如需跳板机：
     # ProxyJump bastion
 ```
 
-> 如果本机之前从没生成过 ssh 密钥，可以走最简流程（本机和远端都各有独立的 `~/.ssh/`，下面每一步都标了在哪台机器执行、读/写哪一边的文件）：
->
-> 1. **本机** 命令行跑 `ssh-keygen`（一路回车用默认即可），在 **本机** `~/.ssh/` 下生成两个文件——`id_rsa` 是**私钥**（留本机，永远不要拷给远端、不要发出去），`id_rsa.pub` 是**公钥**（接下来要送到远端的那一份）。
-> 2. **本机** 跑 `ssh-copy-id my-npu`。这条命令做的事情：用密码方式登一次远端，把 **本机** `~/.ssh/id_rsa.pub` 的内容追加到 **远端** `~/.ssh/authorized_keys` 末尾——远端的 ssh 服务一旦在 `authorized_keys` 里看到本机公钥，之后本机用对应私钥连上来时就不再要密码。前提是远端的 ssh 密码登录暂时是开的（系统默认通常开着），运行时会让一次性输入远端账号的密码。
-> 3. 配完之后 **本机** 跑 `ssh my-npu` 不再问密码，就算成功。
+`Host` 别名通常与 B.2 的 `remote_worker.hosts.<alias>` 保持一致；需要不同名称时，在 B.2 填 `ssh_alias`。
 
-> **注意**：上面 `Host` 后面的别名必须和 B.2 里 `remote_worker.hosts:` 下面写的 key 完全一样（autoresearch 默认按 key 当 ssh 目标用）。若 `~/.ssh/config` 里 `Host` 名跟 B.2 的 key 不一样，B.2 里加一行 `ssh_alias: <ssh 实际用的 Host 名>` 覆盖即可。
-
-**第二步：跑前自检**。在本机命令行敲下面这一行，确认三件事一次性都过：免密 ssh 通、远端 env 完好、NPU 看得见。三个都过了才上 B.2 / B.3。
+**第二步：跑前自检**。在本机执行：
 
 ```bash
 # 命令在本机敲。ssh 后面单引号里那一串都是在远端执行的，所以路径里的 <远端账号> 指远端机
@@ -170,19 +127,7 @@ ssh my-npu 'source /home/<远端账号>/env.sh \
     && npu-smi info | head -3'
 ```
 
-**预期看到**（按顺序）：
-1. 没有 `Permission denied` / `Connection refused` —— ssh 通了
-2. `python -c ...` 一行不报错（特别是没有 `ModuleNotFoundError`）—— 远端 conda 环境和 CANN 都装好了
-3. 打印一段类似 `npu-smi 25.x.rcN  Version: ...` 的表头 —— NPU 驱动和卡都在
-
-**任一步出错就在这里修掉，别先去跑 ar_cli**（ar_cli 启动失败时同样的错误会被埋进 `/tmp/ar_worker_9111.log` 里，定位起来麻烦得多）。常见错和对应处理：
-
-| 报错关键字 | 大概率原因 | 怎么修 |
-|---|---|---|
-| `Permission denied (publickey)` | 公钥没进远端 `~/.ssh/authorized_keys`，或本机私钥路径填错 | `ssh-copy-id my-npu` 把公钥推过去；或检查 `IdentityFile` 路径 |
-| `Connection timed out` / `No route to host` | 远端 IP 写错，或者本机当前网络连不到 | 改 `HostName`；或确认本机已接入能访问远端的网络（VPN / 内网） |
-| `ModuleNotFoundError: torch_npu` | 远端 env.sh 路径错，或远端 conda 环境没装好 | ssh 进远端手动 `source <远端 env.sh 绝对路径> && python -c "import torch_npu"`，调通了再回来跑本机这条自检命令 |
-| `npu-smi: command not found` | 远端 CANN 没装，或没在远端 `PATH` 里 | 远端 env.sh 里补 CANN 的 `source set_env.sh`，或在远端装 CANN |
+这条命令同时验证 SSH、`env_script`、`torch_npu/triton` import 和 NPU 可见性。失败时优先修对应的 SSH alias、env.sh 或 CANN/Python 环境。
 
 </details>
 
@@ -202,7 +147,7 @@ remote_worker:
 
 `repo_path` 指远端 claude-autoresearch checkout。远端命令会在 `source env_script && cd repo_path` 之后运行 `python scripts/ar_cli.py worker ...`；解释器由 `env_script` 配好的 PATH 决定。
 
-字段语义见 [参考 §8](#8-远程-worker-内部)。
+字段语义见 [参考 §8](#8-ar_cli-worker)。
 
 ### B.3 [本机] 检查并启动远端 worker（ar_cli 自动开 SSH tunnel）
 
@@ -270,7 +215,7 @@ python scripts/ar_cli.py worker --remote-host my-npu --stop
 
 ### C.1 标准流程
 
-约束：cwd 必须在 `autoresearch/` 内；长跑用 tmux/screen 包；`--devices` 必填，整批串行复用一张卡（除非用 `--worker-url`）。
+约束：cwd 在 `autoresearch/` 内；长跑用 tmux/screen 包；`--devices` 指定本机或远端卡。
 
 ```bash
 BATCH_DIR=/tmp/batch_001
@@ -287,9 +232,7 @@ cp workspace/*_kernel.py $BATCH_DIR/kernels/
 # 2. Tier-1 预检：纯静态（语法 / import / 必备 export），任意机器可跑，仅做 Python 静态检查
 python scripts/batch/prepare.py $BATCH_DIR
 
-# 3.（可选）Tier-2 预检：在本进程里真跑 ref vs kernel 比对输出
-#    要求当前机器有 NPU + torch_npu（直接 import 进程内执行，worker 路径旁路），
-#    所以双机配置下不能在本机跑，要 SSH 到 NPU 机执行；用本机直跑的方案省略本步。
+# 3.（可选）Tier-2 预检：在有 NPU 的机器上跑 ref vs kernel
 python scripts/batch/verify.py $BATCH_DIR --full
 
 # 4. 后台跑（tmux 默认非 login shell，须 bash --login + source env.sh）
@@ -322,7 +265,7 @@ tmux new -d -s ar_batch \
 
 `--devices` 在有 `--worker-url` 时仍要给，但取值是**远端**卡下标（透传到每个 op 的 task.yaml）。
 
-其它步骤（prepare / monitor / summarize）和 [C.1](#c1-标准流程) 一样在本机直接跑；**唯一例外是 Tier-2 verify**（step 3，`verify.py --full`）：它在进程内直接 `import torch_npu` 跑 ref/kernel，**不走 worker**，所以本机没有 NPU 跑不了。需要做完整预检的话，得 SSH 到 NPU 机执行 `python scripts/batch/verify.py <batch_dir> --full`，或者跳过 Tier-2 直接让 `/autoresearch` 在每轮 eval 时自带 verify。
+其它步骤（prepare / monitor / summarize）和 [C.1](#c1-标准流程) 一样在本机直接跑。Tier-2 verify 需要 NPU 环境，完整预检可在远端执行 `python scripts/batch/verify.py <batch_dir> --full`；常规批跑也会在每轮 eval 中完成 verify。
 
 ### C.3 监控工具一览
 
@@ -335,13 +278,13 @@ tmux new -d -s ar_batch \
 
 ### C.4 断点续跑 / 重试
 
-- `done` 不再跑
+- `done` 保持完成状态
 - `error` 默认跳过；`--retry-errored` 重新纳入
 - `pending` 自动续
-- `running`（终止瞬间在跑的 op）下次启动时自动降级为 `error`，note 记 `stale running, demoted on batch restart`
-- **transient 自动续**（同 batch 内）：单个 op 跑到一半 `claude --print` 进程异常退（rc≠0，常见 ECONNRESET / Stream idle timeout / 其他 transient API 错），但 framework state 仍 intact（`progress_initialized=True`，phase 不是 FINISH）时，supervisor 会自动 `/autoresearch --resume <task_dir> --force` 接续，最多 `batch.transient_retries` 次（默认 3，配 [`config.yaml`](config.yaml)）。接续成功的 op `batch_progress.json::cases.<op>.note` 会记 `transient_retries=N`，区分一遍过 vs 靠 wrapper 救活。`rc=0 + phase != FINISH`（LLM 自然 stop）或 `rc != 0 + no progress`（baseline 没 commit）属于真失败，不 retry，直接记 `error` 跳下一个 op。
+- `running`（终止瞬间在跑的 op）下次启动时自动降级为 `error`
+- transient API/network 失败且 task 状态完整时，batch supervisor 会按 `config.yaml: batch.transient_retries` 接续
 
-> 同一 batch_dir **禁止并发** 多个 `run.py`（`.batch.lock` 排它）。已退出进程残留的 lock 会在下次启动时自动判活清理。
+同一 batch_dir 由 `.batch.lock` 串行化；已退出进程残留的 lock 会在下次启动时自动判活清理。
 
 完整 batch CLI 参数见 [参考 §1](#1-cli-参数)。
 
@@ -365,7 +308,7 @@ A/B/C 均适用：
 
 # 参考
 
-操作部分已经涵盖正常使用。下面是按主题归档的细节，平时可跳过，碰到问题时按目录跳转。
+操作部分已经涵盖正常使用。下面按主题归档配置和机制说明。
 
 ## 1. CLI 参数
 
@@ -445,17 +388,14 @@ A/B/C 均适用：
 
 ## 2. 命名契约
 
-违反将导致流程无法启动。
-
 | 项 | 约束 |
 |---|---|
 | ref 文件名 | 单跑任意；批跑严格 `<op>_ref.py` |
 | kernel 文件名 | 单跑任意；批跑严格 `<op>_kernel.py` |
 | ref 暴露 | `class Model(nn.Module)` + `get_init_inputs()`，并二选一：`get_inputs()` 单 shape / `get_input_groups()` 多 shape |
-| kernel 暴露 | `class ModelNew(nn.Module)`，含 `@triton.jit` 且实际 launch；forward 不得用 `torch.*` / `F.*` / tensor 方法 / `@` 算子 / Python 循环完成计算（规则见 [`scripts/eval/validate_triton_impl.py`](scripts/eval/validate_triton_impl.py)） |
-| 同目录数据文件 | ref 通常要从同目录读取 shape 列表 / 缓存（`.json`/`.pt`/`.npz`），scaffold 按这条规则决定哪些一起打包进 task_dir：去掉 ref 文件名的 `.py` 后缀得到一个名字，**同名**的、或者以**它加下划线开头**的同目录 `.json`/`.pt`/`.npz` 会被拷进去；其余文件不会被 scaffold 识别。<br/>例：ref `31_IOU.py` 可配 `31_IOU.json`（同名）或 `31_IOU_cases.json`（加下划线前缀）；但 ref 改叫 `iou_ref.py` 后，原来那个 `31_IOU.json` 就不再匹配，需要把 ref 改回 `31_IOU.py`，或把数据文件改成 `iou_ref.json`（scaffold 不会自动去掉 `_ref` 后缀识别别名）。<br/>没匹配上的数据文件不会进 task_dir，eval 时报 `FileNotFoundError`。NPUKernelBench 原生 `<index>_<CamelCase>.py` + `<index>_<CamelCase>.json` 直接可用。 |
-| task.yaml 字段 | fixed schema（[loader.py](scripts/task_config/loader.py)）；拼写错误会被默认值覆盖 |
-| task_dir 命名 | scaffold 生成的格式：`ar_tasks/<op_name>_<unix_ts>_<uuid6>/`。三段分别承担：op_name 让人读得懂、unix_ts（`int(time.time())`）保证时间排序、uuid6（`uuid.uuid4().hex[:6]`）防同秒撞名。batch/manifest、resume、dashboard 都按这三段反解，手动 rename 会让它们找不到任务。 |
+| kernel 暴露 | `class ModelNew(nn.Module)`；forward 内调用目标 DSL kernel |
+| 同目录数据文件 | 与 ref 同名或以 ref basename + `_` 开头的 `.json` / `.pt` / `.npz` 会随任务打包。例如 `31_IOU.py` 可配 `31_IOU.json` 或 `31_IOU_cases.json` |
+| task_dir 命名 | scaffold 生成 `ar_tasks/<op_name>_<unix_ts>_<uuid6>/`，供 resume、dashboard、batch 关联 |
 
 ## 3. 主循环 / 状态机
 
@@ -607,7 +547,7 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 ```
 
-**禁项**：env.sh 中不得使用 `cd`（外部 ar_cli 已 `cd repo_path`）、`exec`、`set -e`。
+**写法约定**：env.sh 负责环境变量和 Python 环境初始化；工作目录由 ar_cli 切换到 `repo_path`。
 
 验证：`source ~/env.sh && python -c "import torch_npu, triton"` 退出码 0。
 
@@ -681,67 +621,24 @@ PLAN 阶段 hook 提示 Claude Glob `../skills/<dsl>/**/SKILL.md`、Read 1-3 个
 | DIAGNOSE 契约 | [CLAUDE.md](CLAUDE.md) 不变量 #9（canonical-form bash）+ #10（DIAGNOSE artifact）|
 | 子代理 | [.claude/agents/ar-diagnosis.md](.claude/agents/ar-diagnosis.md) |
 
-### Hook 接线概要
-
-控制态单文件：`<task_dir>/.ar_state/state.json`（phase / owner / progress / pending_settle / 一致性 expected_*）。任务的归属判定靠 `state.owner.session_id` 与环境变量 `CLAUDE_CODE_SESSION_ID` 相等；当前会话所驱动的任务由 `phase_machine.find_active_task_dir()` 通过扫描 `ar_tasks/` 解析得到。
-
-```
-hook_guard_bash (bash 之前)
-  从 state.json 读 phase，按 phase 表允许/拒绝 AR 脚本
-  仅认裸 scripts/...（或 ./scripts/）为 AR 调用；cwd = autoresearch/
-  带前缀的 autoresearch/scripts/... 既被判非规范、磁盘上也不存在
-  blessed CLIs：pipeline / baseline / create_plan / parse_args / scaffold / resume / dashboard
-  其余 python scripts/*.py 走 _LIBRARY_NOT_CLI（pointed hint）或 generic "Unknown script" 拒绝
-
-hook_post_bash (任意 bash 之后)
-  检测 AR_TASK_DIR=    → set_task_dir 写 state.owner，首次激活 PhaseController.on_activation_ready → BASELINE
-  检测 baseline.py     → workflow.run_baseline_init 已在子进程推进 phase
-  检测 pipeline.py     → pipeline 自身已写 phase；hook 仅 echo
-  检测 create_plan.py  → on_plan_validated → EDIT
-
-hook_post_edit (Write/Edit kernel.py 之后)
-  EDIT phase 下编辑 kernel.py → 提示运行 pipeline.py
-
-hook_post_task (任意 Task 工具之后)
-  bump state.last_touched（防长跑 DIAGNOSE 子代理超 heartbeat 窗口）
-  DIAGNOSE artifact 校验
-
-hook_stop_save (Claude 试图 Stop 时)
-  FINISH → 允许
-  BASELINE 且无 progress（baseline 提交闸把它挡下来的"baseline 待补"状态）→ 允许
-  其余 phase → 拒绝，要求继续主循环
-```
+Hook 通过 [.claude/settings.json](.claude/settings.json) 接入，运行时围绕 `state.json` 维护 phase、owner 和 progress。日常使用主要通过 `/autoresearch`、`scripts/batch/*` 和 `scripts/ar_cli.py worker` 入口操作；内部改动按上表定位。
 
 ## 11. 并发与冲突
 
-下面列出几种典型并发场景：哪些框架已经挡住、哪些需要主动规避、发生冲突时如何排查。
+运行约定：
 
-### 11.1 框架已挡住的
+| 资源 | 推荐做法 |
+|---|---|
+| batch 目录 | 一个 `<batch_dir>` 同时跑一个 `run.py`，状态由 `.batch.lock` 串行化 |
+| task 目录 | 一个 `<task_dir>` 同时由一个 Claude session 驱动，owner/heartbeat 写在 `state.json` |
+| NPU 卡 | 一张卡交给一个本地 eval 或一个 worker；批量任务按卡分流，或统一走同一个 worker 队列 |
+| worker / config | 修改 `scripts/` 或 `config.yaml` 后重启 worker，使 daemon 读取新代码和配置 |
 
-| 场景 | 保护机制 | 行为 |
-|---|---|---|
-| 同一 `<batch_dir>` 两个 `run.py` 同时启动 | `<batch_dir>/.batch.lock`，`O_CREAT\|O_EXCL` 原子创建 | 后启动的立即报错退出。已退出进程残留的 stale lock 在下次启动时被判活清理 |
-| 同一 `<task_dir>` 两个 claude session 同时 attach | `state.owner.session_id` + heartbeat 新鲜度窗口（`config.yaml: resume.heartbeat_fresh_seconds`，默认 180s） | 后到的 session 在 `set_task_dir` 处被 refuse，stderr 提示对方的 session_id |
-| 用 `/autoresearch --resume` 续一个还在跑的 task | 同上 | 同上拒绝 |
-| 写 `state.json` 中途崩溃 | tmp 文件 + `os.replace` 原子替换 | state.json 永远是上一稳定版或新版，不会读到撕裂内容 |
-| 启动第二个 worker 占同一端口 | 内核 bind 失败 | uvicorn 直接报 `address already in use` 退出，daemon 起不来 |
+常用恢复入口：
 
-### 11.2 框架覆盖之外的并发风险
-
-| 场景 | 后果 | 怎么避 |
-|---|---|---|
-| 同一张 NPU 卡同时跑两份 eval（local-eval × 2 / local-eval + worker / 同卡两个 worker） | **没有跨进程的卡级互斥**。会撞 device，症状可能是 NPU OOM、kernel crash、profile 时延异常、甚至触发 ECC | 一卡一用：要么这张卡只给一个 worker（其他人走 `--worker-url 127.0.0.1:9111` 排队），要么这张卡只给一个 `/autoresearch` |
-| 两个 batch（不同 batch_dir）但共用同一张 `--devices` | 同上，`.batch.lock` 只防同 batch_dir 并发，跨 batch 不互斥 | 不同 batch 拨不同卡，或都走同一个 worker（worker 内部对自身管理的卡做了 queue 串行化） |
-| 一台机器既跑本地 `/autoresearch --devices N`，又给 N 上跑了 worker | 同上 | 二选一：要么 worker 占着这张卡、本机其他人都走 `--worker-url`；要么不开 worker、本机直接 local-eval |
-| 手动改 `state.json` / 删 `history.jsonl` 中间几行 | 一致性 gate 在下次 hook 触发时会报 `state inconsistent`，task 卡住 | 不要手编辑这两个文件。要重来直接删整个 task_dir |
-| Worker 启动期间改了 `autoresearch/scripts/` 或 `config.yaml` | worker 源码漂移闸（`_check_source_drift`）下次 `/run` 调用时 HTTP 503，提示文件名 + restart 必要 | 改完代码或 config 重启 worker：`ar_cli worker --remote-host my-npu --stop` 再 `--start` |
-
-### 11.3 常见症状对应到这里
-
-| 症状 | 可能原因 | 处理 |
-|---|---|---|
-| `[batch] error: another run.py is active (.batch.lock held by pid N)` | 11.1 第 1 行 | 如果对方真在跑，等；不然手动 `rm .batch.lock` |
-| `[state_store] WARNING: refusing to claim <td> — owned by session_id=...` | 11.1 第 2 行（或对方 session 未正常退出，heartbeat 还在新鲜窗口内） | 等 `resume.heartbeat_fresh_seconds` 过期；或确认对方 session 已退出后手动清 `state.owner` |
-| eval 输出指标抖动、对照 baseline 时延变 2-3 倍 | 11.2 同卡多用户 | 检查同卡有没有别的 `claude --print` / worker 进程在跑 |
-| `Worker tunnel 127.0.0.1:9111 unreachable` | tunnel 进程退出 / 远端 daemon 退出 / 端口被其他进程占用 | `ar_cli worker --remote-host ... --status` 确认；失败时执行 `--stop` 后再 `--start` |
-| `/run` 返回 HTTP 503，提示某些 `.py` 改了 | 11.2 worker 源码漂移闸 | 重启 worker |
+| 场景 | 操作 |
+|---|---|
+| batch 被旧 lock 卡住 | 确认对应进程已退出后清理 `.batch.lock` |
+| task 被旧 owner 卡住 | 等 `resume.heartbeat_fresh_seconds` 过期，或确认旧 session 已退出后清理 `state.owner` |
+| tunnel 不通 | 先 `ar_cli worker --remote-host ... --status`，再按需 `--stop` / `--start` |
+| worker 返回源码漂移提示 | 重启 worker |

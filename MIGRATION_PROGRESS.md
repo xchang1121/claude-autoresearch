@@ -268,6 +268,34 @@ the current state.
      - NPU grep scans found no removed remote-python override references or
        migration-facing colloquial terms targeted by this cleanup.
 
+11. Usage-flow documentation cleanup.
+   - Status: complete.
+   - Scope:
+     - Keep the existing AUTORESEARCH.md chapter layout, while making the
+       standalone and sibling workspace docs focus on setup and usage flow.
+     - Trim long sample code, SSH tutorial details, batch retry internals,
+       DSL anti-cheat detail, hook execution traces, and verbose conflict
+       troubleshooting.
+     - Rewrite remaining guidance toward positive usage contracts and short
+       recovery entry points.
+   - Local checks:
+     - Standalone `git diff --check -- AUTORESEARCH.md
+       MIGRATION_PROGRESS.md` passed.
+     - Sibling workspace `git diff --check --
+       workspace_autoresearch/AUTORESEARCH.md` passed.
+     - Local scans found no stale worker anchor or targeted
+       negative/implementation-detail wording patterns in the simplified
+       sections.
+   - NPU sync/checks:
+     - Synced standalone `AUTORESEARCH.md` and `MIGRATION_PROGRESS.md`
+       via `scp`.
+     - Synced sibling workspace `AUTORESEARCH.md` via `scp`.
+     - NPU `git diff --check` passed for all synced files after CRLF
+       normalization.
+     - NPU grep scans found no stale worker anchor or targeted
+       negative/implementation-detail wording patterns in the simplified
+       sections.
+
 ## Latest Known Repo State
 
 - This file is committed as part of the Step 7 cleanup changes; use
