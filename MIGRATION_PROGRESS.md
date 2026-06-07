@@ -172,79 +172,40 @@ the current state.
        `catlass step7 npu smoke ok`.
      - Temporary smoke harness was removed after the run.
 
-8. ar_cli UX and diagnostics follow-up.
+8. ar_cli worker/status simplification.
    - Status: complete.
    - Scope:
-     - Compare `ar_cli` against `akg_cli` worker UX/diagnostics behavior.
-     - Add human-facing logo/list/doctor output while keeping
-       `worker --status` machine-readable.
-     - Add remote preflight checks before spawning a remote worker:
-       ssh/env_script, torch_npu, triton policy, npu-smi, arch/device
-       visibility, disk space, and remote port ownership.
-     - Sync via `scp` and smoke on `npu`.
+     - Keep the public CLI surface focused on `worker`.
+     - Fold local/remote diagnostics into the `worker --status` failure
+       path instead of exposing a separate diagnostic command.
+     - Keep `repo_path` as the single remote checkout pointer; remote
+       invocation is `python scripts/ar_cli.py worker ...`.
+     - Configure `npu.repo_path` for the remote claude-autoresearch
+       checkout.
+     - Update `AUTORESEARCH.md` to describe the simpler worker flow.
    - Local checks:
      - `python -m py_compile scripts/ar_cli.py` passed on 2026-06-07.
-     - `python scripts/ar_cli.py list` passed and prints the new logo.
-     - `python scripts/ar_cli.py doctor --help` passed.
-     - `python scripts/ar_cli.py doctor --remote-host npu --backend ascend --dsl ascendc_catlass --port 65534`
-       passed; all remote diagnostics were OK.
+     - `python scripts/ar_cli.py --help` shows only the `worker` subcommand.
+     - `python scripts/ar_cli.py worker --help` documents status diagnostics.
+     - Local `worker --status --backend cpu --dsl ascendc_catlass` on an
+       unused port returned unreachable diagnostics as expected.
+     - Remote `worker --remote-host npu --status --backend ascend
+       --dsl ascendc_catlass` on an unused port returned remote diagnostics
+       as expected.
    - NPU sync/checks:
-     - `scripts/ar_cli.py` and `MIGRATION_PROGRESS.md` synced via `scp`.
-     - `python -m py_compile scripts/ar_cli.py` passed on `npu`.
-     - `python scripts/ar_cli.py list` passed on `npu`.
-     - `python scripts/ar_cli.py doctor --backend ascend --dsl ascendc_catlass --port 65534`
-       passed on `npu`.
-   - Notes:
-     - A full remote `worker --start` smoke on port 65534 exceeded the
-       command timeout; follow-up checks found no remote worker/listener
-       or worker log, and the local 65534 ssh tunnel was cleaned up.
-
-9. npu remote akg host configuration.
-   - Status: complete.
-   - Scope:
-     - Configure local `ar_cli` host `npu` to target the remote akg project
-       at `/home/yyz/cxy/akg/akg_agents` with `/home/yyz/env.sh`.
-     - Add `remote_cli: akg_cli` support so `ar_cli` can dispatch to the
-       upstream akg project layout instead of requiring `scripts/ar_cli.py`.
-   - Local checks:
-     - `python -m py_compile scripts/ar_cli.py` passed on 2026-06-07.
-     - `python scripts/ar_cli.py doctor --remote-host npu --backend ascend --dsl ascendc_catlass --port 65534`
-       passed; all remote diagnostics were OK.
-     - `_build_remote_ar_cli_cmd(...)` constructed
-       `akg_cli worker --stop --port 65534` with `AKG_CLI_QUIET=1`.
-   - NPU sync/checks:
-     - Synced `config.yaml`, `MIGRATION_PROGRESS.md`, and `scripts/ar_cli.py`
-       to `/home/yyz/cxy/claude-autoresearch`.
-     - `git diff --check -- scripts/ar_cli.py config.yaml MIGRATION_PROGRESS.md`
-       and `python -m py_compile scripts/ar_cli.py` passed on NPU.
-     - Remote config contains `npu` -> `/home/yyz/cxy/akg/akg_agents`
-       with `/home/yyz/env.sh` and `remote_cli: akg_cli`.
-   - Adjustment:
-     - Removed the extra `akg_npu` host alias and made `npu` itself point
-       at the akg project, as requested.
-
-10. AUTORESEARCH.md remote CLI usage docs.
-   - Status: complete.
-   - Scope:
-     - Update `AUTORESEARCH.md` B-section remote worker setup to document
-       `list`, `doctor`, `worker --remote-host`, `--dsl`, and `remote_cli`.
-     - Add a generic custom remote CLI entry example using placeholders.
-     - Refresh the ar_cli reference sections so `list` / `doctor` / `worker`
-       match the current CLI surface.
-   - Local checks:
-     - `git diff --check -- AUTORESEARCH.md` passed on 2026-06-07.
-     - Generic-example and discouraged-wording scan passed for
-       `AUTORESEARCH.md`.
-
-11. AUTORESEARCH.md standalone wording cleanup.
-   - Status: complete.
-   - Scope:
-     - Keep `AUTORESEARCH.md` framed as standalone claude-autoresearch
-       documentation.
-     - Replace project-specific remote CLI examples with generic
-       `custom_worker_cli` placeholders.
-   - Local checks:
-     - `AUTORESEARCH.md` project-specific-name scan passed on 2026-06-07.
+     - Synced `scripts/ar_cli.py`, `config.yaml`, `AUTORESEARCH.md`, and
+       `MIGRATION_PROGRESS.md` via `scp`.
+     - Removed an accidental untracked root-level `ar_cli.py` copy after
+       verifying it was not tracked.
+     - `git diff --check -- scripts/ar_cli.py config.yaml AUTORESEARCH.md
+       MIGRATION_PROGRESS.md` passed on NPU.
+     - `python -m py_compile scripts/ar_cli.py` passed on NPU.
+     - `python scripts/ar_cli.py --help` and `python scripts/ar_cli.py
+       worker --help` passed on NPU and expose only `worker`.
+     - NPU local `worker --status --backend cpu --dsl ascendc_catlass`
+       on an unused port returned unreachable diagnostics as expected.
+     - NPU `config.yaml` contains only `repo_path` and `env_script` for
+       the `npu` remote worker host.
 
 ## Latest Known Repo State
 

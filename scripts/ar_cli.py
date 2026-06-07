@@ -11,7 +11,7 @@ hit the remote daemon. Remote host config lives in
 Examples:
 
     # local daemon control (arch auto-derived from --devices via npu-smi)
-    ar_cli worker --start --backend ascend --devices 6 --port 9111 --bg
+    ar_cli worker --start --backend ascend --devices 6 --port 9111
     ar_cli worker --status --port 9111
     ar_cli worker --stop --port 9111
 
@@ -57,38 +57,6 @@ AR_ROOT = SCRIPT_DIR.parent
 
 STATE_DIR = Path(os.environ.get(
     "AR_STATE_DIR", str(Path.home() / ".autoresearch_state")))
-
-_LOGO_PRINTED = False
-_LOGO = r"""
-    _         _        ____                               _
-   / \  _   _| |_ ___ |  _ \ ___  ___  ___  __ _ _ __ ___| |__
-  / _ \| | | | __/ _ \| |_) / _ \/ __|/ _ \/ _` | '__/ __| '_ \
- / ___ \ |_| | || (_) |  _ <  __/\__ \  __/ (_| | | | (__| | | |
-/_/   \_\__,_|\__\___/|_| \_\___||___/\___|\__,_|_|  \___|_| |_|
-"""
-
-
-def _color(text: str, code: str) -> str:
-    if (not sys.stdout.isatty()
-            or os.environ.get("NO_COLOR")
-            or os.environ.get("AR_CLI_PLAIN") == "1"):
-        return text
-    return f"\033[{code}m{text}\033[0m"
-
-
-def _print_logo_once() -> None:
-    """Print the human-facing CLI banner once per process.
-
-    Keep machine-readable commands quiet: callers can also set
-    AR_CLI_QUIET=1 for recursive remote invocations.
-    """
-    global _LOGO_PRINTED
-    if _LOGO_PRINTED or os.environ.get("AR_CLI_QUIET") == "1":
-        return
-    _LOGO_PRINTED = True
-    print(_color(_LOGO.rstrip("\n"), "36"))
-    print(_color("AutoResearch CLI", "1;37"))
-
 
 @dataclass(frozen=True)
 class Finding:
@@ -374,7 +342,13 @@ def cmd_worker_status(args) -> int:
     host = "127.0.0.1"
     st = _curl_status(host, args.port)
     if st is None:
-        print(f"Worker on {host}:{args.port} unreachable.")
+        print(f"Worker on {host}:{args.port} unreachable.", file=sys.stderr)
+        _run_local_diagnostics(
+            args.port,
+            backend=getattr(args, "backend", None),
+            dsl=getattr(args, "dsl", None),
+            stream=sys.stderr,
+        )
         return 1
     health = _curl_health(host, args.port)
     out = dict(st)
@@ -619,7 +593,8 @@ def _run_remote_diagnostics(alias: str, host_cfg: dict, port: int, *,
 
 def _run_local_diagnostics(port: int, *,
                            backend: Optional[str],
-                           dsl: Optional[str]) -> bool:
+                           dsl: Optional[str],
+                           stream=None) -> bool:
     backend_n = (backend or _config_default("backend", "") or "").lower()
     dsl_n = (dsl or _config_default("dsl", "") or "")
     findings: list[Finding] = []
@@ -688,46 +663,12 @@ def _run_local_diagnostics(port: int, *,
             "importable" if tri.returncode == 0 else (tri.stderr or "failed")[-120:],
         ))
 
-    _render_findings(findings, title="Local diagnostics")
+    _render_findings(
+        findings,
+        title="Local diagnostics",
+        stream=stream or sys.stdout,
+    )
     return not _has_fatal(findings)
-
-
-def cmd_list(args) -> int:
-    _print_logo_once()
-    print("\nCommands")
-    print("--------")
-    print("worker --start   Start local or remote worker daemon")
-    print("worker --status  Probe /api/v1/status plus /health when available")
-    print("worker --stop    Stop worker and tear down remote tunnel")
-    print("doctor           Run local/remote environment diagnostics")
-    print("list             Show this command summary")
-    return 0
-
-
-def cmd_doctor(args) -> int:
-    _print_logo_once()
-    if args.remote_host:
-        host_cfg = _load_remote_host_config(args.remote_host)
-        if host_cfg is None:
-            print(f"[ar_cli] no remote_worker.hosts.{args.remote_host} entry "
-                  f"in config.yaml", file=sys.stderr)
-            return 2
-        if "repo_path" not in host_cfg:
-            print(f"[ar_cli] remote_worker.hosts.{args.remote_host} missing "
-                  f"`repo_path`.", file=sys.stderr)
-            return 2
-        ok = _run_remote_diagnostics(
-            args.remote_host,
-            host_cfg,
-            args.port,
-            backend=args.backend,
-            dsl=args.dsl,
-            for_start=False,
-        )
-        return 0 if ok else 1
-
-    ok = _run_local_diagnostics(args.port, backend=args.backend, dsl=args.dsl)
-    return 0 if ok else 1
 
 
 # ---------------------------------------------------------------------------
@@ -740,28 +681,6 @@ def _build_parser() -> argparse.ArgumentParser:
         description="AutoResearch CLI.",
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
-
-    l = sub.add_parser("list", help="List supported ar_cli commands.")
-    l.set_defaults(func=cmd_list)
-
-    d = sub.add_parser(
-        "doctor",
-        help="Run local or remote environment diagnostics.",
-        description=(
-            "Check config, Python/runtime imports, device visibility, "
-            "remote ssh/env_script, disk space, and worker port state."
-        ),
-    )
-    d.add_argument("--remote-host", default=None,
-                   help="SSH alias under config.yaml:remote_worker.hosts.")
-    d.add_argument("--backend", choices=["ascend", "cuda", "cpu"],
-                   default=None,
-                   help="Target backend. Defaults to config.yaml defaults.backend.")
-    d.add_argument("--dsl", default=None,
-                   help="Target DSL. triton_* makes missing triton fatal.")
-    d.add_argument("--port", type=int, default=worker_port(),
-                   help=f"Worker port (default: {worker_port()}).")
-    d.set_defaults(func=cmd_doctor)
 
     w = sub.add_parser(
         "worker",
@@ -781,8 +700,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Stop the daemon listening on --port. "
                              "POSIX-only (uses ss/lsof + SIGTERM/SIGKILL).")
     action.add_argument("--status", action="store_true",
-                        help="Pure query: probe /api/v1/status + /health. "
-                             "No spawn / reconnect side effects.")
+                        help="Probe /api/v1/status + /health. If the "
+                             "worker is unreachable, print local or remote "
+                             "diagnostics without spawning a daemon.")
 
     w.add_argument("--backend", choices=["ascend", "cuda", "cpu"],
                    help="Hardware backend (required for --start).")
@@ -795,7 +715,7 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Comma-separated device IDs, e.g. '2,5' "
                         "(required for --start).")
     w.add_argument("--dsl",
-                   help="Target DSL for remote diagnostics. triton_* makes "
+                   help="Target DSL for status diagnostics. triton_* makes "
                         "missing triton fatal; other DSLs warn only.")
     w.add_argument("--port", type=int, default=worker_port(),
                    help=f"TCP port (default: {worker_port()}, "
@@ -830,10 +750,8 @@ def _dispatch_worker(args) -> int:
         return _dispatch_remote_worker(args)
 
     if args.start:
-        _print_logo_once()
         return cmd_worker_start(args)
     if args.stop:
-        _print_logo_once()
         return cmd_worker_stop(args)
     if args.status:
         return cmd_worker_status(args)
@@ -863,34 +781,22 @@ def _load_remote_host_config(alias: str) -> Optional[dict]:
 
 def _build_remote_ar_cli_cmd(host_cfg: dict, ar_cli_args: list[str]) -> str:
     """Compose the bash command we send through ssh: source env, cd repo,
-    invoke the remote CLI with the equivalent (non-remote) args.
+    invoke the remote ar_cli.py with the equivalent (non-remote) args.
 
     All values are shlex-quoted; the resulting string is passed to ssh
-    AS A SINGLE ARG so the remote shell parses it as one command. The
-    `--bg` flag is added unconditionally for --start so the daemon
-    detaches from the ssh session before we tear it down.
+    AS A SINGLE ARG so the remote shell parses it as one command.
     """
     python = host_cfg.get("python") or "python"
     repo_path = host_cfg["repo_path"]  # required; KeyError surfaces cleanly
     env_script = host_cfg.get("env_script")
-    remote_cli = str(host_cfg.get("remote_cli") or "").strip()
-    if remote_cli:
-        remote_entry = " ".join(
-            shlex.quote(part) for part in shlex.split(remote_cli)
-        )
-    else:
-        remote_entry = (
-            f"{shlex.quote(python)} scripts/ar_cli.py"
-        )
 
     parts: list[str] = []
     parts.append("export AR_CLI_QUIET=1")
-    parts.append("export AKG_CLI_QUIET=1")
     if env_script:
         parts.append(f"source {shlex.quote(env_script)}")
     parts.append(f"cd {shlex.quote(repo_path)}")
     parts.append(
-        f"{remote_entry} "
+        f"{shlex.quote(python)} scripts/ar_cli.py "
         + " ".join(shlex.quote(a) for a in ar_cli_args)
     )
     return " && ".join(parts)
@@ -1060,9 +966,6 @@ def _tunnel_stop_silent(port: int, host: str = "") -> None:
 
 
 def _dispatch_remote_worker(args) -> int:
-    if not args.status:
-        _print_logo_once()
-
     host_cfg = _load_remote_host_config(args.remote_host)
     if host_cfg is None:
         print(f"[ar_cli] no remote_worker.hosts.{args.remote_host} entry "
@@ -1079,7 +982,17 @@ def _dispatch_remote_worker(args) -> int:
         st = _curl_status("127.0.0.1", args.port)
         if st is None:
             print(f"Worker tunnel 127.0.0.1:{args.port} unreachable "
-                  f"(run `--start` to (re)build it).")
+                  f"(run `--start` to (re)build it).",
+                  file=sys.stderr)
+            _run_remote_diagnostics(
+                args.remote_host,
+                host_cfg,
+                args.port,
+                backend=getattr(args, "backend", None),
+                dsl=getattr(args, "dsl", None),
+                for_start=False,
+                stream=sys.stderr,
+            )
             return 1
         print(json.dumps(st, indent=2))
         return 0

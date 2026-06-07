@@ -198,34 +198,23 @@ remote_worker:
     my-npu:
       repo_path:  /home/<user>/claude-autoresearch
       env_script: /home/<user>/env.sh
-      # remote_cli: custom_worker_cli
 ```
 
-自定义远端 CLI 入口示例：
-
-```yaml
-remote_worker:
-  hosts:
-    my-npu:
-      repo_path: /abs/path/to/remote/project
-      env_script: /abs/path/to/env.sh
-      remote_cli: custom_worker_cli
-```
-
-`remote_cli` 会在 `source env_script && cd repo_path` 之后作为远端入口运行；上面的配置会拼出 `custom_worker_cli worker ...`。
+`repo_path` 指远端 claude-autoresearch checkout。远端命令会在 `source env_script && cd repo_path` 之后运行 `python scripts/ar_cli.py worker ...`。
 
 字段语义见 [参考 §8](#8-远程-worker-内部)。
 
 ### B.3 [本机] 检查并启动远端 worker（ar_cli 自动开 SSH tunnel）
 
-轻量检查：
+状态检查：
 
 ```bash
 cd autoresearch
-python scripts/ar_cli.py list
-python scripts/ar_cli.py doctor --remote-host my-npu \
+python scripts/ar_cli.py worker --remote-host my-npu --status \
     --backend ascend --dsl ascendc_catlass
 ```
+
+`--status` 能连上 worker 时输出 JSON；连不上时输出远端 env、import、NPU、磁盘和端口诊断。
 
 启动远端 worker：
 
@@ -408,15 +397,7 @@ A/B/C 均适用：
 
 ---
 
-### 1.2 `scripts/ar_cli.py`（诊断 + worker 启停 + tunnel）
-
-顶层子命令：
-
-| 子命令 | 用法 |
-|---|---|
-| `list` | 打印 ar_cli 支持的功能与入口 |
-| `doctor` | 检查本机或远端的 env、Python import、NPU 可见性、端口状态 |
-| `worker` | 启停 worker daemon；远端模式会维护本机 `ssh -L` tunnel |
+### 1.2 `scripts/ar_cli.py worker`（worker 启停 + tunnel）
 
 `worker` 三种模式互斥：
 
@@ -424,7 +405,7 @@ A/B/C 均适用：
 |---|---|
 | `--start` | 启动 worker daemon。如配合 `--remote-host`，会先 SSH 到远端启 daemon，再在本机起 `ssh -L <port>:127.0.0.1:<port>` tunnel |
 | `--stop` | 停 `--port` 上的 daemon（POSIX-only）；配合 `--remote-host` 时还会 SIGTERM 本机 tunnel |
-| `--status` | `curl 127.0.0.1:<port>/api/v1/status`（含 ready / 卡 / 空闲 slot） |
+| `--status` | 查询 `127.0.0.1:<port>/api/v1/status`（含 ready / 卡 / 空闲 slot）；不可达时输出本机或远端诊断 |
 
 所有 flag：
 
@@ -434,21 +415,10 @@ A/B/C 均适用：
 | `--backend` | `ascend` / `cuda` / `cpu` | `--start` 时必填 | — | 硬件后端 |
 | `--arch` | 字符串（如 `ascend910b3`） | ❌（`--start` 时不传则由 `npu-smi info` 自动推断） | 自动推断 | 写入 worker 自报的 arch |
 | `--devices` | 逗号分隔（如 `2,5`） | `--start` 时必填 | — | worker 管理的卡集合 |
-| `--dsl` | 字符串（如 `ascendc_catlass` / `triton_ascend`） | ❌ | — | 目标 DSL；远端诊断会据此决定 triton 缺失是 warning 还是 fatal |
+| `--dsl` | 字符串（如 `ascendc_catlass` / `triton_ascend`） | ❌ | — | 目标 DSL；`--status` 诊断会据此决定 triton 缺失是 warning 还是 fatal |
 | `--port` | int | ❌ | 9111（[config.yaml](config.yaml): `worker.port`） | TCP 端口 |
-| `--host` | IP | ❌ | `127.0.0.1` | 绑定地址，**默认强制 loopback**（worker 只能经 SSH tunnel 访问，禁止暴露公网） |
-| `--bg` | flag | ❌ | (前台) | daemon 模式，detach 并把 log 写 `/tmp/ar_worker_<port>.log`，POSIX-only |
 | `--force` | flag | ❌ | (校验) | `--stop` 时跳过 worker 进程 cmdline 校验 |
 | `--remote-host` | SSH alias | ❌ | (本机) | 通过 SSH 在 `config.yaml: remote_worker.hosts.<alias>` 定义的远端机执行同样命令；`--start` 时额外打通本机 tunnel |
-
-`doctor` 常用 flag：
-
-| flag | 类型 | 默认 | 说明 |
-|---|---|---|---|
-| `--remote-host` | alias | 本机 | 读取 `config.yaml: remote_worker.hosts.<alias>` 并通过 SSH 检查远端 |
-| `--backend` | `ascend` / `cuda` / `cpu` | `config.yaml: defaults.backend` | 目标硬件后端 |
-| `--dsl` | 字符串 | — | `triton_*` 会把 triton import 失败视作 fatal，其它 DSL 作为 warning |
-| `--port` | int | 9111 | 检查 worker 端口占用状态 |
 
 ---
 
@@ -643,13 +613,11 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
 ## 8. ar_cli worker
 
-Worker 是个 FastAPI HTTP daemon，跑 eval 子进程。`scripts/ar_cli.py` 提供 `list` / `doctor` / `worker` 三个入口：`list` 展示功能列表，`doctor` 做本机或远端运行环境诊断，`worker` 负责本机/远端起停、ssh -L tunnel 维护、探活。
+Worker 是个 FastAPI HTTP daemon，跑 eval 子进程。`scripts/ar_cli.py worker` 负责本机/远端起停、ssh -L tunnel 维护、探活。
 
 ### 常用示例
 
 ```bash
-scripts/ar_cli.py list
-scripts/ar_cli.py doctor --remote-host my-npu --backend ascend --dsl ascendc_catlass
 scripts/ar_cli.py worker --remote-host my-npu --start --backend ascend --devices 0,1 --dsl ascendc_catlass
 scripts/ar_cli.py worker --remote-host my-npu --status
 scripts/ar_cli.py worker --remote-host my-npu --stop
@@ -657,7 +625,7 @@ scripts/ar_cli.py worker --remote-host my-npu --stop
 
 本机模式使用同一组 `worker` 命令，省略 `--remote-host <alias>` 即可。
 
-`--start` 幂等：daemon 已在跑时返回现有状态；tunnel 抖了再跑一次 `--start` 即可恢复。`--status` 是纯查询。
+`--start` 幂等：daemon 已在跑时返回现有状态；tunnel 抖了再跑一次 `--start` 即可恢复。`--status` 能连上 worker 时输出 JSON；连不上时输出本机或远端诊断。
 
 ### 参数
 
@@ -668,11 +636,9 @@ scripts/ar_cli.py worker --remote-host my-npu --stop
 | `--backend` | `ascend` / `cuda` / `cpu` | — | `--start` 必填 | 硬件后端 |
 | `--devices` | csv，如 `0,1,2` | — | `--start` 必填 | device id 列表 |
 | `--arch` | 字符串，如 `ascend910b3` | auto（`npu-smi info` 推断）| 可省 | 硬件 arch |
-| `--dsl` | 字符串，如 `ascendc_catlass` / `triton_ascend` | — | 可省 | 目标 DSL；远端诊断按 DSL 确定 triton 策略 |
+| `--dsl` | 字符串，如 `ascendc_catlass` / `triton_ascend` | — | 可省 | 目标 DSL；`--status` 诊断按 DSL 确定 triton 策略 |
 | `--port` | int | `config.yaml: worker.port`，否则 `9001` | 可省 | TCP 端口 |
 | `--remote-host` | alias | — | 可省 | 走 SSH 远端模式；alias 在 `config.yaml: remote_worker.hosts.<alias>` 定义 |
-
-`doctor` 常用参数同 `worker` 的 `--remote-host` / `--backend` / `--dsl` / `--port`，适合在启动 worker 前确认 env、import、NPU、磁盘空间和端口状态。
 
 `config.yaml: remote_worker.hosts` 字段：
 
@@ -682,11 +648,10 @@ remote_worker:
     my-npu:
       repo_path:  /abs/path/to/repo   # 必填
       env_script: /abs/path/env.sh    # 必填
-      remote_cli: custom_worker_cli   # 可省；在 repo_path 内运行的 CLI 入口
       ssh_alias:  my-npu              # 可省，默认 = key
 ```
 
-`repo_path` 指远端工作目录。`remote_cli` 指远端 CLI 入口，例如 `custom_worker_cli` 会生成 `custom_worker_cli worker --start ...`；默认入口是 `python scripts/ar_cli.py`。
+`repo_path` 指远端 claude-autoresearch checkout。远端入口固定为 `python scripts/ar_cli.py`。
 
 ## 9. Skills 库
 
