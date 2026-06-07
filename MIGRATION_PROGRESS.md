@@ -207,6 +207,36 @@ the current state.
      - NPU `config.yaml` contains only `repo_path` and `env_script` for
        the `npu` remote worker host.
 
+9. Remote python override removal.
+   - Status: complete.
+   - Scope:
+     - Remove the `remote_worker.hosts.<alias>.python` override from the
+       standalone config contract.
+     - Always invoke `python` after `env_script` is sourced, so the
+       environment controls the interpreter.
+     - Apply the same remote worker command rule to the AKG-side dispatch.
+     - Keep worker startup behavior aligned across both repos: `worker
+       --start` prints one logo locally, while `--status` / `--stop` and
+       recursive remote starts stay quiet.
+   - Local checks:
+     - `python -m py_compile scripts/ar_cli.py` passed.
+     - `git diff --check -- scripts/ar_cli.py config.yaml
+       MIGRATION_PROGRESS.md` passed.
+     - No `host_cfg.get("python")` / optional python config docs remain in
+       the standalone repo.
+     - AKG-side `misc.py` / `remote_dispatch.py` py_compile and diff check
+       passed locally.
+   - NPU sync/checks:
+     - Synced standalone `scripts/ar_cli.py`, `config.yaml`, and
+       `MIGRATION_PROGRESS.md`.
+     - Synced AKG `misc.py` and `remote_dispatch.py`; removed an accidental
+       untracked AKG `service/misc.py` copy after verifying it was not tracked.
+     - Standalone and AKG py_compile/help smoke passed on NPU.
+     - Standalone and AKG `worker --status` on an unused port returned
+       diagnostics without logo output.
+     - NPU scans confirmed both repos no longer reference the removed
+       `python` remote-worker override.
+
 ## Latest Known Repo State
 
 - This file is committed as part of the Step 7 cleanup changes; use

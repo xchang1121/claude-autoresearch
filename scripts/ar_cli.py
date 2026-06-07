@@ -58,6 +58,34 @@ AR_ROOT = SCRIPT_DIR.parent
 STATE_DIR = Path(os.environ.get(
     "AR_STATE_DIR", str(Path.home() / ".autoresearch_state")))
 
+_LOGO_PRINTED = False
+_LOGO = r"""
+    _         _        ____                               _
+   / \  _   _| |_ ___ |  _ \ ___  ___  ___  __ _ _ __ ___| |__
+  / _ \| | | | __/ _ \| |_) / _ \/ __|/ _ \/ _` | '__/ __| '_ \
+ / ___ \ |_| | || (_) |  _ <  __/\__ \  __/ (_| | | | (__| | | |
+/_/   \_\__,_|\__\___/|_| \_\___||___/\___|\__,_|_|  \___|_| |_|
+"""
+
+
+def _color(text: str, code: str) -> str:
+    if (not sys.stdout.isatty()
+            or os.environ.get("NO_COLOR")
+            or os.environ.get("AR_CLI_PLAIN") == "1"):
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _print_logo_once() -> None:
+    """Print the worker startup banner once for user-invoked starts."""
+    global _LOGO_PRINTED
+    if _LOGO_PRINTED or os.environ.get("AR_CLI_QUIET") == "1":
+        return
+    _LOGO_PRINTED = True
+    print(_color(_LOGO.rstrip("\n"), "36"))
+    print(_color("AutoResearch Worker", "1;37"))
+
+
 @dataclass(frozen=True)
 class Finding:
     severity: str  # ok / info / warn / fatal
@@ -746,6 +774,9 @@ def _dispatch_worker(args) -> int:
         print(f"[ar_cli] {err}", file=sys.stderr)
         return 2
 
+    if args.start:
+        _print_logo_once()
+
     if args.remote_host:
         return _dispatch_remote_worker(args)
 
@@ -786,7 +817,6 @@ def _build_remote_ar_cli_cmd(host_cfg: dict, ar_cli_args: list[str]) -> str:
     All values are shlex-quoted; the resulting string is passed to ssh
     AS A SINGLE ARG so the remote shell parses it as one command.
     """
-    python = host_cfg.get("python") or "python"
     repo_path = host_cfg["repo_path"]  # required; KeyError surfaces cleanly
     env_script = host_cfg.get("env_script")
 
@@ -796,7 +826,7 @@ def _build_remote_ar_cli_cmd(host_cfg: dict, ar_cli_args: list[str]) -> str:
         parts.append(f"source {shlex.quote(env_script)}")
     parts.append(f"cd {shlex.quote(repo_path)}")
     parts.append(
-        f"{shlex.quote(python)} scripts/ar_cli.py "
+        "python scripts/ar_cli.py "
         + " ".join(shlex.quote(a) for a in ar_cli_args)
     )
     return " && ".join(parts)

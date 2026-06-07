@@ -51,8 +51,6 @@ hallucinated_scripts:
 #                           ar_cli runs. Must leave `python -c
 #                           "import torch_npu, triton"` working in the
 #                           non-interactive shell.
-#   python      (optional)  python binary to invoke remotely. Default
-#                           "python" (whatever env_script puts on PATH).
 #   ssh_alias   (optional)  hostname passed to ssh. Default = the key
 #                           name itself; override when the host alias in
 #                           ~/.ssh/config differs from how you want to
