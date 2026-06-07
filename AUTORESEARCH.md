@@ -133,7 +133,7 @@ python scripts/dashboard.py <task_dir> --watch
 
 | 在哪 | 做什么 |
 |---|---|
-| 远端 NPU 机 | 负责 worker/eval。准备一个可执行 worker CLI 的工程路径 `<repo_path>`：可以是 claude-autoresearch checkout，也可以是提供 `akg_cli` 的 akg_agents 工程；准备 `env_script`，source 完毕后 `python -c "import torch_npu, triton"` 退出码为 0；`npu-smi info` 能列出设备。 |
+| 远端 NPU 机 | 负责 worker/eval。准备 claude-autoresearch checkout 作为 `<repo_path>`；准备 `env_script`，source 完毕后 `python -c "import torch_npu, triton"` 退出码为 0；`npu-smi info` 能列出设备。 |
 | 本机 | 负责 Claude Code / orchestrator。安装 Python ≥ 3.10、PyYAML、Claude Code CLI；`~/.ssh/config` 配好 alias（下文以 `my-npu` 为例）+ 密钥免密登录远端。 |
 
 <details><summary><code>~/.ssh/config</code> 怎么配 + 跑前自检</summary>
@@ -198,21 +198,21 @@ remote_worker:
     my-npu:
       repo_path:  /home/<user>/claude-autoresearch
       env_script: /home/<user>/env.sh
-      # remote_cli: akg_cli
+      # remote_cli: custom_worker_cli
 ```
 
-AKG 工程入口示例：
+自定义远端 CLI 入口示例：
 
 ```yaml
 remote_worker:
   hosts:
     my-npu:
-      repo_path: /abs/path/to/akg/akg_agents
+      repo_path: /abs/path/to/remote/project
       env_script: /abs/path/to/env.sh
-      remote_cli: akg_cli
+      remote_cli: custom_worker_cli
 ```
 
-`remote_cli` 会在 `source env_script && cd repo_path` 之后作为远端入口运行；上面的配置会拼出 `akg_cli worker ...`。
+`remote_cli` 会在 `source env_script && cd repo_path` 之后作为远端入口运行；上面的配置会拼出 `custom_worker_cli worker ...`。
 
 字段语义见 [参考 §8](#8-远程-worker-内部)。
 
@@ -682,11 +682,11 @@ remote_worker:
     my-npu:
       repo_path:  /abs/path/to/repo   # 必填
       env_script: /abs/path/env.sh    # 必填
-      remote_cli: akg_cli             # 可省；在 repo_path 内运行的 CLI 入口
+      remote_cli: custom_worker_cli   # 可省；在 repo_path 内运行的 CLI 入口
       ssh_alias:  my-npu              # 可省，默认 = key
 ```
 
-`repo_path` 指远端工作目录。`remote_cli` 指远端 CLI 入口，例如 `akg_cli` 会生成 `akg_cli worker --start ...`；默认入口是 `python scripts/ar_cli.py`。
+`repo_path` 指远端工作目录。`remote_cli` 指远端 CLI 入口，例如 `custom_worker_cli` 会生成 `custom_worker_cli worker --start ...`；默认入口是 `python scripts/ar_cli.py`。
 
 ## 9. Skills 库
 

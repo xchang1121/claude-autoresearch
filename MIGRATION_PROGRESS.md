@@ -228,14 +228,23 @@ the current state.
    - Scope:
      - Update `AUTORESEARCH.md` B-section remote worker setup to document
        `list`, `doctor`, `worker --remote-host`, `--dsl`, and `remote_cli`.
-     - Add a generic AKG project entry example using placeholders and
-       `remote_cli: akg_cli`.
+     - Add a generic custom remote CLI entry example using placeholders.
      - Refresh the ar_cli reference sections so `list` / `doctor` / `worker`
        match the current CLI surface.
    - Local checks:
      - `git diff --check -- AUTORESEARCH.md` passed on 2026-06-07.
      - Generic-example and discouraged-wording scan passed for
        `AUTORESEARCH.md`.
+
+11. AUTORESEARCH.md standalone wording cleanup.
+   - Status: complete.
+   - Scope:
+     - Keep `AUTORESEARCH.md` framed as standalone claude-autoresearch
+       documentation.
+     - Replace project-specific remote CLI examples with generic
+       `custom_worker_cli` placeholders.
+   - Local checks:
+     - `AUTORESEARCH.md` project-specific-name scan passed on 2026-06-07.
 
 ## Latest Known Repo State
 
