@@ -142,6 +142,18 @@ def worker_status_timeout() -> float:
     return float(_get("worker", "status_timeout"))
 
 
+# --- catlass C++ library root (ascendc_catlass DSL only) --------------
+def catlass_root() -> str:
+    """Absolute path to the CATLASS repo root (the directory containing
+    ``include/catlass/``), or empty string to fall through to
+    ``$CATLASS_ROOT`` then ``<repo-root>/thirdparty/catlass``.
+
+    Read by ``eval/catlass_paths.resolve_catlass_root`` between the env
+    var and the standard install location. See catlass section in
+    config.yaml for the full resolution chain."""
+    return str(_get("catlass", "root"))
+
+
 # --- batch pre-flight verification timeouts (seconds) ------------------
 def batch_tier1_timeout() -> int:
     return _get("batch", "tier1_timeout")

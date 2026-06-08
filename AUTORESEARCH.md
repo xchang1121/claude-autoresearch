@@ -97,7 +97,7 @@ python scripts/dashboard.py <task_dir> --watch
 
 | 在哪 | 做什么 |
 |---|---|
-| 远端 NPU 机 | 负责 worker/eval。准备 claude-autoresearch checkout 作为 `<repo_path>`；准备 `env_script`，source 完毕后 `python -c "import torch_npu, triton"` 退出码为 0；`npu-smi info` 能列出设备。 |
+| 远端 NPU 机 | 负责 worker/eval。准备 claude-autoresearch checkout 作为 `<repo_path>`；准备 `env_script`，source 完毕后 `python -c "import torch_npu, triton"` 退出码为 0；`npu-smi info` 能列出设备。**若使用 `ascendc_catlass` DSL**，在 `<repo_path>` 下跑 `bash scripts/download_catlass.sh`（一键 clone CATLASS C++ 库到 `thirdparty/catlass`，operator 不用配 `CATLASS_ROOT`；解析顺序见 [`config.yaml: catlass`](config.yaml)）。 |
 | 本机 | 负责 Claude Code / orchestrator。安装 Python ≥ 3.10、PyYAML、Claude Code CLI；`~/.ssh/config` 配好 alias（下文以 `my-npu` 为例）+ 密钥免密登录远端。 |
 
 <details><summary><code>~/.ssh/config</code> 怎么配 + 跑前自检</summary>

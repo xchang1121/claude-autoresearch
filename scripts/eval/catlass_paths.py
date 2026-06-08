@@ -83,26 +83,61 @@ def _bundled_catlass_root() -> Optional[str]:
     return cand if os.path.isdir(os.path.join(cand, "include", "catlass")) else None
 
 
+def _valid_catlass_path(path: str) -> Optional[str]:
+    """Return absolute ``path`` iff it contains ``include/catlass/``,
+    else None. Used by every layer of ``resolve_catlass_root`` so each
+    fallback is verified before being accepted."""
+    if not path:
+        return None
+    abs_path = os.path.abspath(path)
+    if os.path.isdir(os.path.join(abs_path, "include", "catlass")):
+        return abs_path
+    return None
+
+
+def _config_catlass_root() -> Optional[str]:
+    """Read ``catlass.root`` from workspace config.yaml. None when the
+    field is empty / missing / settings module isn't importable (e.g.
+    standalone unit test). Validated to point at a real CATLASS install
+    before being returned."""
+    try:
+        from utils import settings  # imported lazily — keeps unit tests free of yaml
+        configured = settings.catlass_root()
+    except Exception:
+        return None
+    return _valid_catlass_path(configured) if configured else None
+
+
 def resolve_catlass_root(
     *,
     catlass_root: Optional[str] = None,
 ) -> Optional[str]:
     """Return absolute CATLASS repo root (directory containing
-    ``include/catlass``). Resolution order:
+    ``include/catlass``). Resolution order; first hit that points at a
+    valid install wins:
 
       1. Explicit ``catlass_root`` arg (task.yaml ``catlass.root``)
       2. ``CATLASS_ROOT`` env var (worker daemon env)
-      3. ``<repo-root>/thirdparty/catlass`` (the standard install location)
-         kicks in when neither 1
-         nor 2 is set, so the common deployment needs zero config.
+      3. ``catlass.root`` from workspace ``config.yaml``
+      4. ``<repo-root>/thirdparty/catlass`` (one-click install via
+         ``bash scripts/download_catlass.sh``)
+
+    Each layer is validated (``include/catlass`` must exist) before being
+    accepted —— a configured-but-stale path silently falls through to the
+    next layer instead of returning a broken root.
     """
-    root = catlass_root or os.environ.get("CATLASS_ROOT")
-    if root:
-        path = os.path.abspath(root)
-        include_catlass = os.path.join(path, "include", "catlass")
-        if os.path.isdir(include_catlass):
-            return path
-        return None
+    if catlass_root:
+        v = _valid_catlass_path(catlass_root)
+        if v is not None:
+            return v
+    env = os.environ.get("CATLASS_ROOT")
+    if env:
+        v = _valid_catlass_path(env)
+        if v is not None:
+            return v
+    cfg = _config_catlass_root()
+    if cfg is not None:
+        return cfg
     return _bundled_catlass_root()
 
 

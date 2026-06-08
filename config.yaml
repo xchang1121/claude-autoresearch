@@ -244,6 +244,29 @@ worker:
 
 
 # ---------------------------------------------------------------------------
+# CATLASS C++ template library root (ascendc_catlass DSL only).
+#
+# eval/catlass_paths.resolve_catlass_root() looks up the directory that
+# contains ``include/catlass/`` in this order; first hit wins:
+#
+#   1. task.yaml ``catlass.root`` (per-task override; rare)
+#   2. ``CATLASS_ROOT`` env var (worker daemon shell env)
+#   3. ``catlass.root`` below (this file; cross-task workspace default)
+#   4. ``<repo-root>/thirdparty/catlass`` (one-click install location
+#      created by ``bash scripts/download_catlass.sh``)
+#
+# Leave ``root`` as the empty string to fall through to env / standard
+# install. Only set an absolute path when CATLASS is installed somewhere
+# else and you do NOT want to use $CATLASS_ROOT.
+#
+# Field reference:
+#   root  (str)  absolute path to the CATLASS repo root, or ``""``.
+# ---------------------------------------------------------------------------
+catlass:
+  root: ""
+
+
+# ---------------------------------------------------------------------------
 # Batch driver knobs (scripts/batch/*). Two unrelated kinds of timeouts
 # bundled together: pre-flight Tier 1/2 verify (used by batch/verify.py
 # before the long batch run) and the per-op driver wall clock + cooldown
