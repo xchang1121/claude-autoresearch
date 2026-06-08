@@ -247,18 +247,23 @@ def cmd_worker_start(args) -> int:
     # entry via `npu-smi info`. Caller can still pass --arch explicitly
     # to override.
     if not args.arch:
-        from utils.hw_detect import derive_arch
+        from utils.hw_detect import derive_arch, probe_hint
         try:
             first_dev = int(args.devices.split(",")[0].strip())
         except (ValueError, AttributeError):
             print(f"[ar_cli] --start: cannot parse first device id from "
                   f"--devices={args.devices!r}", file=sys.stderr)
             return 2
-        derived = derive_arch(first_dev)
+        # Route the probe by backend (ascend→npu-smi, cuda→nvidia-smi,
+        # cpu→platform.machine). Previously hard-coded "ascend" silently
+        # ran npu-smi for --backend cuda too, then errored with a
+        # misleading "npu-smi missing" hint.
+        derived = derive_arch(first_dev, args.backend)
         if not derived:
-            print(f"[ar_cli] --start: arch auto-derive failed for device "
-                  f"{first_dev} (npu-smi missing or unparseable). Pass "
-                  f"--arch explicitly.", file=sys.stderr)
+            print(f"[ar_cli] --start: arch auto-derive failed for "
+                  f"backend={args.backend!r} device={first_dev} "
+                  f"({probe_hint(args.backend)}). Pass --arch explicitly.",
+                  file=sys.stderr)
             return 2
         args.arch = derived
 

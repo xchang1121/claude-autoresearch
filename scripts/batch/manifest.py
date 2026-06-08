@@ -74,8 +74,8 @@ def load_manifest(manifest_path: Path) -> dict:
     return data
 
 
-def _resolve_kernel_paths_for_op(kernel_dir: Path,
-                                 op_name: str) -> tuple[Path, Path]:
+def resolve_kernel_paths_for_op(kernel_dir: Path,
+                                op_name: str) -> tuple[Path, Path]:
     """Return (kernel_arg, python_module) for one op.
 
     kernel_arg is what batch/run.py passes to /autoresearch --kernel. It
@@ -161,7 +161,7 @@ def resolve_cases(batch_dir: Path, manifest: dict, mode: str) -> list[dict]:
         if not ref_path.is_file():
             raise ManifestError(f"{ref_path.relative_to(batch_dir)} not found")
 
-        kernel_path, kernel_module = _resolve_kernel_paths_for_op(
+        kernel_path, kernel_module = resolve_kernel_paths_for_op(
             kernel_dir, op_name)
 
         cases.append({
