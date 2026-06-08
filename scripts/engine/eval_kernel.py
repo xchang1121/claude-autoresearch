@@ -20,10 +20,10 @@ per-case granularity:
     `verifier.last_verify_sidecar` — autoresearch's `verify` block is a
     direct passthrough of that dict (idx, case_desc, error_source,
     failure_kind, failed_indices, diagnostics).
-  - profile: KernelVerifier's profile scripts emit `case_times: [ms]`;
-    we re-shape them into per_shape rows, and augment each row's
-    `case_desc` from the verify sidecar so dynamic-shape profile
-    rows carry the same shape strings the verify rows did.
+  - profile: `KernelVerifier.run_profile()` returns the canonical
+    per-shape dict (per_shape_gen_us / per_shape_base_us / case_descs +
+    gen_method / base_method). We just lay those into per_shape rows
+    without re-reading the underlying JSON.
 
 Sidecar shape — schema preserved verbatim for eval_client:
   {
@@ -61,69 +61,46 @@ from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
-# Profile result re-shaping (new-stack JSON -> autoresearch per_shape)
+# Profile result re-shaping (canonical KernelVerifier output -> per_shape)
 # ---------------------------------------------------------------------------
 
-def _load_json(path: str) -> Optional[dict]:
-    if not os.path.isfile(path):
+def _shape_profile_to_sidecar(per_case_us: list,
+                              case_descs: list,
+                              method: Optional[str],
+                              warmup: Any,
+                              runs: Any) -> Optional[dict]:
+    """Re-shape ``KernelVerifier.run_profile()`` outputs into autoresearch's
+    per_shape + aggregate dict.
+
+    Inputs come straight from the canonical profile result:
+
+      - ``per_case_us``: `[float, ...]` from ``per_shape_gen_us`` /
+        ``per_shape_base_us`` (always populated; length 1 for static).
+      - ``case_descs``: `[str, ...]` from ``case_descs`` (verify sidecar's
+        `inputs[N]: shape=... dtype=...` strings).
+      - ``method``: timer name (e.g. ``msprof`` / ``loop_timer``).
+
+    Returns ``None`` when ``per_case_us`` is empty (caller treats as
+    "phase not run / failed"). ``caseN`` labels back-fill any
+    desc/timing length mismatch — symptom of a verify-vs-profile shape
+    disagreement, not load-bearing for the per-shape array shape."""
+    if not per_case_us:
         return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def _to_us(v: Any) -> float:
-    if v is None:
-        return float("inf")
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return float("inf")
-    if not math.isfinite(f) or f <= 0:
-        return float("inf")
-    return f
-
-
-def _shape_profile_to_sidecar(prof: Optional[dict],
-                              case_descs: list) -> Optional[dict]:
-    """Re-shape `{base,generation}_profile_result.json` into
-    autoresearch's per_shape + aggregate dict.
-
-    New-stack schema (eval/templates/prof_*.j2):
-      static  -> {execution_time_us, execution_time_ms,
-                  warmup_times, run_times, method}
-      dynamic -> + {case_count, case_times: [ms]}
-
-    `case_descs` is harvested from `verifier.last_verify_sidecar` so
-    each per_shape row carries the same shape string the verify row
-    used (`inputs[N]: shape=... dtype=...`). Falls back to `caseN`
-    when the verify sidecar wasn't emitted (e.g. profile-only run).
-    """
-    if prof is None:
-        return None
-    method = prof.get("method")
-    warmup = prof.get("warmup_times")
-    runs = prof.get("run_times")
-    case_times_ms = prof.get("case_times") or []
     per_shape: list = []
-    if case_times_ms:
-        for i, t in enumerate(case_times_ms):
-            us = _to_us(t * 1000.0) if isinstance(t, (int, float)) else float("inf")
-            desc = case_descs[i] if i < len(case_descs) else f"case{i}"
-            per_shape.append({
-                "idx": i, "case_desc": desc, "avg_time_us": us,
-                "method": method if us != float("inf") else None,
-            })
-    else:
-        exec_us = _to_us(prof.get("execution_time_us"))
-        desc = case_descs[0] if case_descs else "aggregate"
+    for i, raw in enumerate(per_case_us):
+        try:
+            us = float(raw)
+            if not math.isfinite(us) or us <= 0:
+                us = float("inf")
+        except (TypeError, ValueError):
+            us = float("inf")
+        desc = case_descs[i] if i < len(case_descs) else f"case{i}"
         per_shape.append({
-            "idx": 0, "case_desc": desc, "avg_time_us": exec_us,
-            "method": method if exec_us != float("inf") else None,
+            "idx": i,
+            "case_desc": desc,
+            "avg_time_us": us,
+            "method": method if math.isfinite(us) else None,
         })
-
     finites = [r["avg_time_us"] for r in per_shape
                if math.isfinite(r["avg_time_us"])]
     agg_us = sum(finites) / len(finites) if finites else float("inf")
@@ -133,7 +110,7 @@ def _shape_profile_to_sidecar(prof: Optional[dict],
         "execution_time_ms": (agg_us / 1000.0) if math.isfinite(agg_us) else None,
         "warmup_times": warmup,
         "run_times": runs,
-        "num_cases": prof.get("case_count") or len(per_shape),
+        "num_cases": len(per_shape),
         "per_shape": per_shape,
     }
 
@@ -298,9 +275,10 @@ async def _run_eval(args: argparse.Namespace) -> int:
                 None, f"{type(e).__name__}: {e}", False)
 
     # --- profile (KernelVerifier subprocess) ---
-    # KernelVerifier.run_profile always renders both base + generation
-    # scripts unless skip_base_profile is True; phase-flag honoring is
-    # done by picking which of the two JSON files we read back.
+    # KernelVerifier.run_profile returns canonical per-shape arrays
+    # directly (per_shape_gen_us / per_shape_base_us / case_descs +
+    # gen_method / base_method). We just lay those into per_shape rows
+    # — no JSON re-reading needed.
     if do_gen or do_base:
         try:
             prof_res = await verifier.run_profile(
@@ -313,18 +291,25 @@ async def _run_eval(args: argparse.Namespace) -> int:
                     "enable_roofline": False,
                 },
             )
-            verify_dir = (prof_res.get("verify_dir")
-                          if isinstance(prof_res, dict) else None)
-            verify_dir = verify_dir or getattr(verifier, "last_profile_dir", None)
-            base_prof = _load_json(os.path.join(verify_dir, "base_profile_result.json")) if verify_dir else None
-            gen_prof = _load_json(os.path.join(verify_dir, "generation_profile_result.json")) if verify_dir else None
-
+            # Prefer profile's case_descs (sourced from the verify sidecar
+            # inside KernelVerifier); fall back to verify_case_descs we
+            # captured above when verify ran in this same invocation.
+            case_descs = (list(prof_res.get("case_descs") or [])
+                          or verify_case_descs)
             if do_gen:
                 result["profile_gen"] = _shape_profile_to_sidecar(
-                    gen_prof, verify_case_descs)
+                    list(prof_res.get("per_shape_gen_us") or []),
+                    case_descs,
+                    prof_res.get("gen_method"),
+                    args.warmup, args.repeats,
+                )
             if do_base:
                 result["profile_base"] = _shape_profile_to_sidecar(
-                    base_prof, verify_case_descs)
+                    list(prof_res.get("per_shape_base_us") or []),
+                    case_descs,
+                    prof_res.get("base_method"),
+                    args.warmup, args.repeats,
+                )
         except Exception as e:
             result["ok"] = False
             phase = "profile_gen+base" if do_base else "profile_gen"

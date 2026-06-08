@@ -196,11 +196,41 @@ class KernelVerifier:
         # 保存Worker实例（可以在运行时动态设置）
         self.worker = worker
 
-    def _write_framework_aux_files(self, target_dir: str) -> None:
-        """把 self.framework_aux_files 写到 framework 代码所在目录。
+    def _materialize_framework_bundle(self, target_dir: str,
+                                      framework_code: str,
+                                      target_filename: Optional[str] = None
+                                      ) -> str:
+        """Write the framework reference module and its sidecars to
+        ``target_dir`` as a single unit.
+
+        ``target_filename`` is the .py basename to land at (defaults to
+        ``{op_name}_{framework}.py`` for verify_dir / profile_dir paths;
+        callers that need the canonical ``reference.py`` pass it
+        explicitly). Sidecars in ``self.framework_aux_files`` keyed by
+        the scaffold-default ``reference`` stem are renamed to track the
+        framework filename's stem — that way refs that derive their
+        sidecar path via ``os.path.join(os.path.dirname(__file__),
+        <stem>.json)`` resolve under whatever stem the .py landed at.
+        Nested paths and other top-level stems are written verbatim.
+
+        Returns the absolute path of the .py file written.
         """
+        target_filename = target_filename or f"{self.op_name}_{self.framework}.py"
+        target_stem = os.path.splitext(target_filename)[0]
+
+        py_path = os.path.join(target_dir, target_filename)
+        try:
+            with open(py_path, "w", encoding="utf-8") as f:
+                f.write(framework_code)
+            logger.debug(f"[{self.op_name}] framework 文件已写入: {py_path}")
+        except Exception as e:
+            logger.error(f"[{self.op_name}] framework 文件写入失败: "
+                         f"{py_path}, 错误: {e}")
+            raise
+
         if not self.framework_aux_files:
-            return
+            return py_path
+
         for rel_name, content in self.framework_aux_files.items():
             if (
                 os.path.isabs(rel_name)
@@ -212,7 +242,13 @@ class KernelVerifier:
                     f"[{self.op_name}] 跳过非法 sidecar 路径: {rel_name!r}"
                 )
                 continue
-            aux_path = os.path.join(target_dir, rel_name)
+            head, tail = os.path.split(rel_name)
+            stem, ext = os.path.splitext(tail)
+            if not head and stem == "reference":
+                renamed = f"{target_stem}{ext}"
+            else:
+                renamed = rel_name
+            aux_path = os.path.join(target_dir, renamed)
             os.makedirs(os.path.dirname(aux_path) or target_dir, exist_ok=True)
             try:
                 with open(aux_path, "w", encoding="utf-8") as f:
@@ -225,6 +261,8 @@ class KernelVerifier:
                     f"[{self.op_name}] sidecar 文件写入失败: {aux_path}, 错误: {e}"
                 )
                 raise
+
+        return py_path
 
     def check_task_desc_static(self, code: str) -> Tuple[bool, str]:
         """
@@ -293,12 +331,9 @@ class KernelVerifier:
                 if isinstance(self.worker, LocalWorker) and self.worker.device_pool:
                     device_id = self.worker.device_pool.device_list[0]
 
-            # 2. 写入 task_desc 到 reference.py
-            ref_file = os.path.join(check_dir, "reference.py")
-            with open(ref_file, "w", encoding="utf-8") as f:
-                f.write(task_desc)
-            # 同步写入json文件。
-            self._write_framework_aux_files(check_dir)
+            # 2. 写入 task_desc 到 reference.py + 同步 sidecar
+            ref_file = self._materialize_framework_bundle(
+                check_dir, task_desc, target_filename="reference.py")
 
             # 3. 生成验证脚本 verify_{op_name}.py
             if self.framework == "mindspore":
@@ -504,12 +539,9 @@ if __name__ == "__main__":
         os.makedirs(ref_dir, exist_ok=True)
 
         try:
-            # 2. 写入 task_desc 到 reference.py
-            ref_file = os.path.join(ref_dir, "reference.py")
-            with open(ref_file, "w", encoding="utf-8") as f:
-                f.write(task_desc)
-            # 同步 json 文件
-            self._write_framework_aux_files(ref_dir)
+            # 2. 写入 task_desc 到 reference.py + 同步 sidecar
+            ref_file = self._materialize_framework_bundle(
+                ref_dir, task_desc, target_filename="reference.py")
 
             # 3. 生成参考数据脚本
             save_inputs_flag = "True" if save_inputs else "False"
@@ -733,13 +765,10 @@ if __name__ == "__main__":
         os.makedirs(profile_dir, exist_ok=True)
 
         try:
-            framework_file = os.path.join(
-                profile_dir, f"{self.op_name}_{self.framework}.py"
-            )
-            with open(framework_file, "w", encoding="utf-8") as f:
-                f.write(task_desc)
-            # 同步 json文件
-            self._write_framework_aux_files(profile_dir)
+            # framework code + sidecar 一起落盘（bundle 内部决定 .py 名 +
+            # sidecar 跟 stem 改名）。
+            framework_file = self._materialize_framework_bundle(
+                profile_dir, task_desc)
 
             # 3. 使用模板生成性能测试脚本
             script_file = os.path.join(profile_dir, f"profile_single_{self.op_name}.py")
@@ -1424,16 +1453,10 @@ if __name__ == "__main__":
         # use_reference_inputs 依赖 use_reference_data，且要求 .pt 中包含 inputs
         use_reference_inputs = self.config.get('use_reference_inputs', False) and use_reference_data
 
-        # 创建框架实现文件
-        framework_file = os.path.join(verify_dir, f"{self.op_name}_{self.framework}.py")
-        try:
-            with open(framework_file, "w", encoding="utf-8") as f:
-                f.write(self.framework_code)
-            logger.debug(f"[{self.op_name}] 框架实现文件已创建: {framework_file}")
-        except Exception as e:
-            logger.error(f"[{self.op_name}] 框架实现文件创建失败: {framework_file}, 错误: {e}")
-            raise
-        self._write_framework_aux_files(verify_dir)
+        # 框架代码 + sidecar 一起落盘（bundle 内部决定 .py 名 +
+        # sidecar 跟 stem 改名）。
+        framework_file = self._materialize_framework_bundle(
+            verify_dir, self.framework_code)
 
         # 创建具体实现文件/项目树，由 DSL adapter 决定落盘结构。
         self.dsl_adapter.materialize_impl(
@@ -2227,14 +2250,29 @@ if __name__ == "__main__":
             if artifacts:
                 sync_artifacts_to_directory(artifacts, verify_dir, self.task_id)
 
-            # 从 Worker 返回的结果中提取数据
-            # 注意：跨后端场景下 base_time 可能是 None（跳过 base profile）
+            # Worker 返回的是 canonical 字段: gen_time / base_time 是 aggregate
+            # 标量, per_shape_gen_us / per_shape_base_us 是 per-case 数组.
+            # 跨后端场景下 base_time 可能为 None (跳过 base profile).
             gen_time = result.get('gen_time')
             base_time = result.get('base_time')
             speedup = result.get('speedup', 0.0)
+            per_shape_gen_us = list(result.get('per_shape_gen_us') or [])
+            per_shape_base_us = list(result.get('per_shape_base_us') or [])
+            gen_method = result.get('gen_method')
+            base_method = result.get('base_method')
             roofline_time = result.get('roofline_time')
             roofline_speedup = result.get('roofline_speedup', 0.0)
             roofline_result = result.get('roofline')
+
+            # Shape descriptors come from the verify sidecar (populated by
+            # ``run()`` immediately before this profile call). One owner,
+            # one source — no defensive fallbacks in downstream consumers.
+            case_descs: list = []
+            sidecar = getattr(self, "last_verify_sidecar", None)
+            if isinstance(sidecar, dict):
+                case_descs = [c.get("case_desc", "")
+                              for c in (sidecar.get("per_case") or [])
+                              if isinstance(c, dict)]
 
             if not skip_base:
                 self._store_baseline_result_in_data_cache(
@@ -2265,22 +2303,21 @@ if __name__ == "__main__":
                 logger.info(f"roofline speedup is {roofline_speedup:.4f}x")
             logger.info(f"[{self.task_id}:{self.op_name}] 性能分析完成，加速比（基准为100%）: {speedup_percent:.2f} %")
 
-            # 构建返回结果
+            # 构建返回结果. per_shape_* / case_descs 在 caller 侧 (eval_kernel)
+            # 直接拼进 metrics dict, 不需要再去 profile JSON 取一次.
             result = {
                 'gen_time': gen_time_display,
                 'base_time': base_time_display,
                 'speedup': speedup,
+                'per_shape_gen_us': per_shape_gen_us,
+                'per_shape_base_us': per_shape_base_us,
+                'case_descs': case_descs,
+                'gen_method': gen_method,
+                'base_method': base_method,
                 'roofline_time': roofline_time,
                 'roofline_speedup': roofline_speedup,
                 'roofline': roofline_result,
-                'unique_dir': unique_dir_name,  # 添加 unique_dir
-                # Absolute path to the dir holding base_profile_result.json
-                # and generation_profile_result.json. Callers that want to
-                # re-shape the new-stack profile schema into autoresearch's
-                # `per_shape[{idx, case_desc, avg_time_us, method}]` read
-                # those JSON files directly — surfacing the path here
-                # spares them re-deriving it from log_dir + op_name +
-                # unique_dir.
+                'unique_dir': unique_dir_name,
                 'verify_dir': verify_dir,
             }
             self.last_profile_dir = verify_dir
@@ -2299,6 +2336,11 @@ if __name__ == "__main__":
                 'gen_time': None,
                 'base_time': None,
                 'speedup': 0.0,
+                'per_shape_gen_us': [],
+                'per_shape_base_us': [],
+                'case_descs': [],
+                'gen_method': None,
+                'base_method': None,
                 'roofline_time': None,
                 'roofline_speedup': 0.0,
                 'roofline': None,
