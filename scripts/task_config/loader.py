@@ -9,6 +9,7 @@ a field on `TaskConfig` and reading it in `load_task_config`. Don't
 reach into `raw` dicts elsewhere; route every consumer through the
 typed dataclass.
 """
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
