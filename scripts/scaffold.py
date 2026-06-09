@@ -47,7 +47,9 @@ from utils.settings import (  # noqa: E402
     default_max_rounds, default_eval_timeout, default_metric,
     default_code_checker_enabled, target_backend, target_dsl,
 )
-from task_config import REF_FILE_DEFAULT  # noqa: E402
+from task_config import (  # noqa: E402
+    REF_FILE_DEFAULT, primary_editable_filename, task_editable_files,
+)
 
 
 # DSL-aware scaffold dispatch: every per-DSL knob (does --kernel take a
@@ -372,7 +374,11 @@ def main():
     except FileNotFoundError as e:
         print(json.dumps({"status": "error", "error": str(e)}))
         sys.exit(1)
-    editable_files = ["kernel.py"] + list(adapter.kernel_project_files)
+    # Per-DSL primary wrapper + project subtree, via task_layout helpers.
+    # Pure C++ DSLs would override primary_editable_template on the
+    # adapter; everything else inherits "kernel.py" from the base.
+    primary_editable = primary_editable_filename(adapter, args.op_name)
+    editable_files = task_editable_files(adapter, args.op_name)
 
     # devices_list was resolved above.
     print(f"[scaffold] Creating task directory for {args.op_name}...", file=sys.stderr)
@@ -390,6 +396,7 @@ def main():
         ref_source_path=args.ref,
         worker_url=args.worker_url,
         kernel_project_src=kernel_project_src,
+        editable_filename=primary_editable,
         editable_files=editable_files,
     )
 

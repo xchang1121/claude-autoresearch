@@ -1,7 +1,13 @@
-"""task_config package — facade over three single-concern submodules.
+"""task_config package — facade over four single-concern submodules.
 
 Layout:
 
+    task_layout       — File-name conventions (REF_FILE_DEFAULT) +
+                        adapter-driven helpers (primary_editable_filename,
+                        task_editable_files, pick_primary_editable). The
+                        single source of truth for "what files exist in
+                        a task_dir / batch_dir" — see its module
+                        docstring for the full per-DSL layout map.
     loader            — TaskConfig dataclass + load_task_config (YAML
                         parsing). No internal deps; everyone else
                         consumes TaskConfig from here.
@@ -23,9 +29,13 @@ internal result assembly) are not re-laundered through the facade —
 reach into the submodule explicitly when you need them.
 """
 # fmt: off
+from .task_layout import (
+    REF_FILE_DEFAULT,
+    primary_editable_filename, task_editable_files, pick_primary_editable,
+)
 from .loader import (
     TaskConfig, load_task_config,
-    REF_FILE_DEFAULT, py_stem, pick_kernel_module_file,
+    py_stem, pick_kernel_module_file,
 )
 from .metric_policy import (
     EvalOutcome, EvalResult, check_constraints, is_improvement, format_result_summary,

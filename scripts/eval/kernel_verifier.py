@@ -25,6 +25,7 @@ from pathlib import Path
 
 from . import get_project_root
 from .config_utils import normalize_dsl, check_backend_arch
+from task_config import REF_FILE_DEFAULT
 from .adapters.factory import (
     get_framework_adapter, get_dsl_adapter, get_backend_adapter
 )
@@ -336,9 +337,9 @@ class KernelVerifier:
                 if isinstance(self.worker, LocalWorker) and self.worker.device_pool:
                     device_id = self.worker.device_pool.device_list[0]
 
-            # 2. 写入 task_desc 到 reference.py + 同步 sidecar
+            # 2. 写入 task_desc 到 REF_FILE_DEFAULT + 同步 sidecar
             ref_file = self._materialize_framework_bundle(
-                check_dir, task_desc, target_filename="reference.py")
+                check_dir, task_desc, target_filename=REF_FILE_DEFAULT)
 
             # 3. 生成验证脚本 verify_{op_name}.py
             if self.framework == "mindspore":
@@ -544,9 +545,9 @@ if __name__ == "__main__":
         os.makedirs(ref_dir, exist_ok=True)
 
         try:
-            # 2. 写入 task_desc 到 reference.py + 同步 sidecar
+            # 2. 写入 task_desc 到 REF_FILE_DEFAULT + 同步 sidecar
             ref_file = self._materialize_framework_bundle(
-                ref_dir, task_desc, target_filename="reference.py")
+                ref_dir, task_desc, target_filename=REF_FILE_DEFAULT)
 
             # 3. 生成参考数据脚本
             save_inputs_flag = "True" if save_inputs else "False"

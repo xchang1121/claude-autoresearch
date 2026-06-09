@@ -19,15 +19,14 @@ import yaml
 # ---------------------------------------------------------------------------
 # File-name constants + helpers
 # ---------------------------------------------------------------------------
-# `reference.py` was hardcoded in six unrelated files (scaffold, loader,
-# package_builder x2, eval_client, worker.server) and the inverse
-# stem/basename conversion was implemented twice as inline
-# `.replace(".py", "")` plus once as `+ ".py"`. A renamed default or a
-# new caller forgetting one of the conversions silently produced
-# `reference.py.py` or "no such file". Funnel through these constants
-# + helpers so the contract has a single owner.
+# Layout conventions (REF_FILE_DEFAULT + primary_editable_filename +
+# task_editable_files + pick_primary_editable) live in the sibling
+# task_layout module so single-file vs multi-file DSL semantics have
+# one neighbourhood. Re-export REF_FILE_DEFAULT here for back-compat —
+# consumers that need just the constant continue importing from
+# task_config.loader; new consumers reach into task_layout directly.
 
-REF_FILE_DEFAULT = "reference.py"
+from .task_layout import REF_FILE_DEFAULT  # noqa: E402, F401
 
 
 def py_stem(name: str) -> str:

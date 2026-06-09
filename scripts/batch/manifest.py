@@ -107,12 +107,15 @@ def resolve_kernel_paths_for_op(kernel_dir: Path,
         raise ManifestError(
             f"{kernel_arg.relative_to(kernel_dir.parent)} not found")
 
-    for name in ("kernel.py", f"{op_name}_kernel.py"):
+    # Primary editable per DSL (default "kernel.py"; pure C++ DSLs would
+    # override). Legacy KernelBench fallback: ``<op>_kernel.py``.
+    canonical = adapter.primary_editable_template.format(op_name=op_name)
+    for name in (canonical, f"{op_name}_kernel.py"):
         py = op_root / name
         if py.is_file():
             return kernel_arg, py
     raise ManifestError(
-        f"{op_root.name}/ has no sibling kernel.py or {op_name}_kernel.py")
+        f"{op_root.name}/ has no sibling {canonical} or {op_name}_kernel.py")
 
 
 def resolve_cases(batch_dir: Path, manifest: dict, mode: str) -> list[dict]:
