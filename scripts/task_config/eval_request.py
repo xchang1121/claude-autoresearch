@@ -131,6 +131,11 @@ def override_base_from_progress(
     except Exception:
         return None
 
+    # Gate-side fingerprint has num_cases only — per_shape_descs aren't
+    # available without re-importing the ref. exact_fingerprint_match
+    # compares keys in current, so stored shape_signature is tolerated;
+    # actual drift detection happens at the next baseline_init /
+    # round_anchor refresh which has descs in metrics.
     fingerprint = current_fingerprint(num_cases)
     decision = sticky_override_from_progress(progress, fingerprint)
     if decision.mismatch:

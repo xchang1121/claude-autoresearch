@@ -9,13 +9,18 @@ anchor:
 
 Keeping the rules here prevents those paths from drifting.
 
-AOA fingerprint only tracks `num_cases` — task.yaml schema doesn't
-surface warmup_times / run_times, so they can't vary between rounds for
-the same task. Fingerprints with extra keys on `stored` are tolerated:
-comparisons only consult the keys in `current`.
+Fingerprint tracks ``num_cases`` AND ``shape_signature`` (SHA-256 of
+the joined per_shape_descs strings). Same ``num_cases`` with different
+shapes — sidecar JSON edits, get_input_groups() returning different
+tensor shapes — would otherwise silently reuse stale baseline_metric /
+per_shape_base_us. task.yaml schema doesn't surface warmup_times /
+run_times, so they can't vary between rounds for the same task.
+Fingerprints with extra keys on `stored` are tolerated: comparisons
+only consult the keys in `current`.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -31,9 +36,28 @@ def valid_per_shape(values: Any) -> Optional[list[float]]:
     return None
 
 
-def current_fingerprint(num_cases: Any) -> dict[str, int]:
-    """Fingerprint the eval settings that make ref timings comparable."""
-    return {"num_cases": int(num_cases or 1)}
+def _shape_signature(per_shape_descs: Any) -> Optional[str]:
+    """SHA-256 hex digest of the joined descriptor strings, or None when
+    descs aren't a list-of-strings (legacy progress / non-shape ref).
+    Treating ``None`` as "no signature" lets old progress with just
+    ``num_cases`` continue to sticky on the num_cases-only path."""
+    if not isinstance(per_shape_descs, list) or not per_shape_descs:
+        return None
+    joined = "\x1f".join(str(d) for d in per_shape_descs)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def current_fingerprint(num_cases: Any,
+                        per_shape_descs: Any = None) -> dict[str, Any]:
+    """Fingerprint of the eval settings that make ref timings comparable.
+    Includes ``num_cases`` and (when descs are available) a stable
+    ``shape_signature`` so same-N different-shape doesn't silently
+    reuse a stale baseline."""
+    fp: dict[str, Any] = {"num_cases": int(num_cases or 1)}
+    sig = _shape_signature(per_shape_descs)
+    if sig is not None:
+        fp["shape_signature"] = sig
+    return fp
 
 
 def fingerprint_mismatch(stored: Any,
@@ -55,12 +79,14 @@ def fingerprint_mismatch(stored: Any,
 
 
 def exact_fingerprint_match(stored: Any,
-                            current: dict[str, int]) -> bool:
-    """Strict equality on the num_cases key (tolerating extras on
-    `stored`)."""
+                            current: dict[str, Any]) -> bool:
+    """Strict equality on every key in ``current`` (tolerating extras on
+    ``stored``). Pre-shape-signature progress lacks the
+    ``shape_signature`` key; sticky reuse goes through the num_cases-only
+    check, and the next round's anchor refresh writes the new key."""
     if not isinstance(stored, dict):
         return False
-    return stored.get("num_cases") == current["num_cases"]
+    return all(stored.get(k) == v for k, v in current.items())
 
 
 @dataclass(frozen=True)
@@ -138,7 +164,8 @@ def resolve_baseline_init_anchor(progress: Any, metrics: dict[str, Any],
                                  ) -> AnchorDecision:
     """Choose the anchor written by round-0 baseline initialization."""
     ref_metric = _ref_from_metrics(metrics)
-    fp = current_fingerprint(metrics.get("num_cases") or 1)
+    fp = current_fingerprint(metrics.get("num_cases") or 1,
+                             metrics.get("per_shape_descs"))
 
     existing_metric = progress.get("baseline_metric")
     existing_source = progress.get("baseline_source")
@@ -222,7 +249,8 @@ def refresh_round_anchor(progress: Any,
     speedup display for tasks whose seed kernel failed verify.
     """
     ref_metric = _ref_from_metrics(metrics)
-    fp = current_fingerprint(metrics.get("num_cases") or 1)
+    fp = current_fingerprint(metrics.get("num_cases") or 1,
+                             metrics.get("per_shape_descs"))
 
     existing_metric = progress.get("baseline_metric")
     existing_source = progress.get("baseline_source")

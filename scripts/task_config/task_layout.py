@@ -170,11 +170,18 @@ def resolve_kernel_paths_for_op(adapter, kernel_dir: Path,
         or ``<op>_kernel.py`` (KernelBench legacy)."""
     kernel_dir = Path(kernel_dir)
     if not adapter.kernel_arg_is_directory:
-        py = kernel_dir / f"{op_name}_kernel.py"
-        if not py.is_file():
-            raise FileNotFoundError(
-                f"{py.name} not found under {kernel_dir.name}/")
-        return py, py
+        # Per-DSL entry first (e.g. ``<op>_kernel.cpp`` for a pure-C++
+        # DSL whose template formats with {op_name}); fall back to legacy
+        # ``<op>_kernel.py`` so existing batch fixtures keep working
+        # (default ``kernel.py`` template doesn't include op_name).
+        canonical = adapter.entry_filename_template.format(op_name=op_name)
+        legacy = f"{op_name}_kernel.py"
+        for name in (canonical, legacy):
+            py = kernel_dir / name
+            if py.is_file():
+                return py, py
+        raise FileNotFoundError(
+            f"neither {canonical} nor {legacy} found under {kernel_dir.name}/")
 
     subdir = adapter.kernel_project_dir_name
     if not subdir:
