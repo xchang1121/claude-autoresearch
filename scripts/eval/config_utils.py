@@ -67,7 +67,7 @@ def normalize_dsl(dsl: str, backend: str = None) -> str:
     dsl = dsl.lower()
     
     # 如果已经是规范化的类型，直接返回
-    if dsl in ["triton_cuda", "triton_ascend", "triton-russia", "swft", "cuda_c", "cpp", "tilelang_npuir", "tilelang_cuda", "ascendc", "ascendc_catlass", "torch", "pypto"]:
+    if dsl in _ALL_DSLS:
         return dsl
     
     # 如果是通用的triton，需要根据backend转换
@@ -99,7 +99,7 @@ def check_dsl(dsl: str):
     Args:
         dsl: 实现类型(triton_cuda/triton_ascend/triton-russia/swft/torch/pypto等)
     """
-    valid_dsls = ["triton_cuda", "triton_ascend", "triton-russia", "swft", "cuda_c", "cpp", "tilelang_npuir", "tilelang_cuda", "ascendc", "ascendc_catlass", "torch", "pypto"]
+    valid_dsls = sorted(_ALL_DSLS)
     if dsl not in valid_dsls:
         raise ValueError(
             f"dsl must be one of {valid_dsls}. "
@@ -119,100 +119,60 @@ def check_task_type(task_type: str):
 
 # 配置依赖关系映射表
 # 注意：ascend910b*/ascend910_93* 使用相同的配置
-VALID_CONFIGS = {
-    # framework -> backend -> arch -> dsl
-    "mindspore": {
-        "ascend": {
-            "ascend910b1": ["triton_ascend", "triton-russia"],
-            "ascend910b2": ["triton_ascend", "triton-russia"],
-            "ascend910b2c": ["triton_ascend", "triton-russia"],
-            "ascend910b3": ["triton_ascend", "triton-russia"],
-            "ascend910b4": ["triton_ascend", "triton-russia"],
-            "ascend310p3": ["swft"],
-            "ascend910_9362": ["triton_ascend", "triton-russia"],
-            "ascend910_9372": ["triton_ascend", "triton-russia"],
-            "ascend910_9381": ["triton_ascend", "triton-russia"],
-            "ascend910_9382": ["triton_ascend", "triton-russia"],
-            "ascend910_9391": ["triton_ascend", "triton-russia"],
-            "ascend910_9392": ["triton_ascend", "triton-russia"],
-            "ascend950dt_95a": ["triton_ascend", "triton-russia"],
-            "ascend950pr_950z": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9572": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9574": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9575": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9576": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9577": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9578": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9579": ["triton_ascend", "triton-russia"],
-            "ascend950pr_957b": ["triton_ascend", "triton-russia"],
-            "ascend950pr_957d": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9581": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9582": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9584": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9587": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9588": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9589": ["triton_ascend", "triton-russia"],
-            "ascend950pr_958a": ["triton_ascend", "triton-russia"],
-            "ascend950pr_958b": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9591": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9592": ["triton_ascend", "triton-russia"],
-            "ascend950pr_9599": ["triton_ascend", "triton-russia"],
-        },
-    },
-    "torch": {
-        "ascend": {
-            "ascend910b1": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend910b2": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend910b2c": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend910b3": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend910b4": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend310p3": ["swft", "ascendc", "ascendc_catlass", "torch"],
-            "ascend910_9362": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend910_9372": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend910_9381": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend910_9382": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend910_9391": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend910_9392": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950dt_95a": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_950z": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9572": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9574": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9575": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9576": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9577": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9578": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9579": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_957b": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_957d": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9581": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9582": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9584": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9587": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9588": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9589": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_958a": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_958b": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9591": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9592": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-            "ascend950pr_9599": ["triton_ascend", "triton-russia", "tilelang_npuir", "ascendc", "ascendc_catlass", "torch", "pypto"],
-        },
-        "cuda": {
-            "a100": ["triton_cuda", "cuda_c", "tilelang_cuda", "torch"],
-            "h20": ["triton_cuda", "cuda_c", "tilelang_cuda", "torch"],
-            "l20": ["triton_cuda", "cuda_c", "tilelang_cuda", "torch"],
-            "rtx3090": ["triton_cuda", "cuda_c", "tilelang_cuda", "torch"],
-        },
-        "cpu": {
-            "x86_64": ["cpp"],
-            "aarch64": ["cpp"],
-        },
-    },
-    "numpy": {
-        "ascend": {
-            "ascend310p3": ["swft"]
-        },
-    }
+# Family -> SKU list. The DSL whitelist itself is derived from
+# eval.adapters.factory.DSL_REGISTRY so adapter lookup and config validation
+# cannot drift.
+_ASCEND_910_SKUS = (
+    "ascend910b1", "ascend910b2", "ascend910b2c", "ascend910b3", "ascend910b4",
+    "ascend910_9362", "ascend910_9372", "ascend910_9381",
+    "ascend910_9382", "ascend910_9391", "ascend910_9392",
+    "ascend950dt_95a",
+    "ascend950pr_950z", "ascend950pr_9572", "ascend950pr_9574", "ascend950pr_9575",
+    "ascend950pr_9576", "ascend950pr_9577", "ascend950pr_9578", "ascend950pr_9579",
+    "ascend950pr_957b", "ascend950pr_957d", "ascend950pr_9581", "ascend950pr_9582",
+    "ascend950pr_9584", "ascend950pr_9587", "ascend950pr_9588", "ascend950pr_9589",
+    "ascend950pr_958a", "ascend950pr_958b", "ascend950pr_9591", "ascend950pr_9592",
+    "ascend950pr_9599",
+)
+_ASCEND_310_SKUS = ("ascend310p3",)
+_CUDA_SKUS = ("a100", "h20", "l20", "rtx3090")
+_CPU_SKUS = ("x86_64", "aarch64")
+_FAMILY_SKUS = {
+    ("ascend", "910"): _ASCEND_910_SKUS,
+    ("ascend", "310"): _ASCEND_310_SKUS,
+    ("cuda", "any"): _CUDA_SKUS,
+    ("cpu", "any"): _CPU_SKUS,
 }
+
+
+def _build_valid_configs() -> dict:
+    from eval.adapters.factory import DSL_REGISTRY
+    configs: dict = {}
+    for name, entry in DSL_REGISTRY.items():
+        names = (name,) + tuple(entry.aliases)
+        for framework, backend, family in entry.support:
+            skus = _FAMILY_SKUS.get((backend, family), ())
+            for arch in skus:
+                dsls = (
+                    configs
+                    .setdefault(framework, {})
+                    .setdefault(backend, {})
+                    .setdefault(arch, [])
+                )
+                for dsl_name in names:
+                    if dsl_name not in dsls:
+                        dsls.append(dsl_name)
+    return configs
+
+
+VALID_CONFIGS = _build_valid_configs()
+_ALL_DSLS = frozenset(
+    dsl
+    for backend_cfg in VALID_CONFIGS.values()
+    for arch_cfg in backend_cfg.values()
+    for dsls in arch_cfg.values()
+    for dsl in dsls
+)
 
 
 def _get_config_for_arch(backend_config: dict, arch: str) -> list:

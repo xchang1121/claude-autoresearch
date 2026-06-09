@@ -1,3 +1,17 @@
+# Copyright 2026 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Pure helpers for sticky baseline anchor ownership.
 
 The eval pipeline has three callers that care about the PyTorch/ref
@@ -15,8 +29,10 @@ shapes — sidecar JSON edits, get_input_groups() returning different
 tensor shapes — would otherwise silently reuse stale baseline_metric /
 per_shape_base_us. task.yaml schema doesn't surface warmup_times /
 run_times, so they can't vary between rounds for the same task.
-Fingerprints with extra keys on `stored` are tolerated: comparisons
-only consult the keys in `current`.
+Fingerprints with extra keys on `stored` are tolerated, but
+``shape_signature`` is always present in ``current`` (possibly ``None``)
+so a stored shape-aware baseline is not reused when current shape
+descriptors disappear.
 """
 from __future__ import annotations
 
@@ -38,9 +54,7 @@ def valid_per_shape(values: Any) -> Optional[list[float]]:
 
 def _shape_signature(per_shape_descs: Any) -> Optional[str]:
     """SHA-256 hex digest of the joined descriptor strings, or None when
-    descs aren't a list-of-strings (legacy progress / non-shape ref).
-    Treating ``None`` as "no signature" lets old progress with just
-    ``num_cases`` continue to sticky on the num_cases-only path."""
+    descs aren't a non-empty list (legacy progress / non-shape ref)."""
     if not isinstance(per_shape_descs, list) or not per_shape_descs:
         return None
     joined = "\x1f".join(str(d) for d in per_shape_descs)
@@ -50,18 +64,18 @@ def _shape_signature(per_shape_descs: Any) -> Optional[str]:
 def current_fingerprint(num_cases: Any,
                         per_shape_descs: Any = None) -> dict[str, Any]:
     """Fingerprint of the eval settings that make ref timings comparable.
-    Includes ``num_cases`` and (when descs are available) a stable
-    ``shape_signature`` so same-N different-shape doesn't silently
-    reuse a stale baseline."""
-    fp: dict[str, Any] = {"num_cases": int(num_cases or 1)}
-    sig = _shape_signature(per_shape_descs)
-    if sig is not None:
-        fp["shape_signature"] = sig
-    return fp
+    Includes ``num_cases`` and a stable ``shape_signature``. The signature
+    is ``None`` when descriptors are unavailable, which still lets us
+    detect transitions from a shape-aware stored fingerprint to a
+    descriptor-less current run."""
+    return {
+        "num_cases": int(num_cases or 1),
+        "shape_signature": _shape_signature(per_shape_descs),
+    }
 
 
 def fingerprint_mismatch(stored: Any,
-                         current: dict[str, int]) -> Optional[dict[str, Any]]:
+                         current: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Return changed keys, or None when sticky reuse is allowed.
 
     Missing/empty fingerprints are tolerated for sticky override (a fresh
@@ -81,9 +95,7 @@ def fingerprint_mismatch(stored: Any,
 def exact_fingerprint_match(stored: Any,
                             current: dict[str, Any]) -> bool:
     """Strict equality on every key in ``current`` (tolerating extras on
-    ``stored``). Pre-shape-signature progress lacks the
-    ``shape_signature`` key; sticky reuse goes through the num_cases-only
-    check, and the next round's anchor refresh writes the new key."""
+    ``stored``)."""
     if not isinstance(stored, dict):
         return False
     return all(stored.get(k) == v for k, v in current.items())
