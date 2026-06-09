@@ -30,13 +30,9 @@ reach into the submodule explicitly when you need them.
 """
 # fmt: off
 from .task_layout import (
-    REF_FILE_DEFAULT,
-    primary_editable_filename, task_editable_files, pick_primary_editable,
+    REF_FILE_DEFAULT, py_stem, pick_kernel_module_file,
 )
-from .loader import (
-    TaskConfig, load_task_config,
-    py_stem, pick_kernel_module_file,
-)
+from .loader import TaskConfig, load_task_config
 from .metric_policy import (
     EvalOutcome, EvalResult, check_constraints, is_improvement, format_result_summary,
 )

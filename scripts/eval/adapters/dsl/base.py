@@ -119,14 +119,13 @@ class DSLAdapter(ABC):
     # DSL's kernel project besides the wrapper itself — sources, headers,
     # build files. Single-file DSLs leave this empty.
     kernel_project_files: list = []
-    # Primary editable filename — position [0] in ``TaskConfig.editable_files``.
-    # Format-string with optional ``{op_name}`` slot. The "primary" is the
-    # file the LLM mainly works on: ModelNew wrapper for triton / tilelang
-    # / pypto / catlass / torch, meta-Python for ascendc. Pure C++ DSLs
-    # without any Python entry would override to e.g.
-    # ``"{op_name}_kernel.cpp"``. Consumers should NOT assume this is
-    # Python — check ``static_check_via_python_ast`` for that.
-    primary_editable_template: str = "kernel.py"
+    # Op entry filename — the file the LLM mainly edits. Format-string
+    # with optional ``{op_name}`` slot. ModelNew wrapper for triton /
+    # tilelang / pypto / catlass / torch; meta-Python for ascendc; a
+    # pure-C++ DSL would override to ``"{op_name}_kernel.cpp"`` etc.
+    # Consumers should NOT assume Python — check
+    # ``static_check_via_python_ast`` for that.
+    entry_filename_template: str = "kernel.py"
 
     @abstractmethod
     def benchmark_impl(self, impl_func_name: str, inputs: str,

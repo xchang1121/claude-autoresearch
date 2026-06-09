@@ -13,15 +13,18 @@ of hardcoding filenames.
   task_dir/
       reference.py          ← REF_FILE_DEFAULT, PyTorch Model + get_inputs
                               (single file, DSL-agnostic)
-      <primary_editable>    ← editable_files[0], adapter-driven
-                              (kernel.py for triton / tilelang / pypto /
-                               catlass wrapper / ascendc meta-Python;
-                               <op>_kernel.cpp for hypothetical pure-C++
-                               DSLs, etc.)
-      <project_subtree>/    ← multi-file DSLs only (e.g. catlass_op/),
-                              listed in editable_files[1:] from
+      <entry_file>          ← adapter.entry_filename_template, the file
+                              the LLM mainly edits (kernel.py for triton /
+                               tilelang / pypto / catlass wrapper /
+                               ascendc meta-Python; <op>_kernel.cpp for
+                               hypothetical pure-C++ DSLs, etc.)
+      <project_subtree>/    ← multi-file DSLs only (e.g. catlass_op/);
+                              filenames + structure from
                               adapter.kernel_project_files
-      task.yaml             ← TaskConfig (ref_file, editable_files, ...)
+      task.yaml             ← TaskConfig (ref_file, editable_files, ...);
+                              editable_files = [entry_file, *project_files]
+                              (a flat YAML list — consumers ask the
+                              adapter for the entry file, not index [0])
       program.md / SKILL.md ← agent instructions
       .git/                 ← per-task baseline + per-KEEP commit history
       .ar_state/            ← phase machine, plan, history, report
@@ -44,13 +47,13 @@ of hardcoding filenames.
           manifest.yaml | manifest.json
           <ref_dir>/<op_name>_ref.py
           <kernel_dir>/<op_name>/
-              <primary_editable>        # adapter.primary_editable_template
+              <entry_file>              # adapter.entry_filename_template
               <kernel_project_dir>/     # adapter.kernel_project_dir_name
                   kernel/, include/, src/, CMakeLists.txt, ...
 
-  Resolution of which case fires is owned by
-  ``batch/manifest.py::resolve_kernel_paths_for_op`` — the per-DSL rule
-  has a single owner; ``batch/discover.py`` delegates to it.
+  :func:`resolve_kernel_paths_for_op` is the single owner of the per-DSL
+  rule that turns ``<kernel_dir>`` + ``op_name`` into a concrete pair of
+  paths; ``batch/discover.py`` and ``batch/manifest.py`` delegate to it.
 
 ================================================================================
 3. DSL-adapter knobs that drive the layout
@@ -60,18 +63,18 @@ The base :class:`DSLAdapter` (``eval/adapters/dsl/base.py``) exposes the
 structural metadata; this module documents what each knob means for the
 layout:
 
-  primary_editable_template (str)
-      Format-string filename for ``editable_files[0]`` — the file the
-      LLM mainly works on. ``{op_name}`` slot supported but typically
-      unused (single literal "kernel.py" works for every Python-style
-      DSL). Pure C++ DSLs override to e.g. ``"{op_name}_kernel.cpp"``.
+  entry_filename_template (str)
+      Format-string filename for the op's entry file — the file the LLM
+      mainly works on. ``{op_name}`` slot supported but typically unused
+      (single literal "kernel.py" works for every Python-style DSL).
+      Pure C++ DSLs override to e.g. ``"{op_name}_kernel.cpp"``.
 
   kernel_arg_is_directory (bool)
       False (default) → ``--kernel`` is a Python file. The wrapper is
-      the kernel; ``editable_files = [primary_editable]``.
-      True → ``--kernel`` is a directory containing a sibling Python
-      wrapper + a per-DSL project subtree. ``editable_files =
-      [primary_editable] + kernel_project_files``.
+      the kernel; ``editable_files = [entry_file]``.
+      True → ``--kernel`` is a directory containing a sibling entry file
+      + a per-DSL project subtree. ``editable_files = [entry_file] +
+      kernel_project_files``.
 
   kernel_project_dir_name (Optional[str])
       Subdirectory name (relative to per-op root) holding the project
@@ -80,39 +83,41 @@ layout:
 
   kernel_project_files (list)
       Path entries (files or directories) that belong to the DSL's
-      kernel project besides the Python wrapper — sources, headers,
-      build scripts. Listed in ``editable_files[1:]``. Single-file DSLs
-      leave empty.
+      kernel project besides the entry file — sources, headers, build
+      scripts. Single-file DSLs leave empty.
 
   static_check_via_python_ast (bool)
-      True iff ``editable_files[0]`` is Python source CodeChecker should
+      True iff the entry file is Python source CodeChecker should
       ``ast.parse``. False for ascendc (meta-Python that exec's into
       string vars but doesn't define ``ModelNew``) and any pure-C++
-      adapter. NOT the same as "primary editable is .py" — ascendc's
-      primary is .py but isn't ast-checkable.
+      adapter. NOT the same as "entry file is .py" — ascendc's entry is
+      .py but isn't ast-checkable.
 
   needs_binary_io (bool)
       True iff the DSL uses file-based tensor I/O (swft).
 
 ================================================================================
-4. Consumer rules (how to read editable_files / ref_file)
+4. Consumer rules (how to read the entry file / ref file)
 ================================================================================
 
 Any consumer reading from a task_dir should follow these rules instead
-of hardcoding ``"reference.py"`` / ``"kernel.py"``:
+of hardcoding ``"reference.py"`` / ``"kernel.py"`` (or indexing a list):
 
   Want the reference module path → ``task_dir / config.ref_file``
       ``config.ref_file`` defaults to ``REF_FILE_DEFAULT``.
 
-  Want the LLM-edited primary file → ``task_dir / config.editable_files[0]``
-      What the wrapper is named is DSL-driven. Don't assume Python; for
-      "is this a parseable Python module?" check
-      ``adapter.static_check_via_python_ast``.
+  Want the LLM-edited entry file → ask the adapter
+      ``task_dir / adapter.entry_filename_template.format(op_name=...)``.
+      Don't assume Python — check
+      ``adapter.static_check_via_python_ast`` for parseability.
 
   Want the full kernel project for handoff → iterate ``config.editable_files``
-      Each entry may be a file or a directory; copy / tar / pass as
-      ``--kernel`` accordingly.
+      The YAML list captures what scaffold wrote; each entry may be a
+      file or a directory; copy / tar / pass as ``--kernel`` accordingly.
 """
+
+from pathlib import Path
+from typing import Tuple
 
 
 # Reference file written by every AR scaffolder. Per-task overridable via
@@ -123,43 +128,69 @@ of hardcoding ``"reference.py"`` / ``"kernel.py"``:
 REF_FILE_DEFAULT = "reference.py"
 
 
-def primary_editable_filename(adapter, op_name: str) -> str:
-    """Resolve the DSL adapter's ``primary_editable_template`` into a
-    concrete filename.
-
-    Thin wrapper so consumers don't repeat the ``.format(op_name=...)``
-    pattern (and so a future template that takes more slots can be
-    threaded through one place). Returns whatever string the adapter
-    declared; caller should not assume Python (.py).
-    """
-    return adapter.primary_editable_template.format(op_name=op_name)
+def py_stem(name: str) -> str:
+    """Strip a trailing ``.py`` extension. Idempotent. Used at the
+    eval_kernel / worker / eval_client boundary because eval_kernel's
+    CLI takes ``--ref-file <stem>`` (no extension) while
+    ``TaskConfig.ref_file`` carries the basename WITH ``.py``."""
+    return name[:-3] if name.endswith(".py") else name
 
 
-def task_editable_files(adapter, op_name: str) -> list:
-    """Build the ``task.yaml: editable_files`` list for a given DSL.
+def pick_kernel_module_file(editable_files: list,
+                            default: str = "kernel.py") -> str:
+    """Return the importable Python wrapper from task.yaml editable_files.
 
-    Returns ``[primary] + adapter.kernel_project_files`` —
-    position [0] is the LLM's primary edit target (per
-    :func:`primary_editable_filename`); positions [1:] are project
-    subtree entries declared by the adapter (catlass's ``catlass_op/``
-    etc.). Single-file DSLs (triton / tilelang / pypto / ascendc) end up
-    with a one-element list.
-    """
-    return [primary_editable_filename(adapter, op_name)] + list(
-        adapter.kernel_project_files)
+    Multi-file DSLs may list project directories or headers alongside
+    the wrapper. Eval still needs a Python module name for eval_kernel.py,
+    so prefer the first ``.py`` entry and fall back to the legacy
+    ``kernel.py`` convention."""
+    for path in editable_files or []:
+        s = str(path)
+        if s.endswith(".py"):
+            return s
+    return default
 
 
-def pick_primary_editable(editable_files, default: str = "kernel.py") -> str:
-    """Return ``editable_files[0]`` with a defensive fallback for the
-    degraded case where ``editable_files`` failed to load.
+def resolve_kernel_paths_for_op(adapter, kernel_dir: Path,
+                                op_name: str) -> Tuple[Path, Path]:
+    """Per-DSL kernel layout resolver for batch-mode (``<kernel_dir>/<op>``).
+    Returns ``(kernel_arg, python_module)``:
 
-    ``loader.py`` refuses an empty list at load time, so on the happy
-    path this is just ``editable_files[0]``. The fallback only fires
-    when ``editable_files`` is falsy (None / empty), which means the
-    task is already broken; the placeholder ``"kernel.py"`` makes the
-    eventual "file not found" error name something concrete instead of
-    failing on IndexError.
-    """
-    if not editable_files:
-        return default
-    return editable_files[0]
+    * ``kernel_arg`` is what's passed to ``/autoresearch --kernel`` — a
+      file for single-file DSLs, a project directory for multi-file ones.
+    * ``python_module`` is always the ``.py`` wrapper batch/verify.py
+      needs to compile + import + smoke-run.
+
+    Single-file DSLs (``adapter.kernel_arg_is_directory=False``):
+        ``<kernel_dir>/<op>_kernel.py`` — both kernel_arg and python_module.
+
+    Multi-file DSLs (catlass etc.):
+        ``<kernel_dir>/<op>/<adapter.kernel_project_dir_name>/`` (kernel_arg)
+        + sibling entry file named by ``adapter.entry_filename_template``
+        or ``<op>_kernel.py`` (KernelBench legacy)."""
+    kernel_dir = Path(kernel_dir)
+    if not adapter.kernel_arg_is_directory:
+        py = kernel_dir / f"{op_name}_kernel.py"
+        if not py.is_file():
+            raise FileNotFoundError(
+                f"{py.name} not found under {kernel_dir.name}/")
+        return py, py
+
+    subdir = adapter.kernel_project_dir_name
+    if not subdir:
+        raise ValueError(
+            f"DSL adapter {type(adapter).__name__} flags "
+            f"kernel_arg_is_directory=True but leaves "
+            f"kernel_project_dir_name unset")
+    op_root = kernel_dir / op_name
+    kernel_arg = op_root / subdir
+    if not kernel_arg.is_dir():
+        raise FileNotFoundError(
+            f"{kernel_arg.relative_to(kernel_dir.parent)} not found")
+    canonical = adapter.entry_filename_template.format(op_name=op_name)
+    for name in (canonical, f"{op_name}_kernel.py"):
+        cand = op_root / name
+        if cand.is_file():
+            return kernel_arg, cand
+    raise FileNotFoundError(
+        f"{op_root.name}/ has no sibling {canonical} or {op_name}_kernel.py")

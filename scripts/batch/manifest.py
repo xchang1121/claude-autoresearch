@@ -76,46 +76,21 @@ def load_manifest(manifest_path: Path) -> dict:
 
 def resolve_kernel_paths_for_op(kernel_dir: Path,
                                 op_name: str) -> tuple[Path, Path]:
-    """Return (kernel_arg, python_module) for one op.
-
-    kernel_arg is what batch/run.py passes to /autoresearch --kernel. It
-    is a file for single-file DSLs and a project directory for multi-file
-    DSLs. python_module is always the importable wrapper used by
-    batch/verify.py.
-    """
+    """Thin wrapper around ``task_layout.resolve_kernel_paths_for_op``
+    that hooks settings (``target_dsl()``) + maps the layout-layer
+    exceptions into ``ManifestError`` for uniform batch error format."""
     scripts_dir = str(Path(__file__).resolve().parent.parent)
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
     from utils.settings import target_dsl  # noqa: E402
     from eval.adapters.factory import get_dsl_adapter  # noqa: E402
-
-    adapter = get_dsl_adapter(target_dsl())
-    if not adapter.kernel_arg_is_directory:
-        py = kernel_dir / f"{op_name}_kernel.py"
-        if not py.is_file():
-            raise ManifestError(f"{py.name} not found under {kernel_dir.name}/")
-        return py, py
-
-    subdir = adapter.kernel_project_dir_name
-    if not subdir:
-        raise ManifestError(
-            f"DSL adapter {type(adapter).__name__} sets "
-            "kernel_arg_is_directory=True but has no kernel_project_dir_name")
-    op_root = kernel_dir / op_name
-    kernel_arg = op_root / subdir
-    if not kernel_arg.is_dir():
-        raise ManifestError(
-            f"{kernel_arg.relative_to(kernel_dir.parent)} not found")
-
-    # Primary editable per DSL (default "kernel.py"; pure C++ DSLs would
-    # override). Legacy KernelBench fallback: ``<op>_kernel.py``.
-    canonical = adapter.primary_editable_template.format(op_name=op_name)
-    for name in (canonical, f"{op_name}_kernel.py"):
-        py = op_root / name
-        if py.is_file():
-            return kernel_arg, py
-    raise ManifestError(
-        f"{op_root.name}/ has no sibling {canonical} or {op_name}_kernel.py")
+    from task_config.task_layout import (  # noqa: E402
+        resolve_kernel_paths_for_op as _resolve,
+    )
+    try:
+        return _resolve(get_dsl_adapter(target_dsl()), kernel_dir, op_name)
+    except (FileNotFoundError, ValueError) as e:
+        raise ManifestError(str(e)) from e
 
 
 def resolve_cases(batch_dir: Path, manifest: dict, mode: str) -> list[dict]:

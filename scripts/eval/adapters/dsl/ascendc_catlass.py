@@ -271,8 +271,8 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
                          task_info: Optional[Dict[str, Any]] = None,
                          config: Optional[Dict[str, Any]] = None) -> None:
         """Write the primary wrapper + copy catlass_op tree into verify_dir."""
-        wrapper_name = self.primary_editable_template.format(op_name=op_name)
-        kernel_file = os.path.join(verify_dir, wrapper_name)
+        kernel_file = os.path.join(
+            verify_dir, self.entry_filename_template.format(op_name=op_name))
         with open(kernel_file, "w", encoding="utf-8") as f:
             f.write(impl_code)
 
@@ -300,7 +300,7 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
     def expected_artifacts(self, verify_dir: str, op_name: str,
                            framework: str, bench_type: str,
                            dsl_filename_hint: str) -> list:
-        wrapper_name = self.primary_editable_template.format(op_name=op_name)
+        wrapper_name = self.entry_filename_template.format(op_name=op_name)
         return [
             os.path.join(verify_dir, wrapper_name),
             os.path.join(verify_dir, "catlass_op", "CMakeLists.txt"),
@@ -331,7 +331,7 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
                            op_name: Optional[str] = None) -> tuple:
         """``kernel_arg`` is the catlass_op directory; the Python wrapper
         is the sibling primary editable (per adapter's
-        ``primary_editable_template``) — or ``<op_name>_kernel.py`` when
+        ``entry_filename_template``) — or ``<op_name>_kernel.py`` when
         the canonical name isn't there: KernelBench dumps name the
         wrapper ``<op>_kernel.py``."""
         if not os.path.isdir(kernel_arg):
@@ -340,7 +340,7 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
                 f"directory; got {kernel_arg!r}"
             )
         parent = os.path.dirname(kernel_arg)
-        canonical = self.primary_editable_template.format(op_name=op_name or "")
+        canonical = self.entry_filename_template.format(op_name=op_name or "")
         candidates = [canonical]
         if op_name:
             candidates.append(f"{op_name}_kernel.py")

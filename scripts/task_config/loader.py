@@ -17,41 +17,13 @@ import yaml
 
 
 # ---------------------------------------------------------------------------
-# File-name constants + helpers
-# ---------------------------------------------------------------------------
-# Layout conventions (REF_FILE_DEFAULT + primary_editable_filename +
-# task_editable_files + pick_primary_editable) live in the sibling
-# task_layout module so single-file vs multi-file DSL semantics have
-# one neighbourhood. Re-export REF_FILE_DEFAULT here for back-compat —
-# consumers that need just the constant continue importing from
-# task_config.loader; new consumers reach into task_layout directly.
+# File-name conventions (REF_FILE_DEFAULT / py_stem / pick_kernel_module_file
+# / resolve_kernel_paths_for_op) live in sibling task_layout module.
+# Re-exported here for back-compat with existing imports.
 
-from .task_layout import REF_FILE_DEFAULT  # noqa: E402, F401
-
-
-def py_stem(name: str) -> str:
-    """Strip a trailing `.py` extension. Idempotent: passing in a stem
-    returns it unchanged. Used at the eval_kernel / worker / eval_client
-    boundary because eval_kernel's CLI takes `--ref-file <stem>` (no
-    extension) while TaskConfig.ref_file carries the basename WITH `.py`.
-    """
-    return name[:-3] if name.endswith(".py") else name
-
-
-def pick_kernel_module_file(editable_files: list,
-                            default: str = "kernel.py") -> str:
-    """Return the importable Python wrapper from task.yaml editable_files.
-
-    Multi-file DSLs may list project directories or headers alongside
-    the wrapper. Eval still needs a Python module name for eval_kernel.py,
-    so prefer the first `.py` entry and fall back to the legacy
-    `kernel.py` convention.
-    """
-    for path in editable_files or []:
-        s = str(path)
-        if s.endswith(".py"):
-            return s
-    return default
+from .task_layout import (  # noqa: E402, F401
+    REF_FILE_DEFAULT, py_stem, pick_kernel_module_file,
+)
 
 
 def _is_contained(path: str) -> bool:

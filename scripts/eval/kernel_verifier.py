@@ -839,7 +839,7 @@ if __name__ == "__main__":
             framework_model_import = framework_adapter.get_framework_import(
                 self.op_name,
                 is_dynamic_shape,
-                inputs_factory_name=(self.framework_factory_names or {}).get("inputs_factory"),
+                inputs_factory_name=self._resolve_dyn_factory(),
             )
             logger.debug(
                 f"[{self.op_name}] Framework model import 生成成功 "
@@ -1025,24 +1025,42 @@ if __name__ == "__main__":
             logger.error(f"AscendC项目生成失败: {e}")
             raise Exception(f"AscendC项目生成失败: {e}")
 
-    def _detect_dynamic_shape(self) -> bool:
-        """检测框架代码是否走动态 shape 
+    # Accepted multi-shape factory names (any one triggers dynamic mode).
+    # ``get_inputs_dyn_list`` — legacy (internal benchmark refs);
+    # ``get_input_groups`` — NPUKernelBench + WA new convention. The
+    # framework adapter aliases whichever the ref defines back to
+    # ``get_inputs_dyn_list`` (the template's internal local name).
+    _DYN_FACTORY_NAMES = ("get_inputs_dyn_list", "get_input_groups")
 
-        Returns:
-            bool: True if dynamic-shape semantics apply, False otherwise.
-        """
-        declared = (self.framework_factory_names or {}).get("is_dynamic_shape")
-        if isinstance(declared, bool):
-            return declared
+    def _resolve_dyn_factory(self) -> Optional[str]:
+        """Name of the ref's multi-shape factory, or None for single-shape.
+        Explicit ``framework_factory_names.inputs_factory`` wins; else AST-
+        scan the ref source for one of :attr:`_DYN_FACTORY_NAMES`."""
+        explicit = (self.framework_factory_names or {}).get("inputs_factory")
+        if explicit:
+            return explicit
         code = self.framework_code or ""
         try:
             tree = ast.parse(code)
         except SyntaxError:
-            return "get_inputs_dyn_list" in code
-        return any(
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "get_inputs_dyn_list"
-            for node in tree.body
-        )
+            for n in self._DYN_FACTORY_NAMES:
+                if n in code:
+                    return n
+            return None
+        for node in tree.body:
+            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name in self._DYN_FACTORY_NAMES):
+                return node.name
+        return None
+
+    def _detect_dynamic_shape(self) -> bool:
+        """True iff the ref module exposes a multi-shape factory (auto-
+        detected) or ``framework_factory_names.is_dynamic_shape=True``
+        is explicitly declared."""
+        declared = (self.framework_factory_names or {}).get("is_dynamic_shape")
+        if isinstance(declared, bool):
+            return declared
+        return self._resolve_dyn_factory() is not None
 
     @staticmethod
     def _prepare_code_lines(code_snippet: Any) -> List[str]:
@@ -1512,7 +1530,7 @@ if __name__ == "__main__":
             framework_model_import = framework_adapter.get_framework_import(
                 self.op_name,
                 is_dynamic_shape,
-                inputs_factory_name=self.framework_factory_names.get("inputs_factory"),
+                inputs_factory_name=self._resolve_dyn_factory(),
             )
             logger.debug(f"[{self.op_name}] Framework model import生成成功 (长度: {len(framework_model_import)})")
 
@@ -1782,7 +1800,7 @@ if __name__ == "__main__":
             framework_model_import = framework_adapter.get_framework_import(
                 self.op_name,
                 is_dynamic_shape,
-                inputs_factory_name=self.framework_factory_names.get("inputs_factory"),
+                inputs_factory_name=self._resolve_dyn_factory(),
             )
             dsl_imports = dsl_adapter.get_import_statements(self.framework)
             dsl_imports += dsl_adapter.get_runtime_env_override_code(
