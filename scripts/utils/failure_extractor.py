@@ -138,58 +138,6 @@ PATTERNS: list[tuple[str, re.Pattern, Callable[[re.Match], dict], str]] = [
         "ACL runtime error — usually a downstream effect of an earlier kernel "
         "crash (check aivec_exception / kernel_task_error above for the cause).",
     ),
-    # --- Multi-shape correctness summary (emitted by compare_outputs_per_case) ---
-    (
-        "multi_shape_correctness_fail",
-        re.compile(
-            r"\[verify\] CORRECTNESS_SUMMARY: failed=(\d+)/(\d+) "
-            r"failed_idx=\[([^\]]*)\] worst_case=(\d+|None) "
-            r"max_abs=([\d.eE+-]+|None)"
-        ),
-        lambda m: {
-            "failed_count": int(m.group(1)),
-            "total_cases": int(m.group(2)),
-            "failed_idx": [int(x.strip()) for x in m.group(3).split(",") if x.strip()],
-            "worst_case": int(m.group(4)) if m.group(4) != "None" else None,
-            "worst_max_abs": (float(m.group(5)) if m.group(5) != "None" else None),
-        },
-        "Multi-shape verify: at least one input shape failed the allclose "
-        "check. Inspect FAILED_SHAPES (next line) for the offending shape(s); "
-        "common multi-shape pitfalls — kernel hard-codes block size for one "
-        "shape; assumes 1D normalize axis but JSON has multi-axis; doesn't "
-        "handle the dtype mix (fp16/bf16/fp32) or the 4-D inputs in the case list.",
-    ),
-    (
-        "multi_shape_failed_shapes",
-        re.compile(r"\[verify\] FAILED_SHAPES: (.+)$", re.MULTILINE),
-        lambda m: {"shapes_text": m.group(1).strip()[:1000]},
-        "Per-case shape descriptors for the failing inputs. Compare them to "
-        "the passing cases to find the dimensional / dtype assumption your "
-        "kernel violates.",
-    ),
-    # --- Correctness check output (allclose-style format emitted by
-    # correctness.py). Pass: |diff| <= atol + rtol*|ref| element-wise;
-    # the line we look for is the failure variant (no leading "OK").
-    (
-        "correctness_fail",
-        re.compile(
-            r"(out\d+):\s*max_abs_err=([\d.eE+-]+)\s+"
-            r"max_allowed=([\d.eE+-]+)\s+rtol=([\d.eE+-]+)\s+"
-            r"atol=([\d.eE+-]+)"
-        ),
-        lambda m: {
-            "output": m.group(1),
-            "max_abs_err": float(m.group(2)),
-            "max_allowed": float(m.group(3)),
-            "rtol": float(m.group(4)),
-            "atol": float(m.group(5)),
-        },
-        "Numerical mismatch fails the allclose gate "
-        "(|diff| <= atol + rtol*|ref|, per-dtype tolerance). "
-        "Common causes: wrong reduction order producing accumulated drift; "
-        "missing 1/K or other scale factor; integer overflow in index math; "
-        "off-by-one in window bounds.",
-    ),
     # --- Import / symbol missing ---
     (
         "import_error",

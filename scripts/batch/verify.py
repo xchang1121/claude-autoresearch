@@ -6,10 +6,15 @@ Kernel.py also runs the DSL-aware static CodeChecker. Triton kernels must
 use and launch @triton.jit kernels; CATLASS wrappers must call
 torch.ops.catlass.* instead of replacing the kernel with torch compute.
 
-Tier 2 (--full): LOCAL smoke test. Loads both modules on `torch.npu:0`
-(or CPU), runs them, allclose via `utils.correctness`. NOT a proxy for
-the batch eval path — `batch/run.py` defaults to a remote worker, and
-a green --full says only "kernel runs locally".
+Tier 2 (--full): FORMAL verify-only pass. It materializes a temporary
+task directory and calls ``scripts/engine/eval_kernel.py --phases verify``,
+so it reuses the same ``KernelVerifier`` + ``DSLAdapter`` chain as batch
+eval / worker correctness, minus profiling.
+
+For multi-file DSLs (ascendc_catlass), ``case["kernel"]`` is a directory
+that gets passed to ``/autoresearch --kernel``, while
+``case["kernel_module"]`` is the sibling ``kernel.py`` (or
+``<op>_kernel.py``) that tier-1 imports and tier-2 verifies.
 
 Each op runs in its own subprocess. Results: <batch_dir>/verify_results.json.
 
@@ -23,18 +28,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import manifest as mf
-# Reach up one level for the shared precision module - single source of
-# truth so verify.py and autoresearch's per-round eval can't drift.
+# Reach up one level for shared batch/eval helpers.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils.correctness import compare_outputs_per_case  # noqa: E402
-from utils.input_groups import resolve as _resolve_groups  # noqa: E402
+from utils.hw_detect import derive_arch  # noqa: E402
 from utils.code_checker import CodeChecker  # noqa: E402
 from utils.settings import (  # noqa: E402
     batch_tier1_timeout, batch_tier2_timeout, target_backend, target_dsl,
@@ -133,94 +138,182 @@ def _tier1_inspect(path: Path, required: tuple[str, ...]) -> dict:
 
 
 def _tier2_run(ref_path: Path, kernel_path: Path) -> dict:
-    """Run ref + kernel, compare outputs via the shared correctness module
-    (autoresearch's eval calls into the same `compare_outputs`)."""
+    """Run the formal KernelVerifier-backed verify path on a temp task dir."""
     out: dict = {"status": "skip", "msg": "", "max_abs_diff": None}
 
     try:
-        import torch  # type: ignore
-    except ImportError as e:
-        out["status"] = "ERROR"
-        out["msg"] = f"torch import failed: {e}"
-        return out
-    try:
-        import torch_npu  # type: ignore  # noqa: F401
-    except Exception:
-        pass  # not on Ascend; fine — kernel will pick its own device
-
-    import importlib.util
-    try:
-        ref_spec = importlib.util.spec_from_file_location("_v_ref", str(ref_path))
-        ref_mod = importlib.util.module_from_spec(ref_spec)  # type: ignore[arg-type]
-        ref_spec.loader.exec_module(ref_mod)  # type: ignore[union-attr]
-        kernel_spec = importlib.util.spec_from_file_location("_v_kernel", str(kernel_path))
-        kernel_mod = importlib.util.module_from_spec(kernel_spec)  # type: ignore[arg-type]
-        kernel_spec.loader.exec_module(kernel_mod)  # type: ignore[union-attr]
+        import yaml
+        from eval.adapters.factory import get_dsl_adapter
+        from task_config.task_layout import REF_FILE_DEFAULT
     except Exception as e:
         out["status"] = "ERROR"
-        out["msg"] = f"import: {type(e).__name__}: {e}"
+        out["msg"] = f"formal verify import failed: {type(e).__name__}: {e}"
         return out
 
+    def _op_name_from_ref(path: Path) -> str:
+        stem = path.stem
+        return stem[:-4] if stem.endswith("_ref") else stem
+
+    def _copy_ref_sidecars(src_ref: Path, task_dir: Path) -> list[str]:
+        copied: list[str] = []
+        ref_stem = src_ref.stem
+        dst_ref_stem = Path(REF_FILE_DEFAULT).stem
+        for sibling in sorted(src_ref.parent.iterdir()):
+            if sibling.name.startswith(".") or not sibling.is_file():
+                continue
+            ext = sibling.suffix.lower()
+            if ext not in (".json", ".pt", ".npz"):
+                continue
+            stem = sibling.stem
+            if stem != ref_stem and not stem.startswith(ref_stem + "_"):
+                continue
+            dest_name = f"{dst_ref_stem}{ext}" if stem == ref_stem else sibling.name
+            shutil.copy2(sibling, task_dir / dest_name)
+            copied.append(dest_name)
+        return copied
+
+    op_name = _op_name_from_ref(ref_path)
+    backend = target_backend()
+    dsl = target_dsl()
+    arch = derive_arch(0, backend=backend)
+    if not arch:
+        out["status"] = "ERROR"
+        out["msg"] = "could not derive local arch via hardware probe"
+        return out
+
+    adapter = get_dsl_adapter(dsl)
+    project_name = adapter.kernel_project_dir_name or "catlass_op"
+    temp_root = Path(tempfile.mkdtemp(prefix=f"_batch_verify_{op_name}_"))
+    task_dir = temp_root / "task"
+    sidecar = task_dir / ".eval_result.json"
     try:
-        init_args = ref_mod.get_init_inputs()
-        cases = _resolve_groups(ref_mod)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        entry_name = adapter.entry_filename_template.format(op_name=op_name)
+        shutil.copy2(ref_path, task_dir / REF_FILE_DEFAULT)
+        shutil.copy2(kernel_path, task_dir / entry_name)
+
+        editable_files = [entry_name]
+        if adapter.kernel_arg_is_directory:
+            project_src = kernel_path.parent / project_name
+            shutil.copytree(project_src, task_dir / project_name)
+            for rel in getattr(adapter, "kernel_project_files", []) or []:
+                if rel not in editable_files:
+                    editable_files.append(rel)
+
+        data_files = _copy_ref_sidecars(ref_path, task_dir)
+        task_yaml = {
+            "name": op_name,
+            "arch": arch,
+            "editable_files": editable_files,
+            "devices": [0],
+            "eval": {"timeout": TIER2_TIMEOUT},
+            "agent": {
+                "ref_file": REF_FILE_DEFAULT,
+                "max_rounds": 1,
+            },
+        }
+        if data_files:
+            task_yaml["data_files"] = data_files
+        if dsl == "ascendc_catlass":
+            task_yaml["catlass"] = {"op_dir": project_name}
+
+        (task_dir / "task.yaml").write_text(
+            yaml.safe_dump(task_yaml, default_flow_style=False, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        scripts_dir = Path(__file__).resolve().parent.parent
+        cmd = [
+            sys.executable,
+            str(scripts_dir / "engine" / "eval_kernel.py"),
+            "--task-dir", str(task_dir),
+            "--op-name", op_name,
+            "--kernel-file", Path(entry_name).stem,
+            "--ref-file", Path(REF_FILE_DEFAULT).stem,
+            "--device-id", "0",
+            "--backend", backend,
+            "--dsl", dsl,
+            "--arch", arch,
+            "--verify-timeout", str(TIER2_TIMEOUT),
+            "--phases", "verify",
+            "--output", str(sidecar),
+        ]
+        if dsl == "ascendc_catlass":
+            cmd += ["--catlass-op-dir", project_name]
+
+        env = os.environ.copy()
+        env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=TIER2_TIMEOUT + 30,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            out["status"] = "ERROR"
+            out["msg"] = f"formal verify timeout after {TIER2_TIMEOUT + 30}s"
+            return out
+
+        if not sidecar.exists():
+            out["status"] = "ERROR"
+            combined = (proc.stderr or "") + "\n" + (proc.stdout or "")
+            out["msg"] = f"formal verify produced no sidecar; rc={proc.returncode}"
+            out["stderr_tail"] = combined[-1000:]
+            return out
+
+        raw = json.loads(sidecar.read_text(encoding="utf-8"))
     except Exception as e:
         out["status"] = "ERROR"
-        out["msg"] = f"get_inputs/get_input_groups: {type(e).__name__}: {e}"
+        out["msg"] = f"formal verify setup failed: {type(e).__name__}: {e}"
         return out
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
 
-    # NPU when available; CPU otherwise. Kernels allocate output buffers
-    # via torch.empty_like(x), so CPU input → CPU output buffer → garbage.
-    npu_mod = getattr(torch, "npu", None)
-    if npu_mod is not None and getattr(npu_mod, "is_available", lambda: False)():
-        device = torch.device("npu:0")
-    else:
-        device = torch.device("cpu")
+    verify = raw.get("verify") if isinstance(raw, dict) else None
+    verify = verify if isinstance(verify, dict) else {}
+    per_case = list(verify.get("per_case") or [])
+    out["max_abs_diff"] = verify.get("worst_max_abs_diff")
+    out["num_cases"] = int(verify.get("num_cases") or len(per_case) or 0)
+    out["error_source"] = verify.get("error_source")
+    out["failed_indices"] = list(verify.get("failed_indices") or [])
+    if per_case:
+        out["per_case"] = per_case
+    diagnostics = list(verify.get("diagnostics") or [])
+    if diagnostics:
+        out["diagnostics"] = diagnostics
 
-    try:
-        ref = ref_mod.Model(*init_args).to(device).eval()
-        new = kernel_mod.ModelNew(*init_args).to(device).eval()
-    except Exception as e:
-        out["status"] = "ERROR"
-        out["msg"] = f"construct: {type(e).__name__}: {e}"
-        return out
-
-    def _to_list(x):
-        if isinstance(x, (tuple, list)):
-            return list(x)
-        return [x]
-
-    def _to_device(seq):
-        return [t.to(device) if hasattr(t, "to") else t for t in seq]
-
-    out_ref_per_case: list = []
-    out_new_per_case: list = []
-    try:
-        with torch.no_grad():
-            for case in cases:
-                inp = _to_device(list(case))
-                out_ref_per_case.append(_to_list(ref(*inp)))
-                out_new_per_case.append(_to_list(new(*inp)))
-    except Exception as e:
-        out["status"] = "ERROR"
-        out["msg"] = f"forward: {type(e).__name__}: {e}"
-        return out
-
-    cmp = compare_outputs_per_case(out_ref_per_case, out_new_per_case)
-    out["max_abs_diff"] = cmp["max_abs_diff"]
-    out["num_cases"] = len(cases)
-    out["per_case"] = cmp["per_case"]
-    if cmp["correctness"]:
+    if raw.get("ok") and verify.get("correctness"):
         out["status"] = "PASS"
-        out["msg"] = f"OK (n={len(cases)})"
-    else:
-        out["status"] = "FAIL"
-        # Surface the first failing diagnostic — full list goes into JSON.
-        bad = next((d for d in cmp["diagnostics"] if "OK" not in d), None)
-        out["msg"] = bad or "correctness mismatch (no diagnostics)"
-        out["diagnostics"] = cmp["diagnostics"]
-    return out
+        out["msg"] = f"OK (n={out['num_cases']})"
+        return out
 
+    failure_kinds = {
+        str(item.get("failure_kind") or "")
+        for item in per_case
+        if isinstance(item, dict)
+    }
+    kernel_failure = (
+        verify.get("error_source") == "kernel"
+        or "kernel_miss" in failure_kinds
+        or any(isinstance(item, dict) and item.get("correctness") is False for item in per_case)
+    )
+    out["status"] = "FAIL" if kernel_failure else "ERROR"
+
+    for item in per_case:
+        if isinstance(item, dict) and item.get("error"):
+            out["msg"] = str(item["error"])[:160]
+            break
+    else:
+        if diagnostics:
+            out["msg"] = str(diagnostics[0])[:160]
+        else:
+            errors = raw.get("errors") if isinstance(raw, dict) else None
+            out["msg"] = str(errors or raw.get("ok") or "formal verify failed")[:160]
+    return out
 
 def _run_tier_subprocess() -> int:
     """Subprocess entry point. Writes JSON to a sidecar path on stdout's last line."""
@@ -323,7 +416,7 @@ def _verify_one(case: dict, full: bool) -> dict:
     if full:
         if tier1_ok:
             out["tier2"] = _run_subprocess(tier="2", ref=ref, kernel=kernel,
-                                           timeout=TIER2_TIMEOUT)
+                                           timeout=TIER2_TIMEOUT + 60)
         else:
             out["tier2"] = {"status": "skip",
                             "msg": "tier1 failed; skipping tier2",

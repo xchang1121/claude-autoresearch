@@ -483,12 +483,12 @@ python <repo>/scripts/engine/eval_kernel.py \
 
 ## 5. 精度容差
 
-verify（Tier 2 预检）与 `/autoresearch` 每轮 verify 共用 [`correctness.py`](scripts/utils/correctness.py)，对齐已迁移至 [`scripts/eval/adapters/framework/torch.py`](scripts/eval/adapters/framework/torch.py) 的 CANN MARE/MERE-aligned 分层容差表：
+verify（Tier 2 预检）与 `/autoresearch` 每轮 verify 现在共用 `KernelVerifier` 渲染出的 `verify_result.json`；容差逻辑由 [`scripts/eval/adapters/framework/torch.py`](scripts/eval/adapters/framework/torch.py) 注入到正式 verify 模板，采用 CANN MARE/MERE-aligned 分层容差表：
 
 - 按 ref dtype 取 `(rtol, atol, outlier_rtol, outlier_atol, outlier_ratio)`：fp32 → `(1.22e-4, 1e-5, 1.22e-3, 1e-4, 0.001)`、fp16 → `(9.77e-4, 1e-3, 9.77e-3, 1e-2, 0.005)`、bf16 → `(7.81e-3, 1e-2, 7.81e-2, 1e-1, 0.010)`，未知 dtype 回落 fp32
 - 元素级双带判定：`strict_tol = atol + rtol·|ref|`，`relaxed_tol = outlier_atol + outlier_rtol·|ref|`；`hard_fail`（超 relaxed）> 0 即 FAIL，或 `outlier`（在 strict 与 relaxed 之间）超 `outlier_ratio · total` 即 FAIL
 - 额外硬性检查：NaN 位置一致、Inf 位置 + 符号一致、bool/int 精确匹配
-- 容差表通过 [`config.yaml:precision`](config.yaml) 可覆盖，运行时由 [`utils/settings.py`](scripts/utils/settings.py) `precision_table()` 注入
+- 容差表由 framework adapter 生成并随 `KernelVerifier` verify 模板进入子进程；`batch/verify --full` 直接读取同一份 `verify_result.json` 结果
 
 ## 6. 文件与状态布局
 

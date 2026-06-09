@@ -23,45 +23,14 @@ import textwrap
 from typing import Any, Dict, Optional
 
 from eval.worker.interface import DEFAULT_EVAL_TIMEOUT_S
+from eval.catlass_runtime import arch_to_catlass_arch
 from .base import DSLAdapter
 
 logger = logging.getLogger(__name__)
 
-# KernelVerifier arch → catlass cmake arch id (2201 / 3510).
+# KernelVerifier arch -> catlass cmake arch id (2201 / 3510).
 # Pass BOTH -DNPU_ARCH and -DCATLASS_ARCH: pipeline CMakeLists vary
 # (option(NPU_ARCH) vs if(NOT DEFINED CATLASS_ARCH)).
-_ARCH_TO_CATLASS_ARCH = {
-    "ascend910b1": "2201",
-    "ascend910b2": "2201",
-    "ascend910b2c": "2201",
-    "ascend910b3": "2201",
-    "ascend910b4": "2201",
-    "ascend310p3": "2201",
-    "ascend910_9362": "2201",
-    "ascend910_9372": "2201",
-    "ascend910_9381": "2201",
-    "ascend910_9382": "2201",
-    "ascend910_9391": "2201",
-    "ascend910_9392": "2201",
-    "ascend950dt_95a": "3510",
-}
-
-
-def arch_to_catlass_arch(arch: str) -> str:
-    """Map KernelVerifier arch string to catlass cmake arch id."""
-    if arch in _ARCH_TO_CATLASS_ARCH:
-        return _ARCH_TO_CATLASS_ARCH[arch]
-    if arch.startswith("ascend950"):
-        return "3510"
-    if arch.startswith("ascend910") or arch.startswith("ascend310"):
-        return "2201"
-    raise ValueError(
-        f"Unsupported arch for ascendc_catlass: {arch}. "
-        f"Known keys include: {sorted(_ARCH_TO_CATLASS_ARCH.keys())} and ascend950* prefixes."
-    )
-
-
-# Backward-compatible alias for tests / callers
 arch_to_npu_arch = arch_to_catlass_arch
 
 
@@ -182,11 +151,14 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
         )
 
     def get_special_setup_code(self, framework: str = "torch") -> str:
-        # arch + catlass_root resolved at prepare_config() time into
-        # self._setup_arch / self._setup_catlass_root. Fall back to
-        # the ascend910b3 / env-driven defaults if prepare_config
-        # was bypassed (e.g. unit tests).
-        arch = getattr(self, "_setup_arch", None) or "ascend910b3"
+        # arch + catlass_root are resolved at prepare_config() time into
+        # self._setup_arch / self._setup_catlass_root. There is no implicit
+        # hardware default here; the formal eval path must pass config["arch"].
+        arch = getattr(self, "_setup_arch", None)
+        if not arch:
+            raise RuntimeError(
+                "ascendc_catlass requires config['arch'] before special setup runs"
+            )
         catlass_root = getattr(self, "_setup_catlass_root", None)
         catlass_arch = arch_to_catlass_arch(arch)
         catlass_root_repr = repr(catlass_root) if catlass_root else "None"

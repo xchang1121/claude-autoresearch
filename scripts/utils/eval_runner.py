@@ -22,7 +22,7 @@ Public surface:
                timeout, device_id, warmup, repeats,
                override_base_time_us) -> (verify_resp, profile_resp)
 
-Precision: allclose-style |diff| <= atol + rtol*|ref| per `correctness.py`.
+Precision: KernelVerifier verify_result.json passthrough (per-case MERE/MARE).
 """
 from __future__ import annotations
 
