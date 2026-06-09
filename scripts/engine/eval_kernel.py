@@ -233,9 +233,34 @@ async def _run_eval(args: argparse.Namespace) -> int:
     # --- Build worker + verifier ---
     log_dir = os.path.join(task_dir, ".eval_logs")
     os.makedirs(log_dir, exist_ok=True)
+    try:
+        from task_config.loader import load_task_config
+        from task_config.task_files import read_declared_files
+        cfg = load_task_config(task_dir)
+        framework_aux_files = read_declared_files(
+            task_dir,
+            getattr(cfg, "data_files", None) or [],
+            field_name="data_files",
+        )
+    except Exception as e:
+        result["ok"] = False
+        result["errors"].append(_wrap_phase_error("read_data_files", e))
+        result["verify"] = {
+            "correctness": False, "error_source": "ref",
+            "ref_source": "computed",
+            "error": f"read data_files failed: {type(e).__name__}: {e}",
+            "num_cases": 0, "per_case": [], "diagnostics": [],
+            "failed_indices": [], "worst_idx": None,
+            "worst_max_abs_diff": None,
+        }
+        return _write(1)
+
     config = {
         "log_dir": log_dir,
         "verify_timeout": args.verify_timeout,
+        "framework_aux_files": framework_aux_files,
+        "framework_module_name": args.ref_file,
+        "framework_filename": f"{args.ref_file}.py",
         **catlass_meta,
     }
     try:

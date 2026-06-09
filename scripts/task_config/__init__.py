@@ -9,8 +9,11 @@ Layout:
                         a task_dir / batch_dir" — see its module
                         docstring for the full per-DSL layout map.
     loader            — TaskConfig dataclass + load_task_config (YAML
-                        parsing). No internal deps; everyone else
-                        consumes TaskConfig from here.
+                        parsing). Uses task_files for path containment;
+                        everyone else consumes TaskConfig from here.
+    task_files        — task-local path normalization, containment checks,
+                        recursive declared-file expansion, and byte reads.
+                        Package/eval/verifier handoff share this layer.
     metric_policy     — EvalResult, is_improvement, check_constraints,
                         format_result_summary. Pure data + arithmetic;
                         no I/O. Imported by keep_or_discard, dashboard.
@@ -21,7 +24,8 @@ Layout:
                         remote ships a `package_builder` tar.gz to a
                         worker `/api/v1/run` endpoint.
     package_builder   — task.yaml + ref + editable → tar.gz bytes,
-                        for the remote transport. No deps outside loader.
+                        for the remote transport. Depends on loader +
+                        task_files only.
 
 This `__init__.py` re-exports only the names actually imported from
 outside the package. Submodule-private helpers (operator tables,

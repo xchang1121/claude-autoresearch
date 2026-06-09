@@ -41,6 +41,7 @@ class FrameworkAdapter(ABC):
         op_name: str,
         is_dynamic_shape: bool,
         inputs_factory_name: Optional[str] = None,
+        module_name: Optional[str] = None,
     ) -> str:
         """Return import statement for framework model and input functions.
 
@@ -48,6 +49,8 @@ class FrameworkAdapter(ABC):
             op_name: Operator name
             is_dynamic_shape: Whether dynamic shape is used
             inputs_factory_name: 外部脚本里输入函数名字。
+            module_name: Python module containing the reference. Defaults to
+                the legacy per-framework module name for the op.
 
         Returns:
             str: Import statement (e.g., "from {op_name}_torch import Model as FrameworkModel, get_inputs\n")

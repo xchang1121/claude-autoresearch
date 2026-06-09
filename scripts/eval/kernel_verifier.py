@@ -19,7 +19,7 @@ import logging
 import json
 import textwrap
 from datetime import datetime
-from typing import Optional, Literal, Tuple, Dict, Any, List
+from typing import Optional, Literal, Tuple, Dict, Any, List, Union
 from jinja2 import Template
 from pathlib import Path
 
@@ -182,7 +182,7 @@ class KernelVerifier:
         factory_names = self.config.get("framework_factory_names") or {}
         if not isinstance(aux_files, dict):
             raise TypeError(
-                "config['framework_aux_files'] 必须是 Dict[str, str]，"
+                "config['framework_aux_files'] 必须是 Dict[str, str|bytes]，"
                 f"实际是 {type(aux_files).__name__}",
             )
         if not isinstance(factory_names, dict):
@@ -190,8 +190,17 @@ class KernelVerifier:
                 "config['framework_factory_names'] 必须是 Dict[str, Any]，"
                 f"实际是 {type(factory_names).__name__}",
             )
-        self.framework_aux_files: Dict[str, str] = aux_files
+        self.framework_aux_files: Dict[str, Union[str, bytes]] = aux_files
         self.framework_factory_names: Dict[str, Any] = factory_names
+        legacy_framework_module = f"{self.op_name}_{self.framework}"
+        raw_module = str(
+            self.config.get("framework_module_name") or legacy_framework_module)
+        self.framework_module_name = os.path.splitext(
+            os.path.basename(raw_module))[0]
+        raw_filename = str(
+            self.config.get("framework_filename")
+            or f"{self.framework_module_name}.py")
+        self.framework_filename = os.path.basename(raw_filename)
         self.impl_func_name = impl_func_name or self.dsl_adapter.impl_func_name_template.format(
             op_name=op_name, dsl=self.dsl, framework=framework,
         )
@@ -209,20 +218,16 @@ class KernelVerifier:
         """Write the framework reference module and its sidecars to
         ``target_dir`` as a single unit.
 
-        ``target_filename`` is the .py basename to land at (defaults to
-        ``{op_name}_{framework}.py`` for verify_dir / profile_dir paths;
-        callers that need the canonical ``reference.py`` pass it
-        explicitly). Sidecars in ``self.framework_aux_files`` keyed by
-        the scaffold-default ``reference`` stem are renamed to track the
-        framework filename's stem — that way refs that derive their
-        sidecar path via ``os.path.join(os.path.dirname(__file__),
-        <stem>.json)`` resolve under whatever stem the .py landed at.
-        Nested paths and other top-level stems are written verbatim.
+        ``target_filename`` is the .py basename to land at. Sidecars in
+        ``self.framework_aux_files`` are written verbatim by their declared
+        task-relative names. Callers that want
+        ``reference.py/reference.json`` should set the framework filename and
+        import module to ``reference`` instead of relying on implicit sidecar
+        renames.
 
         Returns the absolute path of the .py file written.
         """
-        target_filename = target_filename or f"{self.op_name}_{self.framework}.py"
-        target_stem = os.path.splitext(target_filename)[0]
+        target_filename = target_filename or self.framework_filename
 
         py_path = os.path.join(target_dir, target_filename)
         try:
@@ -248,17 +253,15 @@ class KernelVerifier:
                     f"[{self.op_name}] 跳过非法 sidecar 路径: {rel_name!r}"
                 )
                 continue
-            head, tail = os.path.split(rel_name)
-            stem, ext = os.path.splitext(tail)
-            if not head and stem == "reference":
-                renamed = f"{target_stem}{ext}"
-            else:
-                renamed = rel_name
-            aux_path = os.path.join(target_dir, renamed)
+            aux_path = os.path.join(target_dir, rel_name)
             os.makedirs(os.path.dirname(aux_path) or target_dir, exist_ok=True)
             try:
-                with open(aux_path, "w", encoding="utf-8") as f:
-                    f.write(content)
+                if isinstance(content, bytes):
+                    with open(aux_path, "wb") as f:
+                        f.write(content)
+                else:
+                    with open(aux_path, "w", encoding="utf-8") as f:
+                        f.write(str(content))
                 logger.debug(
                     f"[{self.op_name}] sidecar 文件已写入: {aux_path}"
                 )
@@ -840,6 +843,7 @@ if __name__ == "__main__":
                 self.op_name,
                 is_dynamic_shape,
                 inputs_factory_name=self._resolve_dyn_factory(),
+                module_name=self.framework_module_name,
             )
             logger.debug(
                 f"[{self.op_name}] Framework model import 生成成功 "
@@ -1531,6 +1535,7 @@ if __name__ == "__main__":
                 self.op_name,
                 is_dynamic_shape,
                 inputs_factory_name=self._resolve_dyn_factory(),
+                module_name=self.framework_module_name,
             )
             logger.debug(f"[{self.op_name}] Framework model import生成成功 (长度: {len(framework_model_import)})")
 
@@ -1801,6 +1806,7 @@ if __name__ == "__main__":
                 self.op_name,
                 is_dynamic_shape,
                 inputs_factory_name=self._resolve_dyn_factory(),
+                module_name=self.framework_module_name,
             )
             dsl_imports = dsl_adapter.get_import_statements(self.framework)
             dsl_imports += dsl_adapter.get_runtime_env_override_code(

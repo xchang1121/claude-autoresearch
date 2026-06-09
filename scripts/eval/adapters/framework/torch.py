@@ -34,13 +34,15 @@ class FrameworkAdapterTorch(FrameworkAdapter):
         op_name: str,
         is_dynamic_shape: bool,
         inputs_factory_name: Optional[str] = None,
+        module_name: Optional[str] = None,
     ) -> str:
         # Template's local name; ref's name may differ (e.g. get_input_groups
         # for NPUKB → aliased to get_inputs_dyn_list). `import X as X` is
         # a Python no-op, so always emit the alias form.
         local = "get_inputs_dyn_list" if is_dynamic_shape else "get_inputs"
         factory = inputs_factory_name or local
-        return (f"from {op_name}_torch import Model as FrameworkModel, "
+        module = module_name or f"{op_name}_torch"
+        return (f"from {module} import Model as FrameworkModel, "
                 f"get_init_inputs, {factory} as {local}\n")
     
     def setup_device(self, backend: str, arch: str, device_id: int) -> Any:

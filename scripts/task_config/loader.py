@@ -1,8 +1,8 @@
 """task.yaml loader and the TaskConfig dataclass.
 
 This module's job is parsing — turning the on-disk YAML into a typed
-struct. It's the lowest layer in the task_config package: eval_client
-depends on TaskConfig but TaskConfig depends on nothing of ours.
+struct. Path containment rules live in task_files so every task-local file
+consumer shares the same safety semantics.
 
 The fields here are the schema. Adding a new task.yaml key means adding
 a field on `TaskConfig` and reading it in `load_task_config`. Don't
@@ -12,7 +12,6 @@ typed dataclass.
 from dataclasses import dataclass, field
 from typing import Optional
 
-import os
 import yaml
 
 
@@ -24,48 +23,17 @@ import yaml
 from .task_layout import (  # noqa: E402, F401
     REF_FILE_DEFAULT, py_stem, pick_kernel_module_file,
 )
-
-
-def _is_contained(path: str) -> bool:
-    """Return True iff `path` is a relative path that doesn't escape its
-    parent. False for absolute paths (any platform), drive-letter forms,
-    paths containing `..` segments, or paths whose normalised form would
-    resolve outside the empty-base join target.
-
-    Used at task.yaml load time to refuse editable_files / data_files /
-    ref_file entries that point outside the task_dir. Without this, a
-    hand-edited (or hostile) task.yaml could list `../../secret.txt`
-    and package_builder would read + tar the file before the remote
-    worker's safe_extract had a chance to reject it on extraction —
-    the bytes would already have left the client.
-    """
-    if not path:
-        return False
-    # Reject any drive letter (Windows) or POSIX absolute path. Also
-    # reject leading `/` or `\` on Windows: os.path.isabs returns
-    # False for `/foo/bar` on Windows because it lacks a drive letter,
-    # so without this extra check a task.yaml shipped from a POSIX dev
-    # box could pass containment on a Windows worker (or vice-versa).
-    if (os.path.isabs(path)
-            or (len(path) >= 2 and path[1] == ":")
-            or path.startswith(("/", "\\"))):
-        return False
-    # Reject any `..` segment, on either separator.
-    normalised = path.replace("\\", "/")
-    parts = [p for p in normalised.split("/") if p and p != "."]
-    if any(p == ".." for p in parts):
-        return False
-    return True
+from .task_files import is_task_relative_path
 
 
 def _filter_contained(paths: list, field_name: str) -> list:
-    """Drop entries that fail `_is_contained` and emit a stderr warning
+    """Drop entries that are not safe task-relative paths and warn
     naming each rejection — silent drops would have the operator
     chasing 'why is data_files smaller than my task.yaml'."""
     import sys as _sys
     safe: list = []
     for p in paths:
-        if _is_contained(str(p)):
+        if is_task_relative_path(str(p)):
             safe.append(p)
         else:
             print(f"[loader] WARNING: dropping {field_name} entry "
@@ -245,7 +213,7 @@ def load_task_config(task_dir: str) -> Optional[TaskConfig]:
     editable_files = _filter_contained(list(raw_editable), "editable_files")
     data_files = _filter_contained(data_files, "data_files")
     raw_ref = agent_block.get("ref_file") or REF_FILE_DEFAULT
-    if not _is_contained(str(raw_ref)):
+    if not is_task_relative_path(str(raw_ref)):
         import sys as _sys
         print(f"[loader] WARNING: ref_file {raw_ref!r} escapes task_dir; "
               f"falling back to {REF_FILE_DEFAULT}. Hand-edit task.yaml "
