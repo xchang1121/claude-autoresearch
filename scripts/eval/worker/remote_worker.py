@@ -3,7 +3,11 @@ import logging
 import json
 from typing import Tuple, Dict, Any, Callable, Optional
 
-from .interface import WorkerInterface
+from .interface import (
+    WorkerInterface,
+    DEFAULT_EVAL_TIMEOUT_S,
+    DEFAULT_GEN_REF_TIMEOUT_S,
+)
 from .manager import get_akg_env_var
 
 logger = logging.getLogger(__name__)
@@ -176,7 +180,7 @@ class RemoteWorker(WorkerInterface):
                 raise
         raise last_exc
 
-    async def verify(self, package_data: bytes, task_id: str, op_name: str, timeout: int = 300) -> Tuple[bool, str, Dict[str, Any]]:
+    async def verify(self, package_data: bytes, task_id: str, op_name: str, timeout: int = DEFAULT_EVAL_TIMEOUT_S) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Send verification task to remote worker.
 
@@ -228,7 +232,7 @@ class RemoteWorker(WorkerInterface):
             Dict[str, Any]: 包含 gen_time, base_time, speedup, artifacts 等字段
         """
         profile_url = f"{self.worker_url}/api/v1/profile"
-        timeout = profile_settings.get('timeout', 300)
+        timeout = profile_settings.get('timeout', DEFAULT_EVAL_TIMEOUT_S)
         try:
             files = {'package': ('package.tar', package_data, 'application/x-tar')}
             data = {
@@ -263,7 +267,7 @@ class RemoteWorker(WorkerInterface):
             Dict[str, Any]: 包含 time_us, success, log 等字段
         """
         profile_url = f"{self.worker_url}/api/v1/profile_single_task"
-        timeout = profile_settings.get('timeout', 300)
+        timeout = profile_settings.get('timeout', DEFAULT_EVAL_TIMEOUT_S)
         try:
             files = {'package': ('package.tar', package_data, 'application/x-tar')}
             data = {
@@ -292,7 +296,7 @@ class RemoteWorker(WorkerInterface):
             logger.error(f"[{task_id}] {error_msg}")
             return {'time_us': float('inf'), 'success': False, 'log': error_msg}
 
-    async def generate_reference(self, package_data: bytes, task_id: str, op_name: str, timeout: int = 120) -> Tuple[bool, str, bytes]:
+    async def generate_reference(self, package_data: bytes, task_id: str, op_name: str, timeout: int = DEFAULT_GEN_REF_TIMEOUT_S) -> Tuple[bool, str, bytes]:
         """
         Send reference generation task to remote worker.
         

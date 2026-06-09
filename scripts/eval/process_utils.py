@@ -18,10 +18,12 @@ import sys
 import os
 import platform
 
+from eval.worker.interface import DEFAULT_EVAL_TIMEOUT_S
+
 logger = logging.getLogger(__name__)
 
 
-def run_command(cmd_list, cmd_msg="untitled_command", env=None, timeout=300, cwd=None):
+def run_command(cmd_list, cmd_msg="untitled_command", env=None, timeout=DEFAULT_EVAL_TIMEOUT_S, cwd=None):
     """
     运行命令行程序
 

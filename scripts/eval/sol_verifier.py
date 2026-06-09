@@ -6,6 +6,10 @@ from eval import get_project_root
 from eval.adapters.factory import (
     get_framework_adapter, get_dsl_adapter, get_backend_adapter
 )
+from eval.worker.interface import (
+    DEFAULT_WARMUP_TIMES,
+    DEFAULT_RUN_TIMES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +166,7 @@ def _get_sol_common_template_vars(verifier, device_id: int):
 
 
 def generate_sol_profile_project(verifier, verify_dir: str, device_id: int = 0,
-                                  warmup_times: int = 5, run_times: int = 50,
+                                  warmup_times: int = DEFAULT_WARMUP_TIMES, run_times: int = DEFAULT_RUN_TIMES,
                                   skip_base: bool = False):
     """生成 SOL-ExecBench 性能测试项目文件到指定目录
 

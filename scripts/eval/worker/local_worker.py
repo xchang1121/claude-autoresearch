@@ -11,7 +11,12 @@ import json
 from typing import Tuple, Dict, Any, Union, Optional
 from contextlib import ExitStack
 
-from .interface import WorkerInterface
+from .interface import (
+    WorkerInterface,
+    DEFAULT_EVAL_TIMEOUT_S,
+    DEFAULT_WARMUP_TIMES,
+    DEFAULT_RUN_TIMES,
+)
 from .device_pool import DevicePool
 from eval.triton_ascend_api_docs import load_triton_ascend_api_docs
 from eval.profiler_utils import (
@@ -91,7 +96,7 @@ class LocalWorker(WorkerInterface):
         self.device_pool = device_pool
         self.backend = backend
 
-    async def verify(self, package_data: Union[bytes, str], task_id: str, op_name: str, timeout: int = 300) -> Tuple[bool, str, Dict[str, Any]]:
+    async def verify(self, package_data: Union[bytes, str], task_id: str, op_name: str, timeout: int = DEFAULT_EVAL_TIMEOUT_S) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Execute verification task locally.
         
@@ -238,8 +243,8 @@ class LocalWorker(WorkerInterface):
                 # 3. Get settings
                 backend = profile_settings.get('backend', self.backend)
                 dsl = profile_settings.get('dsl', '')
-                run_times = profile_settings.get('run_times', 50)
-                warmup_times = profile_settings.get('warmup_times', 5)
+                run_times = profile_settings.get('run_times', DEFAULT_RUN_TIMES)
+                warmup_times = profile_settings.get('warmup_times', DEFAULT_WARMUP_TIMES)
                 override_base_time_us = profile_settings.get('override_base_time_us')
                 
                 # 4. Execute profiling based on backend/dsl. Every dispatched
@@ -438,7 +443,7 @@ class LocalWorker(WorkerInterface):
                     stderr=asyncio.subprocess.PIPE
                 )
                 
-                timeout = profile_settings.get('timeout', 300)
+                timeout = profile_settings.get('timeout', DEFAULT_EVAL_TIMEOUT_S)
                 try:
                     stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
                     returncode = process.returncode

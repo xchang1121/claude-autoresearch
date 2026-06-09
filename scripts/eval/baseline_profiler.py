@@ -41,6 +41,11 @@ from eval.data_cache import (
     verifier_data_cache_lock,
     write_baseline_result_to_cache,
 )
+from eval.worker.interface import (
+    DEFAULT_EVAL_TIMEOUT_S,
+    DEFAULT_WARMUP_TIMES,
+    DEFAULT_RUN_TIMES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +58,9 @@ async def profile_baseline_once(
     backend: str,
     arch: str,
     config: Dict[str, Any],
-    warmup_times: int = 5,
-    run_times: int = 50,
-    timeout: int = 300
+    warmup_times: int = DEFAULT_WARMUP_TIMES,
+    run_times: int = DEFAULT_RUN_TIMES,
+    timeout: int = DEFAULT_EVAL_TIMEOUT_S
 ) -> Optional[float]:
     """
     预先 profile baseline 一次（只测量框架实现的性能）

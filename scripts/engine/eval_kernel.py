@@ -349,9 +349,14 @@ def main() -> None:
     ap.add_argument("--ref-file", required=True,
                     help="reference module name without .py (convention: reference)")
     ap.add_argument("--device-id", type=int, default=0)
-    ap.add_argument("--warmup", type=int, default=5,
+    from eval.worker.interface import (
+        DEFAULT_EVAL_TIMEOUT_S as _DEFAULT_EVAL_TIMEOUT_S,
+        DEFAULT_WARMUP_TIMES as _DEFAULT_WARMUP_TIMES,
+        DEFAULT_RUN_TIMES as _DEFAULT_RUN_TIMES,
+    )
+    ap.add_argument("--warmup", type=int, default=_DEFAULT_WARMUP_TIMES,
                     help="profile warmup iterations")
-    ap.add_argument("--repeats", type=int, default=50,
+    ap.add_argument("--repeats", type=int, default=_DEFAULT_RUN_TIMES,
                     help="profile measured iterations")
     ap.add_argument("--phases", default="verify,profile_gen,profile_base",
                     help="comma-separated subset of {verify, profile_gen, "
@@ -383,7 +388,7 @@ def main() -> None:
     ap.add_argument("--current-step", type=int, default=0,
                     help="round number for verify_dir naming "
                          "(Iteration<task_id>_Step<NN>_verify)")
-    ap.add_argument("--verify-timeout", type=int, default=300,
+    ap.add_argument("--verify-timeout", type=int, default=_DEFAULT_EVAL_TIMEOUT_S,
                     help="verify subprocess timeout in seconds")
     args = ap.parse_args()
 

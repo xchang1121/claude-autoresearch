@@ -22,6 +22,7 @@ import shutil
 import textwrap
 from typing import Any, Dict, Optional
 
+from eval.worker.interface import DEFAULT_EVAL_TIMEOUT_S
 from .base import DSLAdapter
 
 logger = logging.getLogger(__name__)
@@ -247,7 +248,7 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
                 ["bash", "-c", _cmake_shell],
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout={DEFAULT_EVAL_TIMEOUT_S},
             )
             if result.returncode != 0:
                 print("[ERROR]: catlass build failed!")

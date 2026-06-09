@@ -46,7 +46,12 @@ from .data_cache import (
     write_baseline_result_to_cache,
     write_reference_data_to_cache,
 )
-from .worker.interface import WorkerInterface
+from .worker.interface import (
+    WorkerInterface,
+    DEFAULT_EVAL_TIMEOUT_S,
+    DEFAULT_WARMUP_TIMES,
+    DEFAULT_RUN_TIMES,
+)
 import tarfile
 import io
 import ast
@@ -741,8 +746,8 @@ if __name__ == "__main__":
             # 清理临时目录
             shutil.rmtree(ref_dir, ignore_errors=True)
 
-    async def profile_single_task(self, task_desc: str, warmup_times: int = 5,
-                                  run_times: int = 50, timeout: int = 300,
+    async def profile_single_task(self, task_desc: str, warmup_times: int = DEFAULT_WARMUP_TIMES,
+                                  run_times: int = DEFAULT_RUN_TIMES, timeout: int = DEFAULT_EVAL_TIMEOUT_S,
                                   device_id: int = 0) -> Dict[str, Any]:
         """
         执行单个任务的性能测试（只测量 task_desc 的性能，不进行 base vs generation 对比）
@@ -1259,7 +1264,7 @@ if __name__ == "__main__":
 
                 logger.info(f"[{self.op_name}] 开始生成 reference data")
                 reference_timeout = int(
-                    self.config.get("reference_data_timeout", self.config.get("verify_timeout", 300))
+                    self.config.get("reference_data_timeout", self.config.get("verify_timeout", DEFAULT_EVAL_TIMEOUT_S))
                 )
                 try:
                     success, log, reference_bytes = await self.generate_reference_data(
@@ -1586,7 +1591,7 @@ if __name__ == "__main__":
                 backend=self.backend,
                 arch=self.arch,
                 is_dynamic_shape=is_dynamic_shape,
-                timeout=self.config.get('verify_timeout', 300),
+                timeout=self.config.get('verify_timeout', DEFAULT_EVAL_TIMEOUT_S),
                 # 参考数据模式（用于跨后端转换场景）
                 use_reference_data=use_reference_data,
                 use_reference_inputs=use_reference_inputs,
@@ -1633,7 +1638,7 @@ if __name__ == "__main__":
                     tar_file.add(file_path, arcname=arcname)
         return tar_buffer.getvalue()
 
-    async def run_verify(self, verify_dir: str, timeout: int = 300, device_id: int = 0):
+    async def run_verify(self, verify_dir: str, timeout: int = DEFAULT_EVAL_TIMEOUT_S, device_id: int = 0):
         """
         运行验证脚本
 
@@ -1711,8 +1716,8 @@ if __name__ == "__main__":
             logger.error(f"[{self.op_name}] 验证执行异常: {e}", exc_info=True)
             return False, str(e)
 
-    def gen_profile_project(self, verify_dir: str, device_id: int = 0, warmup_times: int = 5,
-                            run_times: int = 50, skip_base: bool = False):
+    def gen_profile_project(self, verify_dir: str, device_id: int = 0, warmup_times: int = DEFAULT_WARMUP_TIMES,
+                            run_times: int = DEFAULT_RUN_TIMES, skip_base: bool = False):
         """生成profile项目文件到指定目录
 
         Args:
@@ -2140,8 +2145,8 @@ if __name__ == "__main__":
 
         try:
             self.dsl_adapter.prepare_config(self.config, task_info=task_info)
-            run_times = profile_settings.get("run_times", 50)
-            warmup_times = profile_settings.get("warmup_times", 5)
+            run_times = profile_settings.get("run_times", DEFAULT_RUN_TIMES)
+            warmup_times = profile_settings.get("warmup_times", DEFAULT_WARMUP_TIMES)
             effective_profile_settings = dict(profile_settings)
 
             cached_baseline_time_us = None
@@ -2740,7 +2745,7 @@ if __name__ == "__main__":
 
             if verify_per_config and is_triton_autotune:
                 config_verify_result, config_verify_log, final_code = await self._verify_configs_separately(
-                    target_code, verify_dir, actual_device_id, self.config.get('verify_timeout', 300), current_step
+                    target_code, verify_dir, actual_device_id, self.config.get('verify_timeout', DEFAULT_EVAL_TIMEOUT_S), current_step
                 )
                 if config_verify_result is not None:
                     if config_verify_result:
@@ -2764,7 +2769,7 @@ if __name__ == "__main__":
                 project_gen_log = f"项目生成失败: {error_msg}\n"
 
             # 从config获取timeout配置，默认5分钟
-            verify_timeout = self.config.get('verify_timeout', 300)
+            verify_timeout = self.config.get('verify_timeout', DEFAULT_EVAL_TIMEOUT_S)
 
             # 运行验证
             # worker.verify() 只是执行脚本，不需要管理 device（device 已经在脚本中设置好了）
