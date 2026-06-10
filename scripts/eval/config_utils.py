@@ -20,34 +20,23 @@ logger = logging.getLogger(__name__)
 
 
 def check_backend_arch(backend: str, arch: str):
+    """验证后端与架构的匹配关系。
+
+    SKU 来源是 ``_FAMILY_SKUS``（跟 VALID_CONFIGS 同源），不再持有自己的
+    内联列表 —— 之前这里的 cuda 列表含 v100 而 VALID_CONFIGS 不含，两道
+    闸门判断矛盾；现在 v100 已并入 ``_CUDA_SKUS``，单一来源。
     """
-    验证后端与架构的匹配关系
-    Args:
-        backend: 计算后端名称(ascend/cuda/cpu)
-        arch: 硬件架构名称
-    """
-    if backend not in ["ascend", "cuda", "cpu"]:
+    if backend not in ("ascend", "cuda", "cpu"):
         raise ValueError("backend must be ascend, cuda or cpu")
-    elif backend == "ascend":
-        supported_ascend_archs = [
-            "ascend910b1", "ascend910b2", "ascend910b2c", "ascend910b3", "ascend910b4",
-            "ascend310p3",
-            "ascend910_9362", "ascend910_9372", "ascend910_9381",
-            "ascend910_9382", "ascend910_9391", "ascend910_9392",
-            "ascend950dt_95a",
-            "ascend950pr_950z", "ascend950pr_9572", "ascend950pr_9574", "ascend950pr_9575",
-            "ascend950pr_9576", "ascend950pr_9577", "ascend950pr_9578", "ascend950pr_9579",
-            "ascend950pr_957b", "ascend950pr_957d", "ascend950pr_9581", "ascend950pr_9582",
-            "ascend950pr_9584", "ascend950pr_9587", "ascend950pr_9588", "ascend950pr_9589",
-            "ascend950pr_958a", "ascend950pr_958b", "ascend950pr_9591", "ascend950pr_9592",
-            "ascend950pr_9599",
-        ]
-        if arch not in supported_ascend_archs:
-            raise ValueError(f"ascend backend only support {supported_ascend_archs}")
-    elif backend == "cuda" and arch not in ["a100", "v100", "h20", "l20", "rtx3090"]:
-        raise ValueError("cuda backend only support a100, v100, h20, l20, and rtx3090")
-    elif backend == "cpu" and arch not in ["x86_64", "aarch64"]:
-        raise ValueError("cpu backend only support x86_64 and aarch64")
+    supported = tuple(
+        sku
+        for (be, _family), skus in _FAMILY_SKUS.items()
+        if be == backend
+        for sku in skus
+    )
+    if arch not in supported:
+        raise ValueError(
+            f"{backend} backend only supports {sorted(supported)}")
 
 
 def normalize_dsl(dsl: str, backend: str = None) -> str:
@@ -135,7 +124,10 @@ _ASCEND_910_SKUS = (
     "ascend950pr_9599",
 )
 _ASCEND_310_SKUS = ("ascend310p3",)
-_CUDA_SKUS = ("a100", "h20", "l20", "rtx3090")
+# v100 included: check_backend_arch historically accepted it; keeping it
+# means VALID_CONFIGS now also carries v100 entries (the cuda DSL list is
+# family-wide so this only widens the arch axis, not the DSL whitelist).
+_CUDA_SKUS = ("a100", "v100", "h20", "l20", "rtx3090")
 _CPU_SKUS = ("x86_64", "aarch64")
 _FAMILY_SKUS = {
     ("ascend", "910"): _ASCEND_910_SKUS,
