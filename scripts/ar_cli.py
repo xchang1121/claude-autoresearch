@@ -412,6 +412,35 @@ def _first_device_id(devices: Optional[str]) -> Optional[int]:
         return None
 
 
+_CONDA_HOOK_BASH = r"""
+if command -v conda >/dev/null 2>&1; then
+  __ar_conda_base="$(conda info --base 2>/dev/null || true)"
+  if [ -n "$__ar_conda_base" ] && [ -f "$__ar_conda_base/etc/profile.d/conda.sh" ]; then
+    . "$__ar_conda_base/etc/profile.d/conda.sh" >/dev/null 2>&1 || true
+  else
+    eval "$(conda shell.bash hook 2>/dev/null)" >/dev/null 2>&1 || true
+  fi
+  unset __ar_conda_base
+fi
+""".strip()
+
+
+def _source_env_script_bash(env_script: Optional[str]) -> str:
+    parts = [_CONDA_HOOK_BASH]
+    if env_script:
+        parts.append(f"source {shlex.quote(env_script)}")
+    return "\n".join(parts)
+
+
+def _source_env_var_bash(var_name: str) -> str:
+    return "\n".join([
+        _CONDA_HOOK_BASH,
+        f'if [ -n "${var_name}" ] && [ -f "${var_name}" ]; then',
+        f'  source "${var_name}" >/dev/null 2>&1',
+        "fi",
+    ])
+
+
 _REMOTE_PROBE_BASH = r"""
 env_script={env_script}
 backend={backend}
@@ -426,9 +455,7 @@ if [ -n "$env_script" ]; then
 else
   echo "ENV_OK:"
 fi
-if [ -n "$env_script" ] && [ -f "$env_script" ]; then
-  source "$env_script" >/dev/null 2>&1
-fi
+{env_setup}
 TORCH_NPU_OUT=$(python -c 'import torch_npu' 2>&1); TORCH_NPU_RC=$?
 if [ $TORCH_NPU_RC -eq 0 ]; then
   echo "TORCH_NPU:ok"
@@ -484,6 +511,7 @@ def _probe_remote(ssh_alias: str, env_script: Optional[str],
         probe_device=shlex.quote("" if probe_device is None else str(probe_device)),
         port=int(port),
         log_file=shlex.quote(_worker_log_path(port)),
+        env_setup=_source_env_var_bash("env_script"),
     )
     try:
         out = subprocess.run(
@@ -915,7 +943,7 @@ def _load_remote_host_config(alias: str) -> Optional[dict]:
 
 
 def _build_remote_ar_cli_cmd(host_cfg: dict, ar_cli_args: list[str]) -> str:
-    """Compose the bash command we send through ssh: source env, cd repo,
+    """Compose the bash command we send through ssh: bootstrap env, cd repo,
     invoke the remote ar_cli.py with the equivalent (non-remote) args.
 
     All values are shlex-quoted; the resulting string is passed to ssh
@@ -924,16 +952,14 @@ def _build_remote_ar_cli_cmd(host_cfg: dict, ar_cli_args: list[str]) -> str:
     repo_path = host_cfg["repo_path"]  # required; KeyError surfaces cleanly
     env_script = host_cfg.get("env_script")
 
-    parts: list[str] = []
+    parts: list[str] = [_source_env_script_bash(env_script)]
     parts.append("export AR_CLI_QUIET=1")
-    if env_script:
-        parts.append(f"source {shlex.quote(env_script)}")
     parts.append(f"cd {shlex.quote(repo_path)}")
     parts.append(
         "python scripts/ar_cli.py "
         + " ".join(shlex.quote(a) for a in ar_cli_args)
     )
-    return " && ".join(parts)
+    return "\n".join(parts)
 
 
 def _strip_remote_flags(args) -> list[str]:

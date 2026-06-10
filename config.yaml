@@ -45,12 +45,13 @@ hallucinated_scripts:
 # Field reference:
 #   repo_path   (required)  absolute path to the remote
 #                           `claude-autoresearch` checkout. The SSH command
-#                           sources env_script, then does `cd <repo_path>`
+#                           bootstraps env_script, then does `cd <repo_path>`
 #                           and runs `python scripts/ar_cli.py worker ...`.
 #   env_script  (required)  shell script source'd before the remote
-#                           ar_cli runs. Must leave `python -c
-#                           "import torch_npu, triton"` working in the
-#                           non-interactive shell; that same PATH-selected
+#                           ar_cli runs. The launcher enables conda first,
+#                           so plain `conda activate ...` works in SSH
+#                           shells. It must leave `python -c "import
+#                           torch_npu, triton"` working; that same PATH-selected
 #                           `python` runs the remote ar_cli command.
 #   ssh_alias   (optional)  hostname passed to ssh. Default = the key
 #                           name itself; override when the host alias in
