@@ -21,6 +21,8 @@ from .base import DSLAdapter
 
 class DSLAdapterSwft(DSLAdapter):
     """Adapter for SWFT DSL."""
+
+    needs_binary_io = True
     
     def get_import_statements(self, framework: str) -> str:
         """Return SWFT import statements."""
@@ -75,14 +77,6 @@ class DSLAdapterSwft(DSLAdapter):
 """
         return code
     
-    def needs_binary_io(self) -> bool:
-        """SWFT needs binary I/O."""
-        return True
-    
-    def needs_compilation(self) -> bool:
-        """SWFT doesn't need compilation."""
-        return False
-    
     def benchmark_impl(self, impl_func_name: str, inputs: str, 
                       warmup: int, runs: int, backend: str, op_name: str,
                       case_idx: int = 0, framework_model: Optional[str] = None,
@@ -113,4 +107,3 @@ class DSLAdapterSwft(DSLAdapter):
 """
         return code
     
-

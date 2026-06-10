@@ -116,7 +116,7 @@ class WorkerManager:
                 and (not tags or tags.issubset(info.tags))
             ]
 
-    async def release(self, worker: WorkerInterface):
+    async def release(self, worker: WorkerInterface) -> bool:
         """
         归还 Worker (减少负载计数)。
         应在任务完成或异常退出时调用。
@@ -126,8 +126,9 @@ class WorkerManager:
                 if info.worker is worker:
                     info.load = max(0, info.load - 1)
                     logger.debug(f"Released worker {id(info.worker)} (load={info.load}/{info.capacity})")
-                    return
-            logger.warning("Released unknown worker")
+                    return True
+            logger.error(f"Release called for unknown worker id={id(worker)}")
+            return False
 
     async def get_status(self) -> List[dict]:
         """获取所有 Worker 的状态快照"""

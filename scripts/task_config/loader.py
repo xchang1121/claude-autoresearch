@@ -55,7 +55,7 @@ class TaskConfig:
     (Triton-Ascend kernel, Ascend NPU, PyTorch ref). Downstream code
     refers to those constants directly rather than carrying them on
     TaskConfig. `arch` (e.g. `ascend910b3`) varies per machine and is
-    derived from the picked --devices via npu-smi.
+    derived from the picked --devices via the backend-specific probe.
     """
     name: str
     description: str = ""

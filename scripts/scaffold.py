@@ -15,7 +15,7 @@ Usage:
     # NOTE: --devices values below are placeholders; pass the actual free
     # device id at invocation time.
 
-    # Local eval (arch auto-derived via npu-smi):
+    # Local eval (arch auto-derived via the backend-specific probe):
     python scripts/scaffold.py --ref reference.py --kernel kernel.py --op-name my_op --devices <DEV>
 
     # Custom output directory:
@@ -165,7 +165,7 @@ def scaffold_task_dir(
     # falls back to its own probe / fingerprint reuse as before.
     eval_block = {"timeout": eval_timeout}
     num_cases = _probe_num_cases(task_dir, REF_FILE_DEFAULT)
-    if num_cases and num_cases > 1:
+    if num_cases and num_cases >= 1:
         eval_block["num_cases"] = num_cases
 
     task_yaml = {
@@ -276,7 +276,8 @@ def _make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--op-name", default=None,
                         help="Operator name (required)")
     # The repo is locked to triton_ascend on Ascend NPU + PyTorch by
-    # construction. arch is derived from the picked --devices via npu-smi.
+    # construction. arch is derived from the picked --devices via the
+    # backend-specific probe.
     parser.add_argument("--devices", default=None,
                         help="Comma-separated device IDs for local eval "
                              "(e.g. '5' or '0,1,2,3'). Required.")
@@ -300,7 +301,7 @@ def _make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker-url", default="",
                         help="Remote worker URL(s) (host:port, comma-separated). "
                              "Routes eval through the remote HTTP worker "
-                             "instead of local npu-smi.")
+                             "instead of the local backend probe.")
     return parser
 
 

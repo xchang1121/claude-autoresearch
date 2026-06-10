@@ -62,14 +62,6 @@ class DSLAdapterCudaC(DSLAdapter):
         """Invoke the instantiated CUDA C ModelNew."""
         return f"impl_output = impl_model(*{inputs})\n"
     
-    def needs_binary_io(self) -> bool:
-        """CUDA C doesn't need binary I/O."""
-        return False
-    
-    def needs_compilation(self) -> bool:
-        """CUDA C doesn't need compilation (handled by load_inline)."""
-        return False
-    
     def benchmark_impl(
         self,
         impl_func_name: str,
@@ -102,4 +94,3 @@ class DSLAdapterCudaC(DSLAdapter):
         method = "cuda_loop_timer"
 """
         return code
-

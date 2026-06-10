@@ -107,6 +107,30 @@ def _family_of(backend: str, arch: str) -> Optional[str]:
     return None
 
 
+def _normalize_arch_token(arch: str) -> str:
+    return (arch or "").strip().lower().replace(" ", "").replace("-", "")
+
+
+def ascend_soc_version(arch: str) -> Optional[str]:
+    """Derive the CANN SOC_VERSION from the canonical Ascend arch token.
+
+    Validation owns the explicit SKU tuples above. This helper keeps the
+    runtime SOC_VERSION rule next to that SoT instead of duplicating a second
+    inline mapping table inside generated verifier code.
+    """
+    arch = _normalize_arch_token(arch)
+    if arch in _ASCEND_910B_SKUS or arch in _ASCEND_310_SKUS:
+        return "Ascend" + arch[len("ascend"):].upper()
+    if arch in _ASCEND_910_93_SKUS:
+        return "Ascend" + arch[len("ascend"):]
+    if arch in _ASCEND_950_SKUS:
+        if arch.startswith("ascend950dt_"):
+            return "Ascend950DT_" + arch.split("_", 1)[1].upper()
+        if arch.startswith("ascend950pr_"):
+            return "Ascend910_" + arch.split("_", 1)[1]
+    return None
+
+
 def arch_hint(backend: str) -> str:
     """User-facing hint for what arch values ``backend`` accepts."""
     if backend == "ascend":

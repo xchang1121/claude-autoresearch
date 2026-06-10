@@ -74,14 +74,6 @@ class DSLAdapterTritonCuda(DSLAdapter):
         """
         return f"impl_output = impl_model(*{inputs})\n"
     
-    def needs_binary_io(self) -> bool:
-        """Triton CUDA doesn't need binary I/O."""
-        return False
-    
-    def needs_compilation(self) -> bool:
-        """Triton CUDA doesn't need compilation."""
-        return False
-    
     def benchmark_impl(self, impl_func_name: str, inputs: str, 
                       warmup: int, runs: int, backend: str, op_name: str,
                       case_idx: int = 0, framework_model: Optional[str] = None,

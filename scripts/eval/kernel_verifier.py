@@ -76,21 +76,7 @@ ImplType = Literal["triton_cuda", "triton_ascend", "triton-russia", "swft",
                    "cuda_c", "cpp", "tilelang_npuir", "tilelang_cuda", "ascendc",
                    "ascendc_catlass", "torch"]
 BackendType = Literal["cuda", "ascend", "cpu"]
-ArchType = Literal[
-    "a100", "v100", "h20", "l20", "rtx3090",
-    "ascend910b1", "ascend910b2", "ascend910b2c", "ascend910b3", "ascend910b4",
-    "ascend310p3",
-    "ascend910_9362", "ascend910_9372", "ascend910_9381",
-    "ascend910_9382", "ascend910_9391", "ascend910_9392",
-    "ascend950dt_95a",
-    "ascend950pr_950z", "ascend950pr_9572", "ascend950pr_9574", "ascend950pr_9575",
-    "ascend950pr_9576", "ascend950pr_9577", "ascend950pr_9578", "ascend950pr_9579",
-    "ascend950pr_957b", "ascend950pr_957d", "ascend950pr_9581", "ascend950pr_9582",
-    "ascend950pr_9584", "ascend950pr_9587", "ascend950pr_9588", "ascend950pr_9589",
-    "ascend950pr_958a", "ascend950pr_958b", "ascend950pr_9591", "ascend950pr_9592",
-    "ascend950pr_9599",
-    "x86_64", "aarch64",
-]
+ArchType = str
 
 logger = logging.getLogger(__name__)
 
@@ -1087,7 +1073,10 @@ if __name__ == "__main__":
     def _adapter_flag(adapter: Any, name: str, default: bool = False) -> bool:
         value = getattr(adapter, name, default)
         if callable(value):
-            value = value()
+            raise TypeError(
+                f"{adapter.__class__.__name__}.{name} must be a bool class "
+                f"attribute, not a method"
+            )
         return bool(value)
 
     def _project_artifacts_ready(self, verify_dir: str) -> bool:

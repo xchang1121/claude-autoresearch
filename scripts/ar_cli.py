@@ -10,13 +10,13 @@ hit the remote daemon. Remote host config lives in
 
 Examples:
 
-    # local daemon control (arch auto-derived from --devices via npu-smi)
+    # local daemon control (arch auto-derived from --backend/--devices)
     ar_cli worker --start --backend ascend --devices 6 --port 9111
     ar_cli worker --status --port 9111
     ar_cli worker --stop --port 9111
 
     # remote — the host alias is an entry in config.yaml. arch is
-    # auto-derived on the remote side via `npu-smi info` (pass --arch
+    # auto-derived on the remote side via the backend-specific probe (pass --arch
     # explicitly to override).
     ar_cli worker --remote-host my-npu --start --backend ascend \\
         --devices 6 --port 9111
@@ -244,8 +244,8 @@ def _cmdline_contains_worker(pid: int) -> bool:
 
 def cmd_worker_start(args) -> int:
     # arch is optional on the CLI; auto-derive from the first --devices
-    # entry via `npu-smi info`. Caller can still pass --arch explicitly
-    # to override.
+    # entry using the backend-specific probe. Caller can still pass --arch
+    # explicitly to override.
     if not args.arch:
         from utils.hw_detect import derive_arch, probe_hint
         try:
@@ -402,11 +402,25 @@ def cmd_worker_status(args) -> int:
     return 0
 
 
+def _first_device_id(devices: Optional[str]) -> Optional[int]:
+    if not devices:
+        return None
+    try:
+        first = str(devices).split(",", 1)[0].strip()
+        return int(first) if first else None
+    except (TypeError, ValueError):
+        return None
+
+
 _REMOTE_PROBE_BASH = r"""
 env_script={env_script}
+backend={backend}
+probe_device={probe_device}
 port={port}
 log_file={log_file}
 echo "ENV_PATH:$env_script"
+echo "PROBE_BACKEND:$backend"
+echo "PROBE_DEVICE:$probe_device"
 if [ -n "$env_script" ]; then
   [ -f "$env_script" ] && echo "ENV_OK:yes" || echo "ENV_OK:no"
 else
@@ -427,9 +441,26 @@ if [ $TRITON_RC -eq 0 ]; then
 else
   echo "TRITON:$(echo "$TRITON_OUT" | tail -1)"
 fi
-echo "NPU_SMI:$(command -v npu-smi >/dev/null 2>&1 && echo ok || echo missing)"
-echo "ARCH:$(npu-smi info 2>/dev/null | awk '/^\| +[0-9]+ +[0-9A-Z]/{{print $3; exit}}')"
-echo "DEVICES:$(npu-smi info 2>/dev/null | grep -cE '^\| +[0-9]+ +[0-9A-Z]')"
+if [ "$backend" = "cuda" ]; then
+  echo "NPU_SMI:not_required"
+  echo "NVIDIA_SMI:$(command -v nvidia-smi >/dev/null 2>&1 && echo ok || echo missing)"
+  if [ -n "$probe_device" ]; then
+    echo "ARCH:$(nvidia-smi --query-gpu=name --format=csv,noheader -i "$probe_device" 2>/dev/null | head -1)"
+  else
+    echo "ARCH:$(nvidia-smi --query-gpu=name --format=csv,noheader -i 0 2>/dev/null | head -1)"
+  fi
+  echo "DEVICES:$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sed '/^$/d' | wc -l)"
+elif [ "$backend" = "cpu" ]; then
+  echo "NPU_SMI:not_required"
+  echo "NVIDIA_SMI:not_required"
+  echo "ARCH:$(python -c 'import platform; print((platform.machine() or "").lower())' 2>/dev/null)"
+  echo "DEVICES:1"
+else
+  echo "NPU_SMI:$(command -v npu-smi >/dev/null 2>&1 && echo ok || echo missing)"
+  echo "NVIDIA_SMI:not_required"
+  echo "ARCH:$(npu-smi info 2>/dev/null | awk -v did="$probe_device" '/^\| +[0-9]+ +[0-9A-Z]/{{if (did == "" || $2 == did) {{print $3; exit}}}}')"
+  echo "DEVICES:$(npu-smi info 2>/dev/null | grep -cE '^\| +[0-9]+ +[0-9A-Z]')"
+fi
 if command -v lsof >/dev/null 2>&1; then
   echo "PORT_PID:$(lsof -ti :$port -sTCP:LISTEN 2>/dev/null | head -1)"
 elif command -v ss >/dev/null 2>&1; then
@@ -444,9 +475,13 @@ echo "LOG_TAIL_BEGIN"
 
 
 def _probe_remote(ssh_alias: str, env_script: Optional[str],
-                  port: int) -> dict:
+                  port: int, *, backend: Optional[str] = None,
+                  devices: Optional[str] = None) -> dict:
+    probe_device = _first_device_id(devices)
     probe = _REMOTE_PROBE_BASH.format(
         env_script=shlex.quote(env_script or ""),
+        backend=shlex.quote((backend or "ascend").lower()),
+        probe_device=shlex.quote("" if probe_device is None else str(probe_device)),
         port=int(port),
         log_file=shlex.quote(_worker_log_path(port)),
     )
@@ -561,13 +596,39 @@ def _classify_probe(facts: dict, port: int, *,
     else:
         findings.append(Finding("info", "npu-smi", "not required"))
 
+    if backend_n == "cuda":
+        if facts.get("NVIDIA_SMI") == "ok":
+            findings.append(Finding("ok", "nvidia-smi", "in PATH"))
+        else:
+            findings.append(Finding(
+                "fatal", "nvidia-smi", "missing",
+                "check CUDA driver and PATH on the remote",
+            ))
+
     arch = (facts.get("ARCH") or "").strip()
     if arch:
-        findings.append(Finding("ok", "npu arch", f"ascend{arch.lower()}"))
+        if backend_n == "ascend":
+            findings.append(Finding("ok", "npu arch", f"ascend{arch.lower()}"))
+        elif backend_n == "cuda":
+            findings.append(Finding("ok", "cuda gpu", arch))
+        elif backend_n == "cpu":
+            findings.append(Finding("ok", "cpu arch", arch))
+        else:
+            findings.append(Finding("ok", "arch", arch))
     elif ascendish:
         findings.append(Finding(
             "warn", "npu arch", "not detected",
             "pass --arch explicitly if auto-detect fails",
+        ))
+    elif backend_n == "cuda":
+        findings.append(Finding(
+            "warn", "cuda gpu", "not detected",
+            "pass --arch explicitly if auto-detect fails",
+        ))
+    elif backend_n == "cpu":
+        findings.append(Finding(
+            "warn", "cpu arch", "not detected",
+            "platform.machine() returned empty",
         ))
 
     try:
@@ -575,11 +636,22 @@ def _classify_probe(facts: dict, port: int, *,
     except ValueError:
         ndev = 0
     if ndev > 0:
-        findings.append(Finding("ok", "npu devices", f"{ndev} visible"))
+        if backend_n == "cuda":
+            label = "cuda devices"
+        elif backend_n == "cpu":
+            label = "cpu slots"
+        else:
+            label = "npu devices"
+        findings.append(Finding("ok", label, f"{ndev} visible"))
     elif ascendish:
         findings.append(Finding(
             "fatal", "npu devices", "0 visible",
             "check driver and `npu-smi info` on the remote",
+        ))
+    elif backend_n == "cuda":
+        findings.append(Finding(
+            "fatal", "cuda devices", "0 visible",
+            "check driver and `nvidia-smi` on the remote",
         ))
 
     try:
@@ -610,11 +682,15 @@ def _classify_probe(facts: dict, port: int, *,
 
 def _run_remote_diagnostics(alias: str, host_cfg: dict, port: int, *,
                             backend: Optional[str],
+                            devices: Optional[str],
                             dsl: Optional[str],
                             for_start: bool,
                             stream=None) -> bool:
     ssh_alias = host_cfg.get("ssh_alias") or alias
-    facts = _probe_remote(ssh_alias, host_cfg.get("env_script"), port)
+    facts = _probe_remote(
+        ssh_alias, host_cfg.get("env_script"), port,
+        backend=backend, devices=devices,
+    )
     findings = _classify_probe(
         facts, port, backend=backend, dsl=dsl, for_start=for_start)
     _render_findings(
@@ -742,8 +818,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Hardware backend (required for --start).")
     w.add_argument("--arch",
                    help="Arch string, e.g. ascend910b3. Optional for "
-                        "--start — defaults to auto-derive via `npu-smi "
-                        "info` on the first --devices entry. Pass "
+                        "--start defaults to auto-derive via the "
+                        "backend-specific probe on the first --devices entry. Pass "
                         "explicitly to override.")
     w.add_argument("--devices",
                    help="Comma-separated device IDs, e.g. '2,5' "
@@ -770,7 +846,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _validate_worker_args(args) -> Optional[str]:
     if args.start and not (args.backend and args.devices):
         return ("--start requires --backend and --devices "
-                "(--arch is auto-derived from npu-smi when omitted).")
+                "(--arch is auto-derived from the backend probe when omitted).")
     return None
 
 
@@ -1064,6 +1140,7 @@ def _dispatch_remote_worker(args) -> int:
                 host_cfg,
                 args.port,
                 backend=getattr(args, "backend", None),
+                devices=getattr(args, "devices", None),
                 dsl=getattr(args, "dsl", None),
                 for_start=False,
                 stream=sys.stderr,
@@ -1111,6 +1188,7 @@ def _dispatch_remote_worker(args) -> int:
         host_cfg,
         args.port,
         backend=args.backend,
+        devices=args.devices,
         dsl=getattr(args, "dsl", None),
         for_start=True,
         stream=sys.stderr,
