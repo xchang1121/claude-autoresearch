@@ -132,9 +132,9 @@ def override_base_from_progress(
         return None
 
     # Reuse persisted shape descriptors when available so the gate can
-    # compare shape-aware baselines without re-importing the ref. If a
-    # stored shape-aware baseline loses its descriptors, current_fingerprint
-    # returns shape_signature=None and invalidates the sticky override.
+    # compare shape-aware baselines without re-importing the ref. If
+    # descriptors are unavailable, comparison falls back to num_cases-only
+    # and keeps an otherwise comparable sticky override.
     descs = progress.get("per_shape_descs")
     fingerprint = current_fingerprint(
         num_cases, descs if isinstance(descs, list) and descs else None)
