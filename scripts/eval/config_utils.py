@@ -13,30 +13,131 @@
 # limitations under the License.
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
 
 
-def check_backend_arch(backend: str, arch: str):
-    """验证后端与架构的匹配关系。
+# ---------------------------------------------------------------------------
+# Single source of truth — SKU enumeration + per-family DSL whitelists.
+# Mirrors akg-hitl's op/utils/config_utils.py scheme.
+#
+# Validation strategy differs by backend:
+#   - ascend uses **explicit SKU tuples** — Ascend SKUs are discrete real
+#     products; enumeration gives crisp error msgs.
+#   - cuda / cpu use **family regex** — model names are parametric
+#     (``rtx<N>``, ``[ahvltb]<N>``, ``x86_64`` / ``aarch64`` / ...);
+#     a new RTX 5090 / B300 / H200 is automatically accepted when
+#     ``hw_detect`` extracts it from ``nvidia-smi``.
+#
+# Adding a new ascend SKU: one line in the matching ``_*_SKUS`` tuple.
+# Adding a whole new cuda generation: zero code change (regex covers it).
+# Adding a new DSL across a family: one ``support`` entry in
+# ``eval.adapters.factory.DSL_REGISTRY``.
+# ---------------------------------------------------------------------------
 
-    SKU 来源是 ``_FAMILY_SKUS``（跟 VALID_CONFIGS 同源），不再持有自己的
-    内联列表 —— 之前这里的 cuda 列表含 v100 而 VALID_CONFIGS 不含，两道
-    闸门判断矛盾；现在 v100 已并入 ``_CUDA_SKUS``，单一来源。
-    """
+_ASCEND_910B_SKUS = (
+    "ascend910b1", "ascend910b2", "ascend910b2c", "ascend910b3", "ascend910b4",
+)
+_ASCEND_910_93_SKUS = (
+    "ascend910_9362", "ascend910_9372", "ascend910_9381",
+    "ascend910_9382", "ascend910_9391", "ascend910_9392",
+)
+_ASCEND_950_SKUS = (
+    "ascend950dt_95a",
+    "ascend950pr_950z", "ascend950pr_9572", "ascend950pr_9574", "ascend950pr_9575",
+    "ascend950pr_9576", "ascend950pr_9577", "ascend950pr_9578", "ascend950pr_9579",
+    "ascend950pr_957b", "ascend950pr_957d", "ascend950pr_9581", "ascend950pr_9582",
+    "ascend950pr_9584", "ascend950pr_9587", "ascend950pr_9588", "ascend950pr_9589",
+    "ascend950pr_958a", "ascend950pr_958b", "ascend950pr_9591", "ascend950pr_9592",
+    "ascend950pr_9599",
+)
+_ASCEND_910_FAMILY = _ASCEND_910B_SKUS + _ASCEND_910_93_SKUS + _ASCEND_950_SKUS
+_ASCEND_310_SKUS = ("ascend310p3",)
+
+# CUDA family regex — accepts any token ``hw_detect`` normalizes from
+# ``nvidia-smi --query-gpu=name``: rtx<N> / gtx<N> / [ahvltb]<N> with an
+# optional trailing variant letter (``l40s`` / ``v100`` / ``h200`` etc.).
+_CUDA_ARCH_PAT = re.compile(
+    r"^(?:rtx\d{3,4}[a-z]?|gtx\d{3,4}[a-z]?|[ahvltb]\d{1,4}[a-z]?)$"
+)
+_CPU_ARCH_PAT = re.compile(r"^(?:x86_64|aarch64|riscv64|ppc64le)$")
+
+
+def _build_dsl_table():
+    """Family → DSL whitelist, keyed by (framework, backend, family-tag),
+    derived from DSL_REGISTRY support tuples (single source of truth)."""
+    from eval.adapters.factory import DSL_REGISTRY
+    table: dict = {}
+    for name, entry in DSL_REGISTRY.items():
+        for fbf in entry.support:
+            dsls = table.setdefault(fbf, [])
+            if name not in dsls:
+                dsls.append(name)
+        for alias in entry.aliases:
+            for fbf in entry.support:
+                dsls = table.setdefault(fbf, [])
+                if alias not in dsls:
+                    dsls.append(alias)
+    return {fbf: tuple(dsls) for fbf, dsls in table.items()}
+
+
+_DSL_TABLE = _build_dsl_table()
+_ALL_DSLS = frozenset(
+    dsl for dsls in _DSL_TABLE.values() for dsl in dsls
+)
+
+
+def _family_of(backend: str, arch: str) -> Optional[str]:
+    """Return the family tag for (backend, arch), or None if the arch
+    isn't recognized under that backend. Ascend uses explicit SKU
+    membership; cuda / cpu use family regex."""
+    if backend == "ascend":
+        if arch in _ASCEND_310_SKUS:
+            return "310"
+        if arch in _ASCEND_910_FAMILY:
+            return "910"
+        return None
+    if backend == "cuda":
+        return "any" if _CUDA_ARCH_PAT.match(arch) else None
+    if backend == "cpu":
+        return "any" if _CPU_ARCH_PAT.match(arch) else None
+    return None
+
+
+def arch_hint(backend: str) -> str:
+    """User-facing hint for what arch values ``backend`` accepts."""
+    if backend == "ascend":
+        return "/".join(_ASCEND_310_SKUS + _ASCEND_910_FAMILY)
+    if backend == "cuda":
+        return ("rtx<N> / gtx<N> / [ahvltb]<N> family "
+                "(e.g. a100, v100, h100, h200, l40s, b200, rtx4060, rtx5090)")
+    if backend == "cpu":
+        return "x86_64 / aarch64 / riscv64 / ppc64le"
+    return ""
+
+
+def check_backend_arch(backend: str, arch: str):
+    """验证后端与架构的匹配关系（family 驱动，跟 akg-hitl 同方案）。"""
     if backend not in ("ascend", "cuda", "cpu"):
         raise ValueError("backend must be ascend, cuda or cpu")
-    supported = tuple(
-        sku
-        for (be, _family), skus in _FAMILY_SKUS.items()
-        if be == backend
-        for sku in skus
-    )
-    if arch not in supported:
+    if _family_of(backend, arch) is None:
         raise ValueError(
-            f"{backend} backend only supports {sorted(supported)}")
+            f"{backend} backend does not recognize arch={arch} "
+            f"(accepted: {arch_hint(backend)})"
+        )
+
+
+def supported_dsls(framework: str, backend: str, arch: str) -> Optional[tuple]:
+    """Return the DSL whitelist for ``(framework, backend, arch)``, or
+    None if the combination is not supported. Single canonical lookup —
+    every other validator in this module routes through this."""
+    family = _family_of(backend, arch)
+    if family is None:
+        return None
+    return _DSL_TABLE.get((framework, backend, family))
 
 
 def normalize_dsl(dsl: str, backend: str = None) -> str:
@@ -106,111 +207,27 @@ def check_task_type(task_type: str):
         raise ValueError("task_type must be precision_only or profile")
 
 
-# 配置依赖关系映射表
-# 注意：ascend910b*/ascend910_93* 使用相同的配置
-# Family -> SKU list. The DSL whitelist itself is derived from
-# eval.adapters.factory.DSL_REGISTRY so adapter lookup and config validation
-# cannot drift.
-_ASCEND_910_SKUS = (
-    "ascend910b1", "ascend910b2", "ascend910b2c", "ascend910b3", "ascend910b4",
-    "ascend910_9362", "ascend910_9372", "ascend910_9381",
-    "ascend910_9382", "ascend910_9391", "ascend910_9392",
-    "ascend950dt_95a",
-    "ascend950pr_950z", "ascend950pr_9572", "ascend950pr_9574", "ascend950pr_9575",
-    "ascend950pr_9576", "ascend950pr_9577", "ascend950pr_9578", "ascend950pr_9579",
-    "ascend950pr_957b", "ascend950pr_957d", "ascend950pr_9581", "ascend950pr_9582",
-    "ascend950pr_9584", "ascend950pr_9587", "ascend950pr_9588", "ascend950pr_9589",
-    "ascend950pr_958a", "ascend950pr_958b", "ascend950pr_9591", "ascend950pr_9592",
-    "ascend950pr_9599",
-)
-_ASCEND_310_SKUS = ("ascend310p3",)
-# v100 included: check_backend_arch historically accepted it; keeping it
-# means VALID_CONFIGS now also carries v100 entries (the cuda DSL list is
-# family-wide so this only widens the arch axis, not the DSL whitelist).
-_CUDA_SKUS = ("a100", "v100", "h20", "l20", "rtx3090")
-_CPU_SKUS = ("x86_64", "aarch64")
-_FAMILY_SKUS = {
-    ("ascend", "910"): _ASCEND_910_SKUS,
-    ("ascend", "310"): _ASCEND_310_SKUS,
-    ("cuda", "any"): _CUDA_SKUS,
-    ("cpu", "any"): _CPU_SKUS,
-}
-
-
-def _build_valid_configs() -> dict:
-    from eval.adapters.factory import DSL_REGISTRY
-    configs: dict = {}
-    for name, entry in DSL_REGISTRY.items():
-        names = (name,) + tuple(entry.aliases)
-        for framework, backend, family in entry.support:
-            skus = _FAMILY_SKUS.get((backend, family), ())
-            for arch in skus:
-                dsls = (
-                    configs
-                    .setdefault(framework, {})
-                    .setdefault(backend, {})
-                    .setdefault(arch, [])
-                )
-                for dsl_name in names:
-                    if dsl_name not in dsls:
-                        dsls.append(dsl_name)
-    return configs
-
-
-VALID_CONFIGS = _build_valid_configs()
-_ALL_DSLS = frozenset(
-    dsl
-    for backend_cfg in VALID_CONFIGS.values()
-    for arch_cfg in backend_cfg.values()
-    for dsls in arch_cfg.values()
-    for dsl in dsls
-)
-
-
-def _get_config_for_arch(backend_config: dict, arch: str) -> list:
-    """
-    获取指定架构的配置
-    Args:
-        backend_config: 后端配置字典
-        arch: 架构名称
-    Returns:
-        DSL 列表
-    """
-    # 直接匹配
-    if arch in backend_config:
-        return backend_config[arch]
-    
-    return None
-
-
 def check_task_config(framework: str, backend: str, arch: str, dsl: str):
     """
-    统一验证配置参数之间的依赖关系
+    统一验证配置参数之间的依赖关系（family 驱动，跟 akg-hitl 同方案）。
     Args:
         framework: 框架类型
         backend: 硬件后端名称
         arch: 硬件架构名称
         dsl: 实现类型（会自动转换triton为triton_cuda或triton_ascend）
+    Returns:
+        规范化后的 DSL，供调用者使用。
     """
-    # 首先规范化DSL（自动转换triton）
     normalized_dsl = normalize_dsl(dsl, backend)
-    
-    if framework not in VALID_CONFIGS:
-        raise ValueError(f"Unsupported framework: {framework}")
-
-    if backend not in VALID_CONFIGS[framework]:
-        raise ValueError(f"Framework {framework} does not support backend: {backend}")
-
-    backend_config = VALID_CONFIGS[framework][backend]
-    dsl_list = _get_config_for_arch(backend_config, arch)
-    
+    dsl_list = supported_dsls(framework, backend, arch)
     if dsl_list is None:
-        raise ValueError(f"Backend {backend} does not support arch: {arch}")
-
+        raise ValueError(
+            f"({framework}, {backend}, {arch}) is not a supported combination "
+            f"(accepted arch for {backend}: {arch_hint(backend)})")
     if normalized_dsl not in dsl_list:
-        raise ValueError(f"Arch {arch} does not support dsl: {normalized_dsl}")
-    
-    # 返回规范化后的DSL，供调用者使用
+        raise ValueError(
+            f"({framework}, {backend}, {arch}) does not support "
+            f"dsl={normalized_dsl} (accepted: {sorted(dsl_list)})")
     return normalized_dsl
 
 

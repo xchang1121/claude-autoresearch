@@ -16,7 +16,9 @@
 and the per-framework/backend/arch-family support matrix.
 
 ``DSL_REGISTRY`` maps DSL names and aliases to adapter classes, and its
-``support`` tuples drive ``eval.config_utils.VALID_CONFIGS``.
+``support`` tuples drive ``eval.config_utils._DSL_TABLE`` (the family-
+keyed DSL whitelist; arch membership is resolved by ``_family_of`` —
+explicit SKU tuples for ascend, family regex for cuda / cpu).
 """
 
 from dataclasses import dataclass
