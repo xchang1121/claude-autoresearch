@@ -25,6 +25,7 @@ from .task_layout import (  # noqa: E402, F401
     REF_FILE_DEFAULT, py_stem, pick_kernel_module_file,
 )
 from .task_files import is_task_relative_path
+from .dsl_project_config import flatten_task_yaml_dsl_blocks
 
 
 def _filter_contained(paths: list, field_name: str) -> list:
@@ -221,18 +222,8 @@ def load_task_config(task_dir: str) -> Optional[TaskConfig]:
               f"if this isn't what you intended.", file=_sys.stderr)
         raw_ref = REF_FILE_DEFAULT
 
-    # Per-DSL block flatteners. catlass is the only one today; future
-    # DSLs add a sibling 2-line block. Loader stays one place for the
-    # yaml → dsl_config mapping so eval_client forwards a single dict.
-    dsl_config: dict = {}
-    catlass_block = raw.get("catlass") or {}
-    if catlass_block.get("root") is not None:
-        dsl_config["catlass_root"] = catlass_block["root"]
-    dsl_config["catlass_op_dir"] = (
-        catlass_block.get("op_dir")
-        or catlass_block.get("catlass_op_dir")
-        or "catlass_op"
-    )
+    # Per-DSL blocks are opt-in; adapter defaults handle the common layout.
+    dsl_config = flatten_task_yaml_dsl_blocks(raw, yaml_path=yaml_path)
 
     config = TaskConfig(
         name=name,

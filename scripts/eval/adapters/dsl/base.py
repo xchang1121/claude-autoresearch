@@ -119,10 +119,10 @@ class DSLAdapter(ABC):
     # DSL's kernel project besides the wrapper itself — sources, headers,
     # build files. Single-file DSLs leave this empty.
     kernel_project_files: list = []
-    # Op entry filename — the file the LLM mainly edits. Format-string
-    # with optional ``{op_name}`` slot. ModelNew wrapper for triton /
-    # tilelang / pypto / catlass / torch; meta-Python for ascendc; a
-    # pure-C++ DSL would override to ``"{op_name}_kernel.cpp"`` etc.
+    # Op entry filename - the file the LLM mainly edits. Format-string
+    # with optional ``{op_name}`` slot. Most Python-fronted DSLs use a
+    # ``ModelNew`` wrapper; native DSLs can override to paths such as
+    # ``"{op_name}_kernel.cpp"``.
     # Consumers should NOT assume Python — check
     # ``static_check_via_python_ast`` for that.
     entry_filename_template: str = "kernel.py"
@@ -268,12 +268,36 @@ class DSLAdapter(ABC):
             return f.read(), None
 
     def materialize_project_tree(self, dst_dir: str,
-                                 project_src: Optional[str]) -> None:
+                                 project_src: Optional[str],
+                                 project_dir_name: Optional[str] = None) -> None:
         """Copy the DSL's project tree from ``project_src`` into ``dst_dir``
         with any DSL-specific patching (e.g. catlass cmake rewrite).
         Default: no-op (single-file DSLs have nothing to copy beyond the
         wrapper, which the caller already wrote out)."""
         return None
+
+    def list_kernel_project_files(self, project_src: Optional[str] = None,
+                                  op_name: Optional[str] = None,
+                                  project_dir_name: Optional[str] = None) -> list:
+        """Return editable files belonging to this DSL project tree.
+
+        Most multi-file DSLs have a fixed project shape and can use the
+        class-level ``kernel_project_files`` list. DSLs whose project files
+        are operator-named (AscendC direct-invoke) override this to discover
+        text sources from ``project_src`` after the handoff path is known.
+        Entries are relative to the wrapper's directory.
+        """
+        files = list(self.kernel_project_files)
+        src_dir = self.kernel_project_dir_name
+        dst_dir = project_dir_name or src_dir
+        if src_dir and dst_dir and dst_dir != src_dir:
+            prefix = f"{src_dir}/"
+            files = [
+                f"{dst_dir}/{path[len(prefix):]}"
+                if path.startswith(prefix) else path
+                for path in files
+            ]
+        return files
 
     def get_autotune_info(self, case_idx: int) -> Optional[Dict]:
         """Get autotune information (only for triton_ascend in profiling).

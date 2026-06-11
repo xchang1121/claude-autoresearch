@@ -235,6 +235,12 @@ def _load_config_safe(task_dir: str):
 # agent to a dead Glob.
 
 
+def _skills_subtree(dsl: str) -> str:
+    root = os.path.abspath(latency_refs_dir())
+    path = os.path.join(root, dsl)
+    return path.replace(os.sep, "/")
+
+
 def _skills_hint() -> str:
     """Recommend reading the DSL-specific skill docs when authoring plan
     items.
@@ -248,7 +254,7 @@ def _skills_hint() -> str:
     The Glob path is expanded with `settings.skill_dsl()`
     (config.yaml `defaults.skill_dsl`; kebab-case, e.g.
     `triton-ascend`) so the LLM gets a literal
-    `../skills/triton-ascend/**/SKILL.md` and not a "<dsl>"
+    a literal path to the resolved skills tree and not a "<dsl>"
     placeholder that the Glob tool would treat as a literal dir name
     and return zero matches for.
     """
@@ -256,8 +262,9 @@ def _skills_hint() -> str:
         return ""
     from utils.settings import skill_dsl as _skill_dsl
     dsl = _skill_dsl()
+    subtree = _skills_subtree(dsl)
     return (
-        f"\nSkills: Glob ../skills/{dsl}/**/SKILL.md "
+        f"\nSkills: Glob {subtree}/**/SKILL.md "
         f"(skill subdirs are `fundamentals/` `guides/` `cases/` "
         f"`examples/` `evolved-improvement/`), Read 1-3 most relevant "
         f"to a candidate plan-item direction. Citing the filename in "
@@ -623,11 +630,12 @@ def get_guidance(task_dir: str) -> str:
         from utils.settings import skill_dsl as _skill_dsl
         dsl = _skill_dsl()
         if skills_present:
+            subtree = _skills_subtree(dsl)
             skills_block = (
                 f"Read curated DSL-specific skill references for "
                 f"`{dsl}` (use them to ground fix directions in "
                 f"known-good patterns for this hardware):\n"
-                f"  - Glob ../skills/{dsl}/**/SKILL.md "
+                f"  - Glob {subtree}/**/SKILL.md "
                 f"(subdirs: `fundamentals/` `guides/` `cases/` "
                 f"`examples/` `evolved-improvement/`) and Read what "
                 f"matches the fix direction.\n"
@@ -635,7 +643,7 @@ def get_guidance(task_dir: str) -> str:
                 f"propose.\n\n"
             )
             scope_constraint = (
-                f"  - Glob / Grep ONLY under ../skills/{dsl}/. "
+                f"  - Glob / Grep ONLY under {subtree}/. "
                 f"The 4 task files plus that skills subtree are the "
                 f"entire scope.\n"
             )

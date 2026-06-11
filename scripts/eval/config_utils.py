@@ -131,6 +131,19 @@ def ascend_soc_version(arch: str) -> Optional[str]:
     return None
 
 
+
+def ascend_direct_invoke_npu_arch(arch: str) -> Optional[str]:
+    """Derive CANN direct-invoke ``--npu-arch`` from an Ascend arch token."""
+    arch = _normalize_arch_token(arch)
+    if arch and not arch.startswith("ascend"):
+        arch = "ascend" + arch
+    if arch.startswith("ascend950"):
+        return "dav-3510"
+    if arch.startswith("ascend910") or arch.startswith("ascend310"):
+        return "dav-2201"
+    return None
+
+
 def arch_hint(backend: str) -> str:
     """User-facing hint for what arch values ``backend`` accepts."""
     if backend == "ascend":

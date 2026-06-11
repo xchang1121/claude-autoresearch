@@ -374,7 +374,10 @@ def main():
         print(json.dumps({"status": "error", "error": str(e)}))
         sys.exit(1)
     entry_filename = adapter.entry_filename_template.format(op_name=args.op_name)
-    editable_files = [entry_filename] + list(adapter.kernel_project_files)
+    editable_files = [entry_filename] + list(
+        adapter.list_kernel_project_files(
+            kernel_project_src, op_name=args.op_name)
+    )
 
     # devices_list was resolved above.
     print(f"[scaffold] Creating task directory for {args.op_name}...", file=sys.stderr)
