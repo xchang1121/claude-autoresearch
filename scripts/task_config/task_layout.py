@@ -1,10 +1,24 @@
-"""AR task directory layout — single source of truth for the conventions
-shared across the scaffolder, verifier, and eval transport.
+# Copyright 2026 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Lives under task_config/ alongside the TaskConfig dataclass so the
-"what's in a task_dir" contract has one neighbourhood. Other modules
-(scaffold, eval_client, eval/kernel_verifier) import from here instead
-of hardcoding filenames.
+"""AR task directory layout — single source of truth for the conventions
+shared across workflows (v1 op/autoresearch + workspace_autoresearch) and
+the verifier.
+
+Lives under op/utils/ (not under any one workflow's adapter package) so
+the dependency direction stays workflow → conventions and verifier →
+conventions, never workflow → workflow.
 
 ================================================================================
 1. Per-task layout (under ``ar_tasks/<op>_<ts>_<hex6>/``)
@@ -16,7 +30,7 @@ of hardcoding filenames.
       <entry_file>          ← adapter.entry_filename_template, the file
                               the LLM mainly edits (kernel.py for triton /
                                tilelang / pypto / catlass wrapper /
-                               ascendc meta-Python; <op>_kernel.cpp for
+                               ascendc direct-invoke wrapper; <op>_kernel.cpp for
                                hypothetical pure-C++ DSLs, etc.)
       <project_subtree>/    ← multi-file DSLs only (e.g. catlass_op/);
                               filenames + structure from
@@ -41,8 +55,8 @@ of hardcoding filenames.
           <ref_dir>/<op_name>_ref.py
           <kernel_dir>/<op_name>_kernel.py
 
-  Multi-file DSLs (e.g. ascendc_catlass — adapter sets
-  ``kernel_arg_is_directory = True`` + ``kernel_project_dir_name = "catlass_op"``):
+  Multi-file DSLs (e.g. ascendc_catlass / ascendc — adapter sets
+  ``kernel_arg_is_directory = True`` + ``kernel_project_dir_name``):
       <batch_dir>/
           manifest.yaml | manifest.json
           <ref_dir>/<op_name>_ref.py
@@ -59,9 +73,9 @@ of hardcoding filenames.
 3. DSL-adapter knobs that drive the layout
 ================================================================================
 
-The base :class:`DSLAdapter` (``eval/adapters/dsl/base.py``) exposes the
-structural metadata; this module documents what each knob means for the
-layout:
+The base :class:`DSLAdapter` (``op/verifier/adapters/dsl/base.py``)
+exposes the structural metadata; this module documents what each knob
+*means* for the layout:
 
   entry_filename_template (str)
       Format-string filename for the op's entry file — the file the LLM
@@ -70,16 +84,16 @@ layout:
       Pure C++ DSLs override to e.g. ``"{op_name}_kernel.cpp"``.
 
   kernel_arg_is_directory (bool)
-      False (default) → ``--kernel`` is a Python file. The wrapper is
-      the kernel; ``editable_files = [entry_file]``.
+      False (default) → ``--kernel`` is a Python file. The wrapper is the
+      kernel; ``editable_files = [entry_file]``.
       True → ``--kernel`` is a directory containing a sibling entry file
       + a per-DSL project subtree. ``editable_files = [entry_file] +
       kernel_project_files``.
 
   kernel_project_dir_name (Optional[str])
       Subdirectory name (relative to per-op root) holding the project
-      subtree when ``kernel_arg_is_directory=True``. catlass uses
-      ``"catlass_op"``.
+      subtree when ``kernel_arg_is_directory=True``. Examples:
+      ``"catlass_op"`` and ``"ascendc_op"``.
 
   kernel_project_files (list)
       Path entries (files or directories) that belong to the DSL's
@@ -88,10 +102,8 @@ layout:
 
   static_check_via_python_ast (bool)
       True iff the entry file is Python source CodeChecker should
-      ``ast.parse``. False for ascendc (meta-Python that exec's into
-      string vars but doesn't define ``ModelNew``) and any pure-C++
-      adapter. NOT the same as "entry file is .py" — ascendc's entry is
-      .py but isn't ast-checkable.
+      ``ast.parse``. False for non-Python wrappers such as pure C++ /
+      CUDA-C adapters, or source formats such as swft.
 
   needs_binary_io (bool)
       True iff the DSL uses file-based tensor I/O (swft).
@@ -122,7 +134,7 @@ from typing import Tuple
 
 # Reference file written by every AR scaffolder. Per-task overridable via
 # ``TaskConfig.ref_file`` in task.yaml; this constant is the on-disk
-# default for the scaffolder, the verifier's
+# default for both v1 and WA scaffolders, the verifier's
 # ``_materialize_framework_bundle`` target, and any reader that needs to
 # find the framework Model before task.yaml is loaded.
 REF_FILE_DEFAULT = "reference.py"
@@ -134,21 +146,6 @@ def py_stem(name: str) -> str:
     CLI takes ``--ref-file <stem>`` (no extension) while
     ``TaskConfig.ref_file`` carries the basename WITH ``.py``."""
     return name[:-3] if name.endswith(".py") else name
-
-
-def pick_kernel_module_file(editable_files: list,
-                            default: str = "kernel.py") -> str:
-    """Return the importable Python wrapper from task.yaml editable_files.
-
-    Multi-file DSLs may list project directories or headers alongside
-    the wrapper. Eval still needs a Python module name for eval_kernel.py,
-    so prefer the first ``.py`` entry and fall back to the legacy
-    ``kernel.py`` convention."""
-    for path in editable_files or []:
-        s = str(path)
-        if s.endswith(".py"):
-            return s
-    return default
 
 
 def resolve_kernel_paths_for_op(adapter, kernel_dir: Path,
@@ -164,7 +161,7 @@ def resolve_kernel_paths_for_op(adapter, kernel_dir: Path,
     Single-file DSLs (``adapter.kernel_arg_is_directory=False``):
         ``<kernel_dir>/<op>_kernel.py`` — both kernel_arg and python_module.
 
-    Multi-file DSLs (catlass etc.):
+    Multi-file DSLs (ascendc_catlass / ascendc etc.):
         ``<kernel_dir>/<op>/<adapter.kernel_project_dir_name>/`` (kernel_arg)
         + sibling entry file named by ``adapter.entry_filename_template``
         or ``<op>_kernel.py`` (KernelBench legacy)."""

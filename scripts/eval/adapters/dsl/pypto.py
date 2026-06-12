@@ -21,14 +21,14 @@ from .base import DSLAdapter
 
 
 class DSLAdapterPypto(DSLAdapter):
-    profile_via_python_script = True
-
     """Adapter for PyPTO DSL.
-    
+
     PyPTO 是一种用于生成 NPU 算子的新语言，使用 @pypto.jit 装饰器和切片语法。
     与 Triton 不同，PyPTO 使用 tensor[start:end] 语法而非 tl.load/store。
     """
-    
+
+    profile_via_python_script = True
+
     def get_import_statements(self, framework: str) -> str:
         """Return PyPTO import statements."""
         code = ""
@@ -68,10 +68,10 @@ class DSLAdapterPypto(DSLAdapter):
                 'print(f"[INFO] Task override: AIKG_PYPTO_RUNTIME_DEBUG_MODE={os.environ[\'AIKG_PYPTO_RUNTIME_DEBUG_MODE\']}")'
             )
         return "\n".join(lines) + ("\n" if lines else "")
-    
+
     def get_impl_import(self, op_name: str, impl_func_name: str) -> str:
         """Return implementation function import.
-        
+
         统一使用 ModelNew 类格式（KernelBench 风格）。
         """
         module_name = re.sub(r"\W", "_", op_name)
@@ -89,29 +89,29 @@ class DSLAdapterPypto(DSLAdapter):
         )
 
     def create_impl_module(self, framework: str,
-                          framework_adapter: Any, 
+                          framework_adapter: Any,
                           init_params_var: str = "init_params",
                           device_var: str = "device") -> str:
         """生成创建 impl_model 的代码（只实例化一次）。
-        
+
         Args:
             framework: Framework name (torch, mindspore, numpy)
             framework_adapter: Framework adapter instance
             init_params_var: Variable name for init_params (default: "init_params")
             device_var: Variable name for device (default: "device")
-            
+
         Returns:
             str: Code string to create impl_model
         """
         code = f"impl_model = ModelNew(*{init_params_var})\n"
         if framework == "torch":
             code += f"impl_model = impl_model.to({device_var})\n"
-        
+
         return code
-    
+
     def call_impl(self, impl_func_name: str, inputs: str, device_id: int,
-                  framework_adapter: Any, op_name: str, 
-                  data_dir: Optional[str] = None, 
+                  framework_adapter: Any, op_name: str,
+                  data_dir: Optional[str] = None,
                   framework_output: Optional[str] = None) -> str:
         """Return code string to call PyPTO implementation function.
 
@@ -120,26 +120,42 @@ class DSLAdapterPypto(DSLAdapter):
         return (
             f"impl_output = impl_model(*{inputs})\n"
         )
-    
-    def benchmark_impl(self, impl_func_name: str, inputs: str, 
+
+    def benchmark_impl(self, impl_func_name: str, inputs: str,
                       warmup: int, runs: int, backend: str, op_name: str,
                       case_idx: int = 0, framework_model: Optional[str] = None,
                       framework_adapter: Optional[Any] = None,
                       device_id: Optional[int] = None,
                       framework: str = "torch") -> str:
         """Return code string to benchmark PyPTO implementation.
-        
+
         使用已经实例化好的 impl_model 进行性能测试。
         PyPTO 运行在 NPU 上，使用 NPU profiler 进行性能测试。
         """
         code = f"""        import os
         import json
+        import sys
+        import subprocess
+        from pathlib import Path
+
         # 定义性能测试函数
         def pypto_benchmark_fn():
             result = impl_model(*{inputs})
             return result
-        
+
         def _calc_trace_span_us(trace_path):
+            try:
+                from eval import get_project_root
+                proj_root = Path(get_project_root()).parent.parent
+                script = proj_root / "python" / "akg_agents" / "op" / "tools" / "calc_trace_span.py"
+                if script.exists():
+                    out = subprocess.check_output(
+                        [sys.executable, str(script), str(trace_path)],
+                        text=True
+                    )
+                    return float(out.strip())
+            except Exception:
+                pass
             with open(trace_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             events = [e for e in data.get("traceEvents", []) if e.get("ph") == "X"]
@@ -151,7 +167,7 @@ class DSLAdapterPypto(DSLAdapter):
                 for e in events
             )
             return max_end - min_ts
-        
+
         def _find_latest_swimlane(base_dir):
             \"\"\"Find merged_swimlane.json from profiler output directory.\"\"\"
             import glob
@@ -210,4 +226,4 @@ class DSLAdapterPypto(DSLAdapter):
             method = "simple_timing"
 """
         return code
-    
+

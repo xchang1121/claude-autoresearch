@@ -4,19 +4,24 @@
 # Two categories live in this file:
 #   1. Reference tables consumed verbatim (hallucinated_scripts,
 #      remote_worker.hosts). Free-form structure.
-#   2. Tunable knobs that ship with NO in-code defaults — a missing
+#   2. Tunable knobs that ship with NO in-code defaults - a missing
 #      section/key raises a hard error in settings._get. See the
 #      "Tunable knobs" banner below.
 #
 # Edit values in place; settings.py reads via @lru_cache so a long-lived
-# process won't pick up edits without a restart.
+# process will not pick up edits without a restart.
+#
+# Repository policy:
+#   Keep committed config deployment-neutral. Do not commit personal paths,
+#   private host aliases, or temporary benchmark settings. Put those in a
+#   local edit, ignored overlay, or CLI flag for one run.
 
 
 # ---------------------------------------------------------------------------
 # Hallucinated-script alias map. hooks/guard_bash classifies Bash calls
 # against this table BEFORE running them: if Claude tries `python scripts/
 # engine/<key>.py ...`, the hook rewrites the rejection message to point
-# at <value>.py — a targeted "did you mean ...?" instead of a generic
+# at <value>.py - a targeted "did you mean ...?" instead of a generic
 # "unknown script" error.
 #
 # Add an entry here whenever a new plausible-looking-but-wrong script
@@ -35,40 +40,48 @@ hallucinated_scripts:
 
 
 # ---------------------------------------------------------------------------
-# Remote worker SSH dispatch — used by
+# Remote worker SSH dispatch - used by
 #   `python scripts/ar_cli.py worker --remote-host <alias> ...`
 #
 # Each alias under `hosts:` describes a machine ar_cli can SSH into and
 # launch a worker daemon on. ar_cli reads this table on every --start /
 # --status / --stop --remote-host invocation.
 #
+# The committed repo should keep `hosts` empty. Add real machines only in
+# local, uncommitted config. Task execution itself does not read this table;
+# it reads task.yaml `worker.urls` or a CLI `--worker-url` after a daemon is
+# reachable.
+#
 # Field reference:
 #   repo_path   (required)  absolute path to the remote
 #                           `claude-autoresearch` checkout. The SSH command
 #                           bootstraps env_script, then does `cd <repo_path>`
 #                           and runs `python scripts/ar_cli.py worker ...`.
-#   env_script  (required)  shell script source'd before the remote
-#                           ar_cli runs. The launcher enables conda first,
-#                           so plain `conda activate ...` works in SSH
-#                           shells. It must leave `python -c "import
-#                           torch_npu, triton"` working; that same PATH-selected
-#                           `python` runs the remote ar_cli command.
-#   ssh_alias   (optional)  hostname passed to ssh. Default = the key
-#                           name itself; override when the host alias in
-#                           ~/.ssh/config differs from how you want to
-#                           refer to it here.
+#   env_script  (required)  shell script sourced before the remote ar_cli
+#                           runs. It should select the intended python and
+#                           initialize backend runtime, compiler, and library
+#                           paths needed by eval. The same PATH-selected
+#                           python runs the remote ar_cli command.
+#   ssh_alias   (optional)  hostname passed to ssh. Default = the key name
+#                           itself; override when the host alias in
+#                           ~/.ssh/config differs from how you want to refer
+#                           to it here.
 #
 # Tunnel handling is automatic: on --start ar_cli opens
-# `ssh -L <port>:127.0.0.1:<port> <alias> -N -f` and stores the local
-# tunnel pid at ~/.autoresearch_state/tunnels/<port>.pid. Subsequent
-# --status / --stop / `--worker-url 127.0.0.1:<port>` calls all
-# transparently hit the remote daemon over that tunnel.
+# `ssh -L <port>:127.0.0.1:<port> <alias> -N -f` and stores tunnel state in
+# the user state directory. Subsequent --status / --stop /
+# `--worker-url 127.0.0.1:<port>` calls transparently hit the remote daemon
+# over that tunnel.
+#
+# Example shape, intentionally placeholders only:
+#   hosts:
+#     eval-host:
+#       repo_path: /path/to/claude-autoresearch
+#       env_script: /path/to/env.sh
+#       ssh_alias: eval-host
 # ---------------------------------------------------------------------------
 remote_worker:
-  hosts:
-    npu:
-      repo_path: /home/yyz/cxy/claude-autoresearch
-      env_script: /home/yyz/env.sh
+  hosts: {}
 
 
 # ===========================================================================
@@ -76,87 +89,120 @@ remote_worker:
 #
 # config.yaml is the SINGLE SOURCE OF TRUTH for everything below.
 # settings.py exposes one accessor per key (settings.<name>()) and ships
-# NO in-code defaults — a missing section or key raises KeyError on first
+# NO in-code defaults - a missing section or key raises KeyError on first
 # read. Retune by editing the values here; do NOT add fallback defaults
 # in settings.py or downstream callers, that defeats the single-source
 # guarantee. To remove a knob, delete its accessor in settings.py AND
 # the key here AND audit `git grep <accessor>` for callers.
+#
+# Runtime precedence:
+#       task.yaml field / CLI flag  >  this defaults block  >  hard error
+#
+# Scaffold may pin resolved defaults into task.yaml at task creation time,
+# so a settled task keeps the value it was scaffolded with even if you
+# retune the defaults here later.
 # ===========================================================================
 
 
 # ---------------------------------------------------------------------------
-# Task defaults — applied when a scaffold CLI flag is omitted AND the
-# task.yaml doesn't pin the field. Precedence at runtime:
-#       task.yaml field   >  this defaults block  >  (no in-code default)
+# Task defaults - applied when a scaffold CLI flag is omitted AND the
+# task.yaml does not pin the field.
 #
-# scaffold pins the resolved value into task.yaml at create time, so a
-# settled task keeps the value it was scaffolded with even if you retune
-# the defaults here.
+# task.yaml override map:
+#   eval.timeout          (int seconds) wall-clock budget per verify/profile
+#                                      subprocess. Overrides eval_timeout.
+#   eval.num_cases       (int count)   explicit multi-shape case count for
+#                                      eval budget/fingerprint sizing. 0 or
+#                                      absent means auto-detect.
+#   smoke_test.timeout   (int seconds) quick_check smoke-test budget.
+#                                      Overrides smoke_test_timeout.
+#   smoke_test.script    (str path)    per-task smoke script; no global default.
+#   code_checker.enabled (bool)        per-task CodeChecker switch.
+#                                      Overrides code_checker_enabled.
+#   agent.max_rounds     (int rounds)  per-task optimization-round budget.
+#                                      Overrides max_rounds.
+#   agent.ref_file       (str path)    per-task reference file; default is
+#                                      reference.py.
+#   metric.*             (mapping)     per-task primary/lower_is_better/
+#                                      improvement_threshold override.
+#   devices              (list/int/str) local device IDs for direct eval.
+#   worker.urls          (list/str)    HTTP worker URLs for remote eval.
+#   editable_files       (list paths)  task-owned files the agent may edit;
+#                                      also drives kernel packaging.
+#   data_files           (list paths)  task sidecars packaged with formal eval.
+#   <dsl block>          (mapping)     per-DSL project layout knobs such as
+#                                      op_dir/root. Loader flattens these into
+#                                      TaskConfig.dsl_config for adapters.
 #
 # Field reference:
-#   max_rounds            (int)         optimization-round budget for a
-#                                       new task: PLAN → EDIT → eval
-#                                       cycles. Hit max_rounds and the
-#                                       loop auto-transitions to FINISH
-#                                       and writes report.md. Override
-#                                       per task via scaffold's
-#                                       --max-rounds.
-#   eval_timeout          (int seconds) wall-clock budget per single
-#                                       verify or profile subprocess.
-#                                       eval_runner scales by num_cases
-#                                       so a 50-shape op gets ~50× the
-#                                       budget. Bump on SIGKILL/124;
-#                                       shrink to fail-fast hangs.
-#   smoke_test_timeout    (int seconds) budget for quick_check's optional
-#                                       smoke test (per task, not per
-#                                       shape). Only fires when task.yaml
-#                                       sets smoke_test_script. Keep
-#                                       small — runs every EDIT, on the
-#                                       critical path.
-#   code_checker_enabled  (bool)        whether the Triton-impl AST
-#                                       regression check
-#                                       (scripts/utils/validate_triton_impl.py
-#                                       via quick_check.py) runs by
-#                                       default. Catches kernels that
-#                                       fake the @triton.jit contract.
-#                                       Flip per-task via task.yaml
-#                                       `code_checker: {enabled: false}`
-#                                       or scaffold's --no-code-checker.
-#   metric.primary        (str)         metric name keep_or_discard
-#                                       reads. Currently only
-#                                       `latency_us` is interpreted;
-#                                       other values land on report.py's
-#                                       "unknown metric" branch.
-#   metric.lower_is_better (bool)       true = smaller wins (latency);
-#                                       false = larger wins (throughput).
-#   metric.improvement_threshold (float) KEEP gate.  Unit is PERCENT
-#                                       (NOT a fraction), matching
-#                                       is_improvement's `relative_pct
-#                                       = (best-cand)/|best| * 100`
-#                                       comparison.  Examples:
-#                                         0.0  → any strict improvement keeps
-#                                         2.0  → requires >2 % better
-#                                         5.0  → requires >5 % better
-#                                       Setting 0.05 here means ">0.05 %"
-#                                       — almost any positive improvement.
-#   consecutive_fail_threshold (int)    FAIL streak length that flips
-#                                       PLAN/EDIT into DIAGNOSE. Was
-#                                       hard-coded `3` in
-#                                       phase_policy.py.
-#   diagnose_max_attempts (int)         DIAGNOSE subagent retries
-#                                       allowed per plan_version before
-#                                       the manual-fallback artifact
-#                                       path opens. Was
-#                                       `DIAGNOSE_ATTEMPTS_CAP = 5` in
-#                                       state_store.py.
-#   backend / framework / dsl (str)     Workspace target triple, pinned
-#                                       per repo. Local scaffold uses
-#                                       backend to choose the arch probe;
-#                                       eval dispatch passes the triple to
-#                                       KernelVerifier. Snake-form `dsl`
-#                                       names the eval adapter, while
-#                                       `skill_dsl` below names the
-#                                       kebab-case skills directory.
+#   max_rounds            (int rounds) optimization-round budget for a new
+#                                      task: PLAN -> EDIT -> eval cycles.
+#                                      Hit max_rounds and the loop
+#                                      auto-transitions to FINISH and writes
+#                                      report.md. Override per task via
+#                                      scaffold's --max-rounds or
+#                                      task.yaml agent.max_rounds.
+#   eval_timeout          (int seconds) wall-clock budget per single verify
+#                                      or profile subprocess. Formal eval may
+#                                      scale by num_cases so many-shape ops get
+#                                      proportionally more wall time. Bump on
+#                                      timeout/SIGKILL/124; shrink to fail fast
+#                                      on hangs.
+#   smoke_test_timeout    (int seconds) budget for quick_check's optional smoke
+#                                      test (per task, not per shape). Only
+#                                      fires when task.yaml sets smoke_test.
+#                                      script. Keep small - it runs every EDIT,
+#                                      on the critical path.
+#   code_checker_enabled  (bool)       whether DSL-aware static checks run by
+#                                      default before formal eval. For Python
+#                                      edit surfaces this includes syntax /
+#                                      py_compile, required kernel shape,
+#                                      DSL launch markers, forbidden framework
+#                                      fallback calls, stray generated text,
+#                                      and decorator-safety rules. Non-Python
+#                                      DSLs use only checks meaningful for
+#                                      their editable surface. Exact policy
+#                                      lives in scripts/utils/config/
+#                                      code_checker.yaml. Flip per task via
+#                                      task.yaml `code_checker: {enabled:
+#                                      false}` or scaffold's
+#                                      --no-code-checker.
+#   metric.primary        (str)        metric name keep_or_discard reads.
+#                                      `latency_us` is the normal latency
+#                                      metric; introduce new primary metrics
+#                                      only with matching report + keep/discard
+#                                      support.
+#   metric.lower_is_better (bool)      true = smaller wins (latency); false =
+#                                      larger wins (throughput/score).
+#   metric.improvement_threshold (float percent)
+#                                      KEEP gate. Unit is PERCENT, not a
+#                                      fraction, matching relative_pct =
+#                                      (best - candidate) / abs(best) * 100
+#                                      for lower-is-better metrics. Examples:
+#                                        0.0  -> any strict improvement keeps
+#                                        2.0  -> requires >2 percent better
+#                                        5.0  -> requires >5 percent better
+#                                      Setting 0.05 means ">0.05 percent",
+#                                      almost any positive improvement.
+#   skill_dsl             (str)        kebab-case skills directory name used by
+#                                      guidance prompts: skills/<skill_dsl>/.
+#                                      This is prompt-material selection, not
+#                                      the eval adapter name.
+#   backend / framework / dsl (str)    workspace target triple, pinned per
+#                                      repo. backend selects diagnostics and
+#                                      worker expectations; framework selects
+#                                      the reference adapter; snake-form dsl
+#                                      names the KernelVerifier adapter.
+#                                      Per-task project layout belongs in
+#                                      task.yaml DSL blocks, not by mutating
+#                                      these globals mid-run.
+#   consecutive_fail_threshold (int count)
+#                                      FAIL streak length that flips PLAN/EDIT
+#                                      into DIAGNOSE. Lower for aggressive
+#                                      diagnosis; raise when workers are noisy.
+#   diagnose_max_attempts (int count)  DIAGNOSE subagent retries allowed per
+#                                      plan_version before the manual-fallback
+#                                      artifact path opens.
 # ---------------------------------------------------------------------------
 defaults:
   max_rounds: 30
@@ -176,20 +222,23 @@ defaults:
 
 
 # ---------------------------------------------------------------------------
-# Eval timing measurement (utils/eval_runner.local_eval{,_async}).
-# Read where the timing runs: on remote eval the WORKER's config.yaml
-# applies, not the orchestrator's. Keep both in sync, or accept that
-# warmup/repeats can diverge between local-baseline and remote rounds.
+# Eval timing measurement (formal KernelVerifier / worker chain).
+#
+# Read where the timing runs: on remote eval the WORKER's config.yaml applies,
+# not the orchestrator's. Keep both in sync when comparing local-baseline and
+# remote-worker rounds, or accept that warmup/repeats can diverge.
 #
 # Field reference:
-#   warmup   (int) untimed warmup iterations before measurement begins.
-#                  Higher = more JIT/cache warming, longer per-round
-#                  wall clock. 10 is enough for triton-ascend's compile
-#                  cache to settle on most ops.
-#   repeats  (int) measured iterations whose mean becomes the reported
-#                  latency_us per shape. Higher = lower variance, longer
-#                  per-round wall clock. 100 is the variance/cost sweet
-#                  spot observed on 910B.
+#   warmup   (int iterations per case)
+#                  Untimed warmup iterations before measurement begins.
+#                  Higher = more runtime/cache warming, longer per-round wall
+#                  clock. Increase when lazy initialization or one-time compile
+#                  effects pollute the first measured iterations.
+#   repeats  (int iterations per case)
+#                  Measured iterations whose mean becomes the reported
+#                  latency_us per shape/case. Higher = lower variance, longer
+#                  per-round wall clock. Changing this changes comparability
+#                  with previously recorded baselines.
 # ---------------------------------------------------------------------------
 eval:
   warmup: 5
@@ -199,42 +248,36 @@ eval:
 # ---------------------------------------------------------------------------
 # Remote worker daemon. Single source for BOTH sides of the wire:
 #   - ar_cli (dev side): tunnel port, readiness wait, status probes
-#   - worker.server   : bind port (so the two cannot drift)
+#   - worker.server: bind port (so the two cannot drift)
 #
-# The ready_* / status_* timeouts cover ar_cli's wait on a remote
-# daemon over `ssh -L`, which adds variable round-trip latency on top
-# of the daemon's own startup time. Bump if you see "worker not ready"
-# false-negatives on slow networks; shrink to fail-fast on a wedged
-# daemon.
+# The ready_* / status_* timeouts cover ar_cli's wait on a daemon over an HTTP
+# endpoint that may be local or reached through ssh -L. Bump if you see
+# "worker not ready" false-negatives on slow environments; shrink to fail fast
+# on a wedged daemon.
 #
 # Field reference:
-#   port                (int)   TCP port the worker binds (127.0.0.1
-#                               only; routing to the dev box goes
-#                               through ssh -L). Also the default
-#                               --port for ar_cli's --start / --status
-#                               / --stop. Change this and the next
-#                               `ar_cli worker --start` uses the new
-#                               port automatically.
-#   ready_timeout       (float) total seconds ar_cli waits after
-#                               spawning the remote daemon for it to
-#                               answer /status. Polls every
-#                               ready_poll_interval. CANN import +
-#                               worker boot is ~5s warm cache, ~15s
-#                               cold; 20s leaves headroom.
-#   ready_poll_interval (float) seconds between readiness polls during
-#                               the startup loop. Smaller = faster
-#                               pickup, more SSH chatter while waiting.
-#   ready_probe_timeout (float) per-poll /status probe timeout DURING
-#                               the readiness loop. Kept short so a
-#                               wedged tunnel doesn't burn the whole
-#                               ready_timeout on one poll. Distinct from
-#                               status_timeout below.
-#   status_timeout      (float) seconds for a standalone /status
-#                               reachability probe (the path
-#                               `ar_cli worker --status` takes, and
-#                               eval_client uses to fail-fast before
-#                               sending a multipart /run). Bump on
-#                               high-latency links.
+#   port                (int TCP port) TCP port the worker binds locally and
+#                                      the default local tunnel port ar_cli
+#                                      uses for --start / --status / --stop.
+#                                      Change this when the port conflicts with
+#                                      another service.
+#   ready_timeout       (float seconds) total seconds ar_cli waits after
+#                                      spawning the daemon for it to answer
+#                                      /status. Polls every
+#                                      ready_poll_interval.
+#   ready_poll_interval (float seconds) seconds between readiness polls during
+#                                      the startup loop. Smaller = faster
+#                                      pickup, more SSH/HTTP chatter.
+#   ready_probe_timeout (float seconds) per-poll /status timeout DURING the
+#                                      readiness loop. Kept short so one
+#                                      wedged probe does not burn the whole
+#                                      ready_timeout. Distinct from
+#                                      status_timeout below.
+#   status_timeout      (float seconds) timeout for standalone /status
+#                                      reachability probes (`ar_cli worker
+#                                      --status` and eval_client fail-fast
+#                                      before sending multipart /run). Bump on
+#                                      high-latency links.
 # ---------------------------------------------------------------------------
 worker:
   port: 9111
@@ -248,72 +291,67 @@ worker:
 # CATLASS C++ template library root (ascendc_catlass DSL only).
 #
 # eval/catlass_paths.resolve_catlass_root() looks up the directory that
-# contains ``include/catlass/`` in this order; first hit wins:
+# contains `include/catlass/` in this order; first hit wins:
 #
-#   1. task.yaml ``catlass.root`` (per-task override; rare)
-#   2. ``CATLASS_ROOT`` env var (worker daemon shell env)
-#   3. ``catlass.root`` below (this file; cross-task workspace default)
-#   4. ``<repo-root>/thirdparty/catlass`` (one-click install location
-#      created by ``bash scripts/download_catlass.sh``)
+#   1. task.yaml `catlass.root` (per-task override)
+#   2. `CATLASS_ROOT` env var (worker daemon shell env)
+#   3. `catlass.root` below (this file; cross-task workspace default)
+#   4. `<repo-root>/thirdparty/catlass` (standard install location)
 #
-# Leave ``root`` as the empty string to fall through to env / standard
-# install. Only set an absolute path when CATLASS is installed somewhere
-# else and you do NOT want to use $CATLASS_ROOT.
+# Leave `root` as the empty string to fall through to env / standard install.
+# Only set an absolute path when CATLASS is installed somewhere else and you do
+# NOT want to use $CATLASS_ROOT. Keep committed config empty unless the repo
+# layout itself owns the dependency.
 #
 # Field reference:
-#   root  (str)  absolute path to the CATLASS repo root, or ``""``.
+#   root  (str path) absolute path to the CATLASS repo root, or "".
 # ---------------------------------------------------------------------------
 catlass:
   root: ""
 
 
 # ---------------------------------------------------------------------------
-# Batch driver knobs (scripts/batch/*). Two unrelated kinds of timeouts
-# bundled together: pre-flight Tier 1/2 verify (used by batch/verify.py
-# before the long batch run) and the per-op driver wall clock + cooldown
-# (used by batch/run.py while looping through ops).
+# Batch driver knobs (scripts/batch/*). Two related timeout groups live here:
+# pre-flight Tier 1/2 verify (used by batch/verify.py before the long batch
+# run) and per-op driver wall clock / cooldown / retry knobs (used by
+# batch/run.py while looping through ops). CLI flags can override the run-time
+# knobs for a single invocation.
+#
+# These values affect batch orchestration only; they do not change task.yaml
+# max_rounds or formal eval warmup/repeats.
 #
 # Field reference:
-#   tier1_timeout    (int seconds)  Tier 1 verify budget per op: import
-#                                   + tiny-shape smoke. Runs without an
-#                                   NPU, mainly catches syntax /
-#                                   missing-export errors.
-#   tier2_timeout    (int seconds)  Tier 2 verify budget per op: full
-#                                   multi-shape correctness with the
-#                                   actual kernel. Cold JIT across ~50
-#                                   cases on triton-ascend can take
-#                                   minutes for kernels with many
-#                                   constexpr specializations
-#                                   (maxpool3d, attention variants).
-#   run_timeout_min  (int minutes)  hard wall-clock cap per op in
-#                                   batch/run.py (note: MINUTES, not
-#                                   seconds). Each op gets at most this
-#                                   many minutes before run.py SIGTERMs
-#                                   claude --print and marks the op
-#                                   `error`. Override per invocation via
+#   tier1_timeout     (int seconds per op)
+#                                   Tier 1 verify budget: import, package
+#                                   structure, reference/kernel entry
+#                                   discovery, and tiny-shape smoke checks.
+#                                   Mainly catches syntax / missing-export /
+#                                   packaging errors before a long run.
+#   tier2_timeout     (int seconds per op)
+#                                   Tier 2 verify budget: full correctness and
+#                                   profiling with the formal evaluator or
+#                                   worker path. Increase for cold compilers,
+#                                   project-backed DSLs, and many-shape tasks.
+#   run_timeout_min   (int minutes per op)
+#                                   Hard wall-clock cap per op in batch/run.py
+#                                   (note: MINUTES, not seconds). Each op gets
+#                                   at most this many minutes for baseline,
+#                                   optimization rounds, and report. Override
+#                                   per invocation via
 #                                   `batch/run.py --timeout-min N`.
-#                                   Calibrate to ~3× the median observed
-#                                   (cold JIT + 30 rounds + report).
-#   cooldown_sec     (int seconds)  sleep between ops in batch/run.py.
-#                                   Lets the worker finish cleanup
-#                                   (release device, GC HBM) before the
-#                                   next op acquires. Override via
-#                                   `--cooldown-sec N`. 0 is allowed but
-#                                   invites flaky device-acquire races.
-#   transient_retries (int)         max times batch/run.py re-spawns
-#                                   `claude --print /autoresearch
-#                                   --resume <task_dir> --force` for the
-#                                   same op when the session crashed
-#                                   mid-flight (claude.exe rc != 0) but
-#                                   framework progress is intact
+#   cooldown_sec      (int seconds) sleep between ops in batch/run.py. Lets
+#                                   the worker finish cleanup (release device,
+#                                   clear runtime state, GC memory) before the
+#                                   next op acquires. 0 is allowed but can
+#                                   invite flaky device-acquire races on shared
+#                                   accelerators.
+#   transient_retries (int count)   max times batch/run.py re-spawns the agent
+#                                   for the same op when the session crashes
+#                                   mid-flight but framework progress is intact
 #                                   (progress_initialized=True). Catches
-#                                   ECONNRESET / stream idle timeouts /
-#                                   transient API errors that exit the
-#                                   cli without going through stop_save.
-#                                   Real failures (rc=0 + phase != FINISH
-#                                   = LLM ended turn early; rc != 0 + no
-#                                   progress = baseline never committed)
-#                                   skip retry and surface immediately.
+#                                   transient transport/session errors. Real
+#                                   correctness failures and baseline-never-
+#                                   committed failures surface immediately.
 # ---------------------------------------------------------------------------
 batch:
   tier1_timeout: 30
@@ -324,20 +362,28 @@ batch:
 
 
 # ---------------------------------------------------------------------------
-# Speedup classification used by batch reporters (summarize.py /
-# monitor.py) and the shared classify_speedup() in settings.py.
-# Values are speedup factors v = baseline_us / candidate_us; v=1.0 means
-# the kernel matches the ref exactly.
+# Speedup classification used by batch reporters (summarize.py / monitor.py)
+# and the shared classify_speedup() in settings.py.
 #
-# Three buckets: v > improved_above → "improved"; v < regress_below →
-# "regress"; everything in between → "on-par". Widen the gap to be more
-# forgiving (treat noise as on-par); tighten to flag smaller wins.
+# Values are speedup factors:
+#       v = baseline_us / candidate_us
+#
+# v = 1.0 means parity. Larger is faster for latency metrics.
+#
+# Three buckets:
+#       v > speedup_improved_above -> "improved"
+#       v < speedup_regress_below  -> "regress"
+#       otherwise                  -> "on-par"
+#
+# Widen the gap to treat noise as on-par; tighten it to flag smaller wins.
 #
 # Field reference:
-#   speedup_improved_above  (float)  upper bucket threshold. v above
-#                                    this is reported as "improved".
-#   speedup_regress_below   (float)  lower bucket threshold. v below
-#                                    this is reported as "regress".
+#   speedup_improved_above  (float factor, unitless) upper bucket threshold.
+#                                                  Values above this are
+#                                                  reported as "improved".
+#   speedup_regress_below   (float factor, unitless) lower bucket threshold.
+#                                                  Values below this are
+#                                                  reported as "regress".
 # ---------------------------------------------------------------------------
 metrics:
   speedup_improved_above: 1.05
@@ -347,16 +393,14 @@ metrics:
 # ---------------------------------------------------------------------------
 # Resume heartbeat freshness window (scripts/resume.py).
 #
-# /autoresearch bumps <task_dir>/.ar_state/state.json's `last_touched`
-# field on each tool call. A task whose last_touched is FRESHER than
-# this many seconds is treated as still owned by another live session
-# — resume refuses to attach (which would race the live writer). Bump
-# if a slow Edit round can take longer than this; shrink to recover
-# from killed sessions faster.
+# /autoresearch bumps <task_dir>/.ar_state/state.json's `last_touched` field
+# on each tool call. A task whose last_touched is FRESHER than this many
+# seconds is treated as still owned by another live session; resume refuses to
+# attach, avoiding a race with the live writer. Bump if a slow Edit round can
+# take longer than this; shrink to recover from killed sessions faster.
 #
 # Field reference:
-#   heartbeat_fresh_seconds  (int seconds)  freshness window described
-#                                           above.
+#   heartbeat_fresh_seconds  (int seconds) freshness window described above.
 # ---------------------------------------------------------------------------
 resume:
   heartbeat_fresh_seconds: 180

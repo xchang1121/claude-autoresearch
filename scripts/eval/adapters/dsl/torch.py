@@ -29,13 +29,13 @@ from .base import DSLAdapter
 
 
 class DSLAdapterTorch(DSLAdapter):
+    """Adapter for PyTorch DSL (Kernel → PyTorch conversion, supports Triton/CUDA C/etc.)."""
+
     impl_func_name_template = "ModelNew"
 
-    """Adapter for PyTorch DSL (Kernel → PyTorch conversion, supports Triton/CUDA C/etc.)."""
-    
     def get_import_statements(self, framework: str) -> str:
         """Return PyTorch import statements.
-        
+
         注意：这里不需要 import triton，因为生成的代码是纯 PyTorch。
         """
         if framework == "torch":
@@ -47,27 +47,27 @@ class DSLAdapterTorch(DSLAdapter):
             return "import torch\nimport torch.nn as nn\nimport numpy as np\n"
         else:
             return "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n"
-    
+
     def get_impl_import(self, op_name: str, impl_func_name: str) -> str:
         """Return implementation function import.
-        
+
         统一使用 ModelNew 类格式（KernelBench 风格）。
         注意：使用 _impl 后缀避免与 framework 文件冲突
         """
         return f"from {op_name}_torch_impl import ModelNew\n"
-    
+
     def create_impl_module(self, framework: str,
-                          framework_adapter: Any, 
+                          framework_adapter: Any,
                           init_params_var: str = "init_params",
                           device_var: str = "device") -> str:
         """生成创建 impl_model 的代码（只实例化一次）。
-        
+
         Args:
             framework: Framework name (torch, mindspore, numpy)
             framework_adapter: Framework adapter instance
             init_params_var: Variable name for init_params (default: "init_params")
             device_var: Variable name for device (default: "device")
-            
+
         Returns:
             str: Code string to create impl_model
         """
@@ -75,27 +75,27 @@ class DSLAdapterTorch(DSLAdapter):
         if framework == "torch":
             code += f"impl_model = impl_model.to({device_var})\n"
         code += "impl_model.eval()\n"
-        
+
         return code
-    
+
     def call_impl(self, impl_func_name: str, inputs: str, device_id: int,
-                  framework_adapter: Any, op_name: str, 
-                  data_dir: Optional[str] = None, 
+                  framework_adapter: Any, op_name: str,
+                  data_dir: Optional[str] = None,
                   framework_output: Optional[str] = None) -> str:
         """Return code string to call PyTorch implementation function.
-        
+
         调用已经实例化好的 impl_model（可以多次调用）。
         """
         return f"impl_output = impl_model(*{inputs})\n"
-    
-    def benchmark_impl(self, impl_func_name: str, inputs: str, 
+
+    def benchmark_impl(self, impl_func_name: str, inputs: str,
                       warmup: int, runs: int, backend: str, op_name: str,
                       case_idx: int = 0, framework_model: Optional[str] = None,
                       framework_adapter: Optional[Any] = None,
                       device_id: Optional[int] = None,
                       framework: str = "torch") -> str:
         """Return code string to benchmark PyTorch implementation.
-        
+
         使用已经实例化好的 impl_model 进行性能测试。
         """
         # 根据 backend 选择同步方法
@@ -105,31 +105,31 @@ class DSLAdapterTorch(DSLAdapter):
             sync_code = "torch.npu.synchronize()"
         else:
             sync_code = "pass  # CPU, no sync needed"
-        
+
         code = f"""        # PyTorch 原生实现性能测试
         import time
-        
+
         def torch_benchmark_fn():
             result = impl_model(*{inputs})
             return result
-        
+
         # 预热
         for _ in range({warmup}):
             _ = torch_benchmark_fn()
             {sync_code}
-        
+
         # 计时
         start_time = time.time()
         for _ in range({runs}):
             _ = torch_benchmark_fn()
             {sync_code}
         end_time = time.time()
-        
+
         execution_time_ms = (end_time - start_time) * 1000 / {runs}
         method = "pytorch_loop_timer"
 """
         return code
-    
+
     def get_special_setup_code(self, framework: str = "torch") -> str:
         """Return special setup code (not needed for PyTorch)."""
         return ""

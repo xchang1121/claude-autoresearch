@@ -161,8 +161,8 @@ def scaffold_task_dir(
     # `eval.num_cases` so later rounds — including a first remote baseline
     # on a dev host that can't import the ref — scale the eval timeout and
     # sticky fingerprint correctly instead of falling back to 1. Probe
-    # failure (no torch/CANN here) just omits the field; eval_request then
-    # falls back to its own probe / fingerprint reuse as before.
+    # failure (no torch/CANN here) just omits the field; the eval host
+    # resolves cases inside the formal verifier path.
     eval_block = {"timeout": eval_timeout}
     num_cases = _probe_num_cases(task_dir, REF_FILE_DEFAULT)
     if num_cases and num_cases >= 1:
@@ -216,19 +216,46 @@ def scaffold_task_dir(
 
 
 def _probe_num_cases(task_dir: str, ref_file: str):
-    """Best-effort case count for task.yaml `eval.num_cases`, using the
-    exact runtime resolver (task_config.eval_request.count_ref_cases) so
-    scaffold and eval agree. Returns the count, or None if the ref can't
-    be imported here (e.g. no torch on the dev host) — the caller then
-    simply omits the field and lets eval_request probe at run time."""
-    try:
-        from task_config.loader import TaskConfig
-        from task_config.eval_request import count_ref_cases
-        probe_cfg = TaskConfig(name="_probe", ref_file=ref_file)
-        return count_ref_cases(task_dir, probe_cfg)
-    except Exception:
+    """Best-effort case count for task.yaml `eval.num_cases`.
+
+    The formal eval path can run on a different host from scaffold. When
+    scaffold can import the ref locally, pin the case count into task.yaml
+    so timeout sizing and baseline fingerprinting do not depend on a
+    dev-host probe later. If the ref needs unavailable runtime packages,
+    return None and let the eval host resolve cases in the verifier path.
+    """
+    ref_path = os.path.join(task_dir, ref_file)
+    if not os.path.isfile(ref_path):
         return None
 
+    ref_dir = os.path.dirname(ref_path) or "."
+    added = ref_dir not in sys.path
+    if added:
+        sys.path.insert(0, ref_dir)
+    try:
+        import importlib.util
+        from utils.input_groups import resolve as _resolve
+
+        mod_name = f"_ar_ref_case_probe_{int(time.time())}_{uuid.uuid4().hex}"
+        spec = importlib.util.spec_from_file_location(mod_name, ref_path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return max(len(_resolve(mod)), 1)
+    except Exception as exc:
+        print(
+            f"[scaffold] WARNING: case-count probe failed: "
+            f"{type(exc).__name__}: {exc}; omitting eval.num_cases.",
+            file=sys.stderr,
+        )
+        return None
+    finally:
+        if added:
+            try:
+                sys.path.remove(ref_dir)
+            except ValueError:
+                pass
 
 def _write(task_dir: str, rel_path: str, content: str):
     full_path = os.path.join(task_dir, rel_path)

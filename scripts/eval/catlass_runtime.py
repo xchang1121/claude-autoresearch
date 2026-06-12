@@ -75,7 +75,7 @@ def ensure_catlass_library(
     if not resolved_root:
         raise RuntimeError(
             "CATLASS_ROOT is not set. Set task.yaml catlass.root, export CATLASS_ROOT, "
-            "or install catlass at <repo-root>/thirdparty/catlass."
+            "or install catlass at <akg-root>/thirdparty/catlass via `bash download.sh --with_catlass`."
         )
     resolved_root = os.path.abspath(resolved_root)
     os.environ["CATLASS_ROOT"] = resolved_root

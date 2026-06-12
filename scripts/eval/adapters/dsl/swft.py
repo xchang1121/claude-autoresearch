@@ -22,62 +22,63 @@ from .base import DSLAdapter
 class DSLAdapterSwft(DSLAdapter):
     """Adapter for SWFT DSL."""
 
-    needs_binary_io = True
-    
     def get_import_statements(self, framework: str) -> str:
         """Return SWFT import statements."""
         return "from swft.core import *\nfrom swft.api import *\nimport numpy as np\n"
-    
+
     def get_impl_import(self, op_name: str, impl_func_name: str) -> str:
         """Return implementation function import."""
         return f"from {op_name}_swft_impl import ModelNew\n"
-    
+
     def create_impl_module(self, framework: str,
-                          framework_adapter: Any, 
+                          framework_adapter: Any,
                           init_params_var: str = "init_params",
                           device_var: str = "device") -> str:
         """生成创建 impl_model 的代码（只实例化一次）。
-        
+
         Args:
             framework: Framework name (torch, mindspore, numpy)
             framework_adapter: Framework adapter instance
             init_params_var: Variable name for init_params (default: "init_params")
             device_var: Variable name for device (default: "device")
-            
+
         Returns:
             str: Code string to create impl_model
         """
         code = f"impl_model = ModelNew(*{init_params_var})\n"
         return code
-    
+
     def call_impl(self, impl_func_name: str, inputs: str, device_id: int,
-                  framework_adapter: Any, op_name: str, 
-                  data_dir: Optional[str] = None, 
+                  framework_adapter: Any, op_name: str,
+                  data_dir: Optional[str] = None,
                   framework_output: Optional[str] = None) -> str:
         """Return code string to call SWFT implementation function.
-        
+
         SWFT requires binary I/O, so we need to generate bin files first.
         """
         if data_dir is None:
             data_dir = "os.path.dirname(__file__)"
         if framework_output is None:
             framework_output = "framework_output"
-        
+
         code = f"""        # 运行SWFT实现
         data_dir = os.path.dirname(__file__)
-        
+
         # 生成二进制数据文件
         gen_binary_data({inputs}, {framework_output}, data_dir)
-        
+
         # 运行SWFT实现
         impl_model(*{inputs})
-        
+
         # 加载SWFT输出
         impl_output = load_binary_data(data_dir, {framework_output})
 """
         return code
-    
-    def benchmark_impl(self, impl_func_name: str, inputs: str, 
+
+    needs_binary_io = True
+    static_check_via_python_ast = False  # swft-format src, not stdlib Python
+
+    def benchmark_impl(self, impl_func_name: str, inputs: str,
                       warmup: int, runs: int, backend: str, op_name: str,
                       case_idx: int = 0, framework_model: Optional[str] = None,
                       framework_adapter: Optional[Any] = None,
@@ -88,14 +89,14 @@ class DSLAdapterSwft(DSLAdapter):
             framework_model = "framework_model"
         if device_id is None:
             device_id = 0
-        
+
         code = f"""        # 运行SWFT实现
         data_dir = os.path.dirname(__file__)
-        
+
         # 生成二进制数据文件
         framework_output = {framework_model}(*{inputs})
         gen_binary_data({inputs}, framework_output, data_dir)
-        
+
         # 运行SWFT实现
         import time
         start_time = time.time()
@@ -106,4 +107,4 @@ class DSLAdapterSwft(DSLAdapter):
         method = "traditional_timing"
 """
         return code
-    
+

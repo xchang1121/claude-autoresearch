@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from eval.worker.interface import DEFAULT_EVAL_TIMEOUT_S
-from eval.config_utils import ascend_direct_invoke_npu_arch
+from eval.arch_normalize import ascend_direct_invoke_npu_arch
 from .base import DSLAdapter
 
 logger = logging.getLogger(__name__)

@@ -21,7 +21,9 @@ from .base import DSLAdapter
 
 class DSLAdapterTilelangNpuir(DSLAdapter):
     """Adapter for TileLang NPUIR DSL."""
-    
+
+    profile_via_python_script = True
+
     def get_import_statements(self, framework: str) -> str:
         """Return TileLang NPUIR import statements."""
         code = """import tilelang
@@ -35,19 +37,19 @@ except ImportError:
         if framework == "torch":
             code += "import torch\nimport torch_npu\nimport tilelang.language as T\n"
         return code
-    
+
     def get_impl_import(self, op_name: str, impl_func_name: str) -> str:
         """Return implementation function import."""
         return f"from {op_name}_tilelang_npuir_impl import {impl_func_name}\n"
-    
+
     def call_impl(self, impl_func_name: str, inputs: str, device_id: int,
-                  framework_adapter: Any, op_name: str, 
-                  data_dir: Optional[str] = None, 
+                  framework_adapter: Any, op_name: str,
+                  data_dir: Optional[str] = None,
                   framework_output: Optional[str] = None) -> str:
         """Return code string to call TileLang NPUIR implementation function."""
         return f"impl_output = {impl_func_name}(*{inputs})\n"
-    
-    def benchmark_impl(self, impl_func_name: str, inputs: str, 
+
+    def benchmark_impl(self, impl_func_name: str, inputs: str,
                       warmup: int, runs: int, backend: str, op_name: str,
                       case_idx: int = 0, framework_model: Optional[str] = None,
                       framework_adapter: Optional[Any] = None,
@@ -55,7 +57,7 @@ except ImportError:
                       clear_l2_cache: bool = True,
                       framework: str = "torch") -> str:
         """Return code string to benchmark TileLang NPUIR implementation.
-        
+
         Args:
             impl_func_name: 实现函数名
             inputs: 输入变量名
@@ -79,10 +81,10 @@ except ImportError:
             patch_imported = True
         except ImportError:
             patch_imported = False
-        
+
         def tilelang_benchmark_fn():
             return {framework_model}(*{inputs})
-        
+
         if patch_imported:
             execution_time_us = profiler_npu(
                 tilelang_benchmark_fn,
@@ -120,7 +122,7 @@ except ImportError:
         method = "traditional_timing"
 """
         return code
-    
+
     def get_special_setup_code(self, framework: str = "torch") -> str:
         """Return special setup code for tilelang_npuir."""
         return """import tilelang
@@ -131,4 +133,3 @@ try:
 except ImportError:
     pass
 """
-

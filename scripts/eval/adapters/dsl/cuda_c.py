@@ -21,7 +21,9 @@ from .base import DSLAdapter
 
 class DSLAdapterCudaC(DSLAdapter):
     """Adapter for CUDA C DSL."""
-    
+
+    static_check_via_python_ast = False  # CUDA-C inline string, no Python AST
+
     def get_import_statements(self, framework: str) -> str:
         """Return CUDA C import statements."""
         return (
@@ -30,12 +32,12 @@ class DSLAdapterCudaC(DSLAdapter):
             "import torch.nn.functional as F\n"
             "from torch.utils.cpp_extension import load_inline\n"
         )
-    
+
     def get_impl_import(self, op_name: str, impl_func_name: str) -> str:
         """Return implementation ModelNew import."""
         # CUDA C 生成代码已经统一为 ModelNew 类格式
         return f"from {op_name}_cuda_c_impl import ModelNew\n"
-    
+
     def create_impl_module(
         self,
         framework: str,
@@ -48,7 +50,7 @@ class DSLAdapterCudaC(DSLAdapter):
         if framework == "torch":
             code += f"impl_model = impl_model.to({device_var})\n"
         return code
-    
+
     def call_impl(
         self,
         impl_func_name: str,
@@ -56,12 +58,12 @@ class DSLAdapterCudaC(DSLAdapter):
         device_id: int,
         framework_adapter: Any,
         op_name: str,
-                  data_dir: Optional[str] = None, 
+                  data_dir: Optional[str] = None,
         framework_output: Optional[str] = None,
     ) -> str:
         """Invoke the instantiated CUDA C ModelNew."""
         return f"impl_output = impl_model(*{inputs})\n"
-    
+
     def benchmark_impl(
         self,
         impl_func_name: str,

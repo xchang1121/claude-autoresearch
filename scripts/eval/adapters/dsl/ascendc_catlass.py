@@ -151,9 +151,10 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
         )
 
     def get_special_setup_code(self, framework: str = "torch") -> str:
-        # arch + catlass_root are resolved at prepare_config() time into
-        # self._setup_arch / self._setup_catlass_root. There is no implicit
-        # hardware default here; the formal eval path must pass config["arch"].
+        # arch + catlass_root resolved at prepare_config() time into
+        # self._setup_arch / self._setup_catlass_root. Fall back to
+        # the ascend910b3 / env-driven defaults if prepare_config
+        # was bypassed (e.g. unit tests).
         arch = getattr(self, "_setup_arch", None)
         if not arch:
             raise RuntimeError(
@@ -171,9 +172,9 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
         import torch as _t
         import torch_npu as _tnp
         # cmake invocation needs to find: (1) the active env's torch
-        # (CMAKE_PREFIX_PATH), (2) the active env's Python — base
-        # miniconda's Python 3.13 vs yyz env's 3.10 → undefined-symbol
-        # at load time if cmake picks wrong (Python_EXECUTABLE), (3)
+        # (CMAKE_PREFIX_PATH), (2) the active env's Python executable;
+        # using a different Python than the active env can cause
+        # undefined-symbol errors at load time (Python_EXECUTABLE), (3)
         # torch_npu headers/libs referenced by catlass_torch.cpp
         # (CPLUS_INCLUDE_PATH / LIBRARY_PATH).
         _torch_cmake = _t.utils.cmake_prefix_path
@@ -189,11 +190,20 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
                 "ASCEND_HOME_PATH is not set. Source the CANN environment before eval."
             )
 
-        _catlass_root = {catlass_root_repr} or os.environ.get("CATLASS_ROOT")
+        try:
+            from eval.catlass_paths import resolve_catlass_root as _resolve_catlass_root
+        except Exception:
+            _resolve_catlass_root = None
+        _catlass_root = None
+        if _resolve_catlass_root is not None:
+            _catlass_root = _resolve_catlass_root(catlass_root={catlass_root_repr})
+        if not _catlass_root:
+            _catlass_root = {catlass_root_repr} or os.environ.get("CATLASS_ROOT")
         if not _catlass_root:
             raise RuntimeError(
                 "CATLASS_ROOT is not set. Set task.yaml catlass.root, config catlass_root, "
-                "or export CATLASS_ROOT to the catlass repo root before eval."
+                "export CATLASS_ROOT, or install catlass at <akg-root>/thirdparty/catlass "
+                "via `bash download.sh --with_catlass` before eval."
             )
         _catlass_root = os.path.abspath(_catlass_root)
         os.environ["CATLASS_ROOT"] = _catlass_root
@@ -303,7 +313,7 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
                            op_name: Optional[str] = None) -> tuple:
         """``kernel_arg`` is the catlass_op directory; the Python wrapper
         is the sibling primary editable (per adapter's
-        ``entry_filename_template``) — or ``<op_name>_kernel.py`` when
+        ``entry_filename_template``), or ``<op_name>_kernel.py`` when
         the canonical name isn't there: KernelBench dumps name the
         wrapper ``<op>_kernel.py``."""
         if not os.path.isdir(kernel_arg):
@@ -327,13 +337,14 @@ class DSLAdapterAscendC_Catlass(DSLAdapter):
         )
 
     def materialize_project_tree(self, dst_dir: str,
-                                 project_src: Optional[str]) -> None:
+                                 project_src: Optional[str],
+                                 project_dir_name: Optional[str] = None) -> None:
         """Copy catlass_op tree into ``dst_dir`` and patch its
         CMakeLists.txt for the AR task layout."""
         if not project_src:
             return
         from eval.catlass_paths import patch_catlass_op_cmake
-        dst = os.path.join(dst_dir, "catlass_op")
+        dst = os.path.join(dst_dir, project_dir_name or self.kernel_project_dir_name)
         if os.path.isdir(dst):
             shutil.rmtree(dst)
         shutil.copytree(

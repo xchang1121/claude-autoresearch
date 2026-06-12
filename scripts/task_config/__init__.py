@@ -1,42 +1,35 @@
-"""task_config package — facade over four single-concern submodules.
+# Copyright 2026 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""task_config package facade.
 
 Layout:
 
-    task_layout       — File-name conventions (REF_FILE_DEFAULT) +
-                        adapter-driven helpers (primary_editable_filename,
-                        task_editable_files, pick_primary_editable). The
-                        single source of truth for "what files exist in
-                        a task_dir / batch_dir" — see its module
-                        docstring for the full per-DSL layout map.
-    loader            — TaskConfig dataclass + load_task_config (YAML
-                        parsing). Uses task_files for path containment;
-                        everyone else consumes TaskConfig from here.
-    task_files        — task-local path normalization, containment checks,
-                        recursive declared-file expansion, and byte reads.
-                        Package/eval/verifier handoff share this layer.
-    metric_policy     — EvalResult, is_improvement, check_constraints,
-                        format_result_summary. Pure data + arithmetic;
-                        no I/O. Imported by keep_or_discard, dashboard.
-    eval_client       — Local subprocess + remote HTTP transport,
-                        result assembly. Depends on loader +
-                        metric_policy. Local drives the static
-                        `eval_kernel.py` via `eval_runner.local_eval`;
-                        remote ships a `package_builder` tar.gz to a
-                        worker `/api/v1/run` endpoint.
-    package_builder   — task.yaml + ref + editable → tar.gz bytes,
-                        for the remote transport. Depends on loader +
-                        task_files only.
+    loader         TaskConfig dataclass + task.yaml parsing.
+    metric_policy  EvalOutcome/EvalResult and metric comparison helpers.
+    eval_client    Public run_eval entry point. It delegates to
+                   utils.akg_eval and the formal KernelVerifier chain.
 
-This `__init__.py` re-exports only the names actually imported from
-outside the package. Submodule-private helpers (operator tables,
-internal result assembly) are not re-laundered through the facade —
-reach into the submodule explicitly when you need them.
+Only names imported by outside packages are re-exported here. Historical
+CA-only eval transport helpers were removed; callers should not import
+private task_config modules for eval dispatch.
 """
 # fmt: off
-from .task_layout import (
-    REF_FILE_DEFAULT, py_stem, pick_kernel_module_file,
+from .loader import (
+    TaskConfig, load_task_config,
+    REF_FILE_DEFAULT, py_stem,
 )
-from .loader import TaskConfig, load_task_config
 from .metric_policy import (
     EvalOutcome, EvalResult, check_constraints, is_improvement, format_result_summary,
 )

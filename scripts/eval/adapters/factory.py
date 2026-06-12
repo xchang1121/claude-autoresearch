@@ -12,16 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Adapter factories: single source of truth for DSL adapter registration
-and the per-framework/backend/arch-family support matrix.
+"""Adapter factories — single source of truth for DSL / framework /
+backend adapter registration AND the per-family DSL whitelist.
 
-``DSL_REGISTRY`` maps DSL names and aliases to adapter classes, and its
-``support`` tuples drive ``eval.config_utils._DSL_TABLE`` (the family-
-keyed DSL whitelist; arch membership is resolved by ``_family_of`` —
-explicit SKU tuples for ascend, family regex for cuda / cpu).
+The historical pair (this factory's if/elif + config_utils._DSL_TABLE)
+drifted: a new DSL had to be added in two places. Now ``DSL_REGISTRY``
+is the only place that knows about a DSL — config_utils derives its
+support matrix from it.
+
+Each :class:`DSLEntry` carries:
+  * ``module`` / ``cls`` — lazy adapter import (factory call is the only
+    place the DSL's module is touched, keeps import-time cost down).
+  * ``aliases`` — equivalent names accepted at lookup (e.g.
+    "triton-russia" → DSLAdapterTritonAscend).
+  * ``support`` — tuples ``(framework, backend, family)`` declaring where
+    this DSL is allowed; config_utils._DSL_TABLE is rebuilt from these.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple
 
 
@@ -30,11 +38,16 @@ class DSLEntry:
     module: str
     cls: str
     aliases: Tuple[str, ...] = ()
-    support: Tuple[Tuple[str, str, str], ...] = ()
+    support: Tuple[Tuple[str, str, str], ...] = field(default_factory=tuple)
 
 
-# family tag is interpreted by eval.config_utils. Keep framework dimensions
-# explicit: torch/910 support does not imply mindspore/910 support.
+# ---------------------------------------------------------------------------
+# DSL_REGISTRY — single source of truth. Adding a new DSL = one entry.
+# ---------------------------------------------------------------------------
+# family tag is internal to config_utils._family_of; valid values are
+# "910" / "310" for ascend, "any" for cuda / cpu. Keep framework
+# dimensions explicit: a DSL can support torch/910 without supporting
+# mindspore/910.
 _TORCH_ASCEND_910 = (("torch", "ascend", "910"),)
 _TORCH_ASCEND_310 = (("torch", "ascend", "310"),)
 _MINDSPORE_ASCEND_910 = (("mindspore", "ascend", "910"),)
@@ -43,19 +56,18 @@ _NUMPY_ASCEND_310 = (("numpy", "ascend", "310"),)
 _TORCH_CUDA = (("torch", "cuda", "any"),)
 _TORCH_CPU = (("torch", "cpu", "any"),)
 
-
-# Adding a new DSL = one entry here. ``module`` is the submodule under
-# ``eval.adapters.dsl``; ``cls`` is the adapter class name inside it.
 DSL_REGISTRY: dict = {
     "triton_cuda": DSLEntry(
-        "triton_cuda", "DSLAdapterTritonCuda", support=_TORCH_CUDA),
+        module="triton_cuda", cls="DSLAdapterTritonCuda",
+        support=_TORCH_CUDA,
+    ),
     "triton_ascend": DSLEntry(
-        "triton_ascend", "DSLAdapterTritonAscend",
+        module="triton_ascend", cls="DSLAdapterTritonAscend",
         aliases=("triton-russia",),
         support=_TORCH_ASCEND_910 + _MINDSPORE_ASCEND_910,
     ),
     "swft": DSLEntry(
-        "swft", "DSLAdapterSwft",
+        module="swft", cls="DSLAdapterSwft",
         support=(
             _TORCH_ASCEND_310
             + _MINDSPORE_ASCEND_310
@@ -63,29 +75,44 @@ DSL_REGISTRY: dict = {
         ),
     ),
     "ascendc": DSLEntry(
-        "ascendc", "DSLAdapterAscendC",
+        module="ascendc", cls="DSLAdapterAscendC",
         support=_TORCH_ASCEND_910 + _TORCH_ASCEND_310,
     ),
     "ascendc_catlass": DSLEntry(
-        "ascendc_catlass", "DSLAdapterAscendC_Catlass",
+        module="ascendc_catlass", cls="DSLAdapterAscendC_Catlass",
         support=_TORCH_ASCEND_910 + _TORCH_ASCEND_310,
     ),
-    "cpp": DSLEntry("cpp", "DSLAdapterCpp", support=_TORCH_CPU),
-    "cuda_c": DSLEntry("cuda_c", "DSLAdapterCudaC", support=_TORCH_CUDA),
+    "cpp": DSLEntry(
+        module="cpp", cls="DSLAdapterCpp",
+        support=_TORCH_CPU,
+    ),
+    "cuda_c": DSLEntry(
+        module="cuda_c", cls="DSLAdapterCudaC",
+        support=_TORCH_CUDA,
+    ),
     "tilelang_npuir": DSLEntry(
-        "tilelang_npuir", "DSLAdapterTilelangNpuir",
+        module="tilelang_npuir", cls="DSLAdapterTilelangNpuir",
+        support=_TORCH_ASCEND_910,
+    ),
+    "tilelang_ascend": DSLEntry(
+        module="tilelang_ascend", cls="DSLAdapterTilelangAscend",
         support=_TORCH_ASCEND_910,
     ),
     "tilelang_cuda": DSLEntry(
-        "tilelang_cuda", "DSLAdapterTilelangCuda", support=_TORCH_CUDA),
+        module="tilelang_cuda", cls="DSLAdapterTilelangCuda",
+        support=_TORCH_CUDA,
+    ),
     "torch": DSLEntry(
-        "torch", "DSLAdapterTorch",
+        module="torch", cls="DSLAdapterTorch",
         support=_TORCH_ASCEND_910 + _TORCH_ASCEND_310 + _TORCH_CUDA,
     ),
     "pypto": DSLEntry(
-        "pypto", "DSLAdapterPypto", support=_TORCH_ASCEND_910),
+        module="pypto", cls="DSLAdapterPypto",
+        support=_TORCH_ASCEND_910,
+    ),
 }
 
+# Alias → canonical lookup, built once.
 _DSL_ALIAS_MAP: dict = {}
 for _name, _entry in DSL_REGISTRY.items():
     _DSL_ALIAS_MAP[_name.lower()] = _name
@@ -93,14 +120,20 @@ for _name, _entry in DSL_REGISTRY.items():
         _DSL_ALIAS_MAP[_alias.lower()] = _name
 
 
-def get_dsl_adapter(dsl: str):
-    """Get DSL adapter by name (or alias)."""
+def _resolve_dsl_name(dsl: str) -> str:
     canonical = _DSL_ALIAS_MAP.get(dsl.lower())
     if canonical is None:
         raise ValueError(f"Unsupported DSL: {dsl}")
-    entry = DSL_REGISTRY[canonical]
-    module = __import__(f"eval.adapters.dsl.{entry.module}",
-                        fromlist=[entry.cls])
+    return canonical
+
+
+def get_dsl_adapter(dsl: str):
+    """Get DSL adapter by name (or alias)."""
+    entry = DSL_REGISTRY[_resolve_dsl_name(dsl)]
+    module = __import__(
+        f"eval.adapters.dsl.{entry.module}",
+        fromlist=[entry.cls],
+    )
     return getattr(module, entry.cls)()
 
 

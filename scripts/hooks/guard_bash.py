@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PreToolUse hook for Bash — thin dispatcher.
+PreToolUse hook for Bash: thin dispatcher.
 
 Per-phase allow/block logic lives in phase_machine.check_bash. This hook
 only adds the concerns that need state outside check_bash's pure-function
@@ -8,10 +8,10 @@ contract:
   1. Script-name sanity (blessed names / hallucinated-name suggestions),
      run BEFORE check_bash so the agent sees "Unknown script 'eval.py'"
      instead of the generic canonical-form rejection.
-  2. DIAGNOSE artifact gate — create_plan.py is blocked until the
+  2. DIAGNOSE artifact gate: create_plan.py is blocked until the
      subagent's diagnose_v<N>.md validates (or the attempts cap relaxes
      the gate).
-  3. EDIT-recovery gate — create_plan.py is allowed in EDIT iff
+  3. EDIT-recovery gate: create_plan.py is allowed in EDIT iff
      state.pending_settle is set, as the recovery path when pipeline.py's
      inlined settle step keeps failing on a malformed plan.md.
   4. Turning check_bash's (False, reason) into the `{decision: block}`
@@ -41,8 +41,7 @@ from utils.settings import hallucinated_scripts
 
 # Scripts the AGENT is allowed to invoke directly from Bash. report.py
 # is intentionally absent: it's auto-invoked by pipeline.py at FINISH,
-# not by the agent. eval_kernel.py is also absent: pipeline.py spawns
-# it as an internal subprocess (doesn't go through the Bash tool).
+# not by the agent.
 # Anything not listed here (and not in _LIBRARY_NOT_CLI /
 # hallucinated_scripts aliases) is treated as an unknown script and
 # rejected with a sorted list of valid names. Must stay aligned with
@@ -55,21 +54,15 @@ _BLESSED_SCRIPTS = {
 
 # Pointed rejections for scripts the agent SHOULDN'T invoke but might
 # try. The key must match what parse_script_names() extracts as the
-# basename (currently it only descends into `engine/` — so nested-
+# basename (currently it only descends into `engine/`, so nested-
 # package modules like utils/X.py can't be keyed here and would just
 # get the generic "Unknown script" rejection; that's fine, they're
 # never hinted-at in any agent-facing doc).
 _LIBRARY_NOT_CLI = {
-    "eval_kernel.py": (
-        "eval_kernel.py is a subprocess child of utils.eval_runner.local_eval, "
-        "not a CLI. Run `python scripts/engine/baseline.py "
-        "<task_dir>` instead — it drives eval_kernel.py for you via "
-        "task_config.run_eval."
-    ),
     "quick_check.py": (
         "quick_check.py is a subprocess child of pipeline.py "
         "(EDIT-phase smoke check), not a CLI. Run `python "
-        "scripts/engine/pipeline.py <task_dir>` after your edit — it "
+        "scripts/engine/pipeline.py <task_dir>` after your edit; it "
         "calls quick_check.py for you before running eval."
     ),
     "report.py": (
@@ -79,13 +72,13 @@ _LIBRARY_NOT_CLI = {
     ),
 }
 
-# Alias → real script mapping lives in autoresearch/config.yaml under
+# Alias-to-real script mapping lives in autoresearch/config.yaml under
 # `hallucinated_scripts`; loaded lazily so the config can be hot-edited.
 
 
 def _script_name_check(command: str):
     """Flag unknown / hallucinated autoresearch/scripts/*.py names before
-    they reach the phase rule — gives a clearer message than 'not allowed'.
+    they reach the phase rule and gives a clearer message than 'not allowed'.
 
     Under the canonical-form policy, parse_script_names returns at most
     one entry (chains are rejected by check_bash before this could
@@ -104,7 +97,7 @@ def _script_name_check(command: str):
         # `"autoresearch/scripts/" in script_path` guard was always
         # False, so unknown script names fell through to the generic
         # canonical-form rejection and the user lost the targeted
-        # "Valid scripts: …" hint. parse_script_names already filters
+        # "Valid scripts:" hint. parse_script_names already filters
         # to real `scripts/` invocations, so the only thing this last
         # check needs is the blessed-table comparison.
         if script_name not in _BLESSED_SCRIPTS:
@@ -129,7 +122,7 @@ def main():
     invoked = parse_invoked_ar_script(command)
 
     # DIAGNOSE-specific Bash gate: create_plan.py must come AFTER the
-    # subagent artifact validates — UNLESS the subagent attempts cap has
+    # subagent artifact validates, unless the subagent attempts cap has
     # been reached, in which case the manual-planning fallback applies and
     # the artifact gate is dropped.
     if phase == DIAGNOSE and invoked == "create_plan.py":

@@ -13,31 +13,39 @@
 # limitations under the License.
 
 import logging
-import re
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Iterable
+
+from eval.arch_normalize import CUDA_ARCH_PATTERN, CPU_ARCH_PATTERN
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
 # Single source of truth — SKU enumeration + per-family DSL whitelists.
-# Mirrors akg-hitl's op/utils/config_utils.py scheme.
+#
+# A SKU is a concrete arch string KernelVerifier accepts (e.g. ``ascend910b3``
+# / ``a100`` / ``rtx4060``). Within a backend, SKUs cluster into FAMILIES that
+# share a DSL capability list:
+#   - ascend has two families: ``910`` (910B + 910_93xx + 950 — full DSL stack)
+#     and ``310`` (310p3 — smaller stack, no triton / no tilelang).
+#   - cuda / cpu are single-family (all listed archs share the same DSLs).
 #
 # Validation strategy differs by backend:
 #   - ascend uses **explicit SKU tuples** — Ascend SKUs are discrete real
-#     products; enumeration gives crisp error msgs.
+#     products (no ``ascend910b99``); enumeration gives crisp error msgs.
 #   - cuda / cpu use **family regex** — model names are parametric
 #     (``rtx<N>``, ``[ahvltb]<N>``, ``x86_64`` / ``aarch64`` / ...);
-#     a new RTX 5090 / B300 / H200 is automatically accepted when
-#     ``hw_detect`` extracts it from ``nvidia-smi``.
+#     enumerating every SKU AKG might see is busywork. A new RTX 5090 /
+#     B300 / H200 is automatically accepted when ``hw_detect`` extracts
+#     it from ``nvidia-smi``.
 #
 # Adding a new ascend SKU: one line in the matching ``_*_SKUS`` tuple.
 # Adding a whole new cuda generation: zero code change (regex covers it).
-# Adding a new DSL across a family: one ``support`` entry in
-# ``eval.adapters.factory.DSL_REGISTRY``.
+# Adding a new DSL across an entire family: one entry in ``_DSL_TABLE``.
 # ---------------------------------------------------------------------------
 
+# Ascend 910-class families (full DSL stack) — explicit SKUs, real products
 _ASCEND_910B_SKUS = (
     "ascend910b1", "ascend910b2", "ascend910b2c", "ascend910b3", "ascend910b4",
 )
@@ -55,20 +63,20 @@ _ASCEND_950_SKUS = (
     "ascend950pr_9599",
 )
 _ASCEND_910_FAMILY = _ASCEND_910B_SKUS + _ASCEND_910_93_SKUS + _ASCEND_950_SKUS
+
+# Ascend 310 family (reduced stack — no triton / no tilelang / no pypto)
 _ASCEND_310_SKUS = ("ascend310p3",)
 
-# CUDA family regex — accepts any token ``hw_detect`` normalizes from
-# ``nvidia-smi --query-gpu=name``: rtx<N> / gtx<N> / [ahvltb]<N> with an
-# optional trailing variant letter (``l40s`` / ``v100`` / ``h200`` etc.).
-_CUDA_ARCH_PAT = re.compile(
-    r"^(?:rtx\d{3,4}[a-z]?|gtx\d{3,4}[a-z]?|[ahvltb]\d{1,4}[a-z]?)$"
-)
-_CPU_ARCH_PAT = re.compile(r"^(?:x86_64|aarch64|riscv64|ppc64le)$")
+# CUDA/CPU family patterns live in ``arch_normalize.py`` so detection and
+# validation agree without maintaining a separate SKU list here.
 
 
+# Family → DSL whitelist, keyed by (framework, backend, family-tag).
+# family-tag is internal (``910`` / ``310`` / ``any``) — callers use the
+# arch string directly and we resolve the family via ``_family_of``.
+# Derived from adapters.factory.DSL_REGISTRY (the single source of truth);
+# adding a new DSL is one entry in the registry, not two.
 def _build_dsl_table():
-    """Family → DSL whitelist, keyed by (framework, backend, family-tag),
-    derived from DSL_REGISTRY support tuples (single source of truth)."""
     from eval.adapters.factory import DSL_REGISTRY
     table: dict = {}
     for name, entry in DSL_REGISTRY.items():
@@ -85,6 +93,9 @@ def _build_dsl_table():
 
 
 _DSL_TABLE = _build_dsl_table()
+
+# Canonical DSL set (single source — referenced by normalize_dsl / check_dsl
+# instead of duplicating the literal list).
 _ALL_DSLS = frozenset(
     dsl for dsls in _DSL_TABLE.values() for dsl in dsls
 )
@@ -101,63 +112,35 @@ def _family_of(backend: str, arch: str) -> Optional[str]:
             return "910"
         return None
     if backend == "cuda":
-        return "any" if _CUDA_ARCH_PAT.match(arch) else None
+        return "any" if CUDA_ARCH_PATTERN.match(arch) else None
     if backend == "cpu":
-        return "any" if _CPU_ARCH_PAT.match(arch) else None
-    return None
-
-
-def _normalize_arch_token(arch: str) -> str:
-    return (arch or "").strip().lower().replace(" ", "").replace("-", "")
-
-
-def ascend_soc_version(arch: str) -> Optional[str]:
-    """Derive the CANN SOC_VERSION from the canonical Ascend arch token.
-
-    Validation owns the explicit SKU tuples above. This helper keeps the
-    runtime SOC_VERSION rule next to that SoT instead of duplicating a second
-    inline mapping table inside generated verifier code.
-    """
-    arch = _normalize_arch_token(arch)
-    if arch in _ASCEND_910B_SKUS or arch in _ASCEND_310_SKUS:
-        return "Ascend" + arch[len("ascend"):].upper()
-    if arch in _ASCEND_910_93_SKUS:
-        return "Ascend" + arch[len("ascend"):]
-    if arch in _ASCEND_950_SKUS:
-        if arch.startswith("ascend950dt_"):
-            return "Ascend950DT_" + arch.split("_", 1)[1].upper()
-        if arch.startswith("ascend950pr_"):
-            return "Ascend910_" + arch.split("_", 1)[1]
-    return None
-
-
-
-def ascend_direct_invoke_npu_arch(arch: str) -> Optional[str]:
-    """Derive CANN direct-invoke ``--npu-arch`` from an Ascend arch token."""
-    arch = _normalize_arch_token(arch)
-    if arch and not arch.startswith("ascend"):
-        arch = "ascend" + arch
-    if arch.startswith("ascend950"):
-        return "dav-3510"
-    if arch.startswith("ascend910") or arch.startswith("ascend310"):
-        return "dav-2201"
+        return "any" if CPU_ARCH_PATTERN.match(arch) else None
     return None
 
 
 def arch_hint(backend: str) -> str:
-    """User-facing hint for what arch values ``backend`` accepts."""
+    """User-facing hint string describing what arch values ``backend``
+    accepts. Used by error messages in this module + downstream CLI
+    validators. Ascend is enumerated (discrete real SKUs); cuda / cpu
+    describe the family-regex pattern since they accept anything in the
+    family."""
     if backend == "ascend":
         return "/".join(_ASCEND_310_SKUS + _ASCEND_910_FAMILY)
     if backend == "cuda":
         return ("rtx<N> / gtx<N> / [ahvltb]<N> family "
-                "(e.g. a100, v100, h100, h200, l40s, b200, rtx4060, rtx5090)")
+                "(e.g. a100, h100, h200, l40s, b200, rtx4060, rtx5090)")
     if backend == "cpu":
         return "x86_64 / aarch64 / riscv64 / ppc64le"
     return ""
 
 
 def check_backend_arch(backend: str, arch: str):
-    """验证后端与架构的匹配关系（family 驱动，跟 akg-hitl 同方案）。"""
+    """
+    验证后端与架构的匹配关系
+    Args:
+        backend: 计算后端名称(ascend/cuda/cpu)
+        arch: 硬件架构名称
+    """
     if backend not in ("ascend", "cuda", "cpu"):
         raise ValueError("backend must be ascend, cuda or cpu")
     if _family_of(backend, arch) is None:
@@ -167,36 +150,26 @@ def check_backend_arch(backend: str, arch: str):
         )
 
 
-def supported_dsls(framework: str, backend: str, arch: str) -> Optional[tuple]:
-    """Return the DSL whitelist for ``(framework, backend, arch)``, or
-    None if the combination is not supported. Single canonical lookup —
-    every other validator in this module routes through this."""
-    family = _family_of(backend, arch)
-    if family is None:
-        return None
-    return _DSL_TABLE.get((framework, backend, family))
-
-
 def normalize_dsl(dsl: str, backend: str = None) -> str:
     """
     规范化DSL类型，将通用的triton根据backend转换为triton_cuda或triton_ascend
-    
+
     Args:
         dsl: 实现类型
         backend: 硬件后端名称(ascend/cuda/cpu)，用于自动转换triton
-        
+
     Returns:
         规范化后的DSL类型
-        
+
     Raises:
         ValueError: 如果dsl为"triton"但backend未提供或无效
     """
     dsl = dsl.lower()
-    
+
     # 如果已经是规范化的类型，直接返回
     if dsl in _ALL_DSLS:
         return dsl
-    
+
     # 如果是通用的triton，需要根据backend转换
     if dsl == "triton":
         if backend is None:
@@ -215,7 +188,7 @@ def normalize_dsl(dsl: str, backend: str = None) -> str:
                 f"dsl='triton' cannot be used with backend='{backend}'. "
                 "Please use 'triton_cuda' (for CUDA) or 'triton_ascend' (for Ascend) explicitly."
             )
-    
+
     # 其他情况直接返回
     return dsl
 
@@ -226,10 +199,9 @@ def check_dsl(dsl: str):
     Args:
         dsl: 实现类型(triton_cuda/triton_ascend/triton-russia/swft/torch/pypto等)
     """
-    valid_dsls = sorted(_ALL_DSLS)
-    if dsl not in valid_dsls:
+    if dsl not in _ALL_DSLS:
         raise ValueError(
-            f"dsl must be one of {valid_dsls}. "
+            f"dsl must be one of {sorted(_ALL_DSLS)}. "
             "Note: 'triton' is no longer supported. Use 'triton_cuda' or 'triton_ascend' instead."
         )
 
@@ -244,27 +216,70 @@ def check_task_type(task_type: str):
         raise ValueError("task_type must be precision_only or profile")
 
 
+def supported_dsls(framework: str, backend: str, arch: str) -> Optional[tuple]:
+    """Return the DSL whitelist for ``(framework, backend, arch)``, or
+    None if the combination is not supported. Single canonical lookup —
+    every other validator in this module routes through this."""
+    family = _family_of(backend, arch)
+    if family is None:
+        return None
+    return _DSL_TABLE.get((framework, backend, family))
+
+
+# Backward-compat: VALID_CONFIGS is the derived (framework, backend) →
+# {arch: dsl_list} view. Only ascend gets per-arch keys (those SKUs are
+# enumerated); cuda / cpu inner dicts are empty by design — their
+# canonical accept-set is the regex family, not a list of dict keys.
+# Use ``supported_dsls(framework, backend, arch)`` for membership checks;
+# iterate ``VALID_CONFIGS[fw][be]`` only when you need the ascend SKU
+# enumeration.
+def _build_valid_configs() -> Dict[str, Dict[str, Dict[str, list]]]:
+    table: Dict[str, Dict[str, Dict[str, list]]] = {}
+    enumerated_skus = {
+        ("ascend", "910"): _ASCEND_910_FAMILY,
+        ("ascend", "310"): _ASCEND_310_SKUS,
+    }
+    for (fw, be, fam), dsls in _DSL_TABLE.items():
+        be_table = table.setdefault(fw, {}).setdefault(be, {})
+        for sku in enumerated_skus.get((be, fam), ()):
+            be_table[sku] = list(dsls)
+    return table
+
+
+VALID_CONFIGS = _build_valid_configs()
+
+
 def check_task_config(framework: str, backend: str, arch: str, dsl: str):
     """
-    统一验证配置参数之间的依赖关系（family 驱动，跟 akg-hitl 同方案）。
+    统一验证配置参数之间的依赖关系
     Args:
         framework: 框架类型
         backend: 硬件后端名称
         arch: 硬件架构名称
         dsl: 实现类型（会自动转换triton为triton_cuda或triton_ascend）
-    Returns:
-        规范化后的 DSL，供调用者使用。
     """
     normalized_dsl = normalize_dsl(dsl, backend)
-    dsl_list = supported_dsls(framework, backend, arch)
-    if dsl_list is None:
+
+    if framework not in VALID_CONFIGS:
+        raise ValueError(f"Unsupported framework: {framework}")
+    if backend not in VALID_CONFIGS[framework]:
+        raise ValueError(f"Framework {framework} does not support backend: {backend}")
+
+    dsls = supported_dsls(framework, backend, arch)
+    if dsls is None:
+        # Distinguish "unknown arch under this backend" from "arch known but
+        # this framework doesn't support that family" — the second case can
+        # happen e.g. for mindspore + ascend910b3 (family 910 has no row
+        # under mindspore at the moment? actually it does. example only).
+        if _family_of(backend, arch) is None:
+            raise ValueError(f"Backend {backend} does not support arch: {arch}")
         raise ValueError(
-            f"({framework}, {backend}, {arch}) is not a supported combination "
-            f"(accepted arch for {backend}: {arch_hint(backend)})")
-    if normalized_dsl not in dsl_list:
-        raise ValueError(
-            f"({framework}, {backend}, {arch}) does not support "
-            f"dsl={normalized_dsl} (accepted: {sorted(dsl_list)})")
+            f"Framework {framework} does not support arch {arch} on {backend}"
+        )
+
+    if normalized_dsl not in dsls:
+        raise ValueError(f"Arch {arch} does not support dsl: {normalized_dsl}")
+
     return normalized_dsl
 
 
@@ -276,11 +291,11 @@ def collect_and_save_all_examples(
 ) -> Optional[Path]:
     """
     汇总所有examples并保存到统一目录 database/all_examples/{arch}/{dsl}
-    
+
     此函数将来自不同源目录的示例文件统一复制到目录中，Python文件和其他文件分别保存。
     - Python文件保存到: database/all_examples/{arch}/{dsl}/code/
     - 其他文件保存到: database/all_examples/{arch}/{dsl}/docs/
-    
+
     Args:
         arch: 硬件架构名称
         dsl: DSL类型
@@ -288,42 +303,42 @@ def collect_and_save_all_examples(
         source_dirs: 源目录字典，格式为 {"prefix": Path("source_dir")}
                     文件会被复制并重命名为 "{prefix}_{原文件名}"
                     例如: {"user": Path("user_examples/"), "local": Path("local_examples/")}
-    
+
     Returns:
         Path: 统一保存目录的根路径，如果失败则返回None
     """
     if not arch or not dsl:
         logger.warning("arch或dsl为空，无法汇总示例代码")
         return None
-    
+
     # 创建统一的保存目录
     base_dir = project_root_path / "database" / "all_examples" / arch / dsl
     code_dir = base_dir / "code"
     doc_dir = base_dir / "docs"
-    
+
     code_dir.mkdir(parents=True, exist_ok=True)
     doc_dir.mkdir(parents=True, exist_ok=True)
-    
+
     saved_code_count = 0
     saved_doc_count = 0
-    
+
     # 遍历所有源目录
     for prefix, source_dir in source_dirs.items():
         if not source_dir or not isinstance(source_dir, Path):
             logger.warning(f"跳过无效的源目录: {prefix} -> {source_dir}")
             continue
-            
+
         if not source_dir.exists():
             logger.warning(f"源目录不存在，跳过: {source_dir}")
             continue
-        
+
         try:
             # 如果是目录，复制其中的所有文件
             if source_dir.is_dir():
                 for file_path in source_dir.glob("*"):
                     if not file_path.is_file():
                         continue
-                    
+
                     try:
                         with open(file_path, "r", encoding="utf-8") as f:
                             content = f.read().strip()
@@ -335,14 +350,14 @@ def collect_and_save_all_examples(
                             else:
                                 target_dir = doc_dir
                                 saved_doc_count += 1
-                            
+
                             # 目标文件名：前缀_原文件名
                             save_path = target_dir / f"{prefix}_{file_path.name}"
                             with open(save_path, "w", encoding="utf-8") as f:
                                 f.write(content)
                     except Exception as e:
                         logger.warning(f"复制文件 {file_path} 失败: {e}")
-            
+
             # 如果是单个文件，直接复制
             elif source_dir.is_file():
                 try:
@@ -356,16 +371,16 @@ def collect_and_save_all_examples(
                         else:
                             target_dir = doc_dir
                             saved_doc_count += 1
-                        
+
                         save_path = target_dir / f"{prefix}_{source_dir.name}"
                         with open(save_path, "w", encoding="utf-8") as f:
                             f.write(content)
                 except Exception as e:
                     logger.warning(f"复制文件 {source_dir} 失败: {e}")
-                    
+
         except Exception as e:
             logger.warning(f"处理源目录 {prefix}:{source_dir} 时发生错误: {e}")
-    
+
     logger.info(f"汇总完成，共保存 {saved_code_count} 个Python文件到: {code_dir}")
     logger.info(f"汇总完成，共保存 {saved_doc_count} 个其他文件到: {doc_dir}")
     return code_dir

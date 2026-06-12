@@ -104,8 +104,7 @@ _CANONICAL_AR_RE = re.compile(
 #
 # Invariant: this set MUST equal hooks/guard_bash._BLESSED_SCRIPTS.
 # guard_bash rejects un-blessed names before this map is consulted, so
-# any name here that isn't blessed is unreachable. Internal subprocesses
-# (e.g. pipeline.py → eval_kernel.py) don't go through the Bash tool
+# any name here that isn't blessed is unreachable. Internal helper work
 # and therefore don't appear in this map.
 _CANONICAL_LOCATION = {
     # engine/ — AR scripts (subprocess pipeline) and parse_args lifecycle.
@@ -473,7 +472,7 @@ def check_bash(phase: str, command: str) -> tuple:
         return True, ""
 
     if shape.klass == "AR":
-        # Subprocess-only AR scripts (quick_check.py, eval_kernel.py)
+        # Internal helper scripts such as quick_check.py
         # are caught earlier by guard_bash._LIBRARY_NOT_CLI before
         # reaching this layer — they never appear in BS so classify()
         # wouldn't return AR(name) for them at all.

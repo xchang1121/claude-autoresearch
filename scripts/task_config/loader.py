@@ -1,41 +1,79 @@
+# Copyright 2026 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """task.yaml loader and the TaskConfig dataclass.
 
 This module's job is parsing — turning the on-disk YAML into a typed
-struct. Path containment rules live in task_files so every task-local file
-consumer shares the same safety semantics.
+struct. It's the lowest layer in the task_config package: eval_client
+depends on TaskConfig but TaskConfig depends on nothing of ours.
 
 The fields here are the schema. Adding a new task.yaml key means adding
 a field on `TaskConfig` and reading it in `load_task_config`. Don't
 reach into `raw` dicts elsewhere; route every consumer through the
 typed dataclass.
 """
-import os
 from dataclasses import dataclass, field
 from typing import Optional
 
+import os
 import yaml
 
 
-# ---------------------------------------------------------------------------
-# File-name conventions (REF_FILE_DEFAULT / py_stem / pick_kernel_module_file
-# / resolve_kernel_paths_for_op) live in sibling task_layout module.
-# Re-exported here for back-compat with existing imports.
+# File-name conventions (REF_FILE_DEFAULT / py_stem / editable-files
+# helpers / resolve_kernel_paths_for_op) live in akg_agents.op.utils.
+# task_layout — workflow-neutral SoT. Re-exported here for back-compat
+# (legacy callers still import from task_config.loader).
 
-from .task_layout import (  # noqa: E402, F401
-    REF_FILE_DEFAULT, py_stem, pick_kernel_module_file,
-)
-from .task_files import is_task_relative_path
-from .dsl_project_config import flatten_task_yaml_dsl_blocks
+from task_config.dsl_project_config import flatten_task_yaml_dsl_blocks  # noqa: E402
+from task_config.task_layout import REF_FILE_DEFAULT, py_stem  # noqa: E402, F401
+
+
+def _is_contained(path: str) -> bool:
+    """Return True iff `path` is a relative path that does not escape
+    its parent. False for absolute paths, drive-letter forms, and
+    paths containing ``..`` segments.
+
+    Used at task.yaml load time so verifier packaging cannot read or
+    ship files outside the task directory.
+    """
+    if not path:
+        return False
+    # Reject any drive letter (Windows) or POSIX absolute path. Also
+    # reject leading `/` or `\` on Windows: os.path.isabs returns
+    # False for `/foo/bar` on Windows because it lacks a drive letter,
+    # so without this extra check a task.yaml shipped from a POSIX dev
+    # box could pass containment on a Windows worker (or vice-versa).
+    if (os.path.isabs(path)
+            or (len(path) >= 2 and path[1] == ":")
+            or path.startswith(("/", "\\"))):
+        return False
+    # Reject any `..` segment, on either separator.
+    normalised = path.replace("\\", "/")
+    parts = [p for p in normalised.split("/") if p and p != "."]
+    if any(p == ".." for p in parts):
+        return False
+    return True
 
 
 def _filter_contained(paths: list, field_name: str) -> list:
-    """Drop entries that are not safe task-relative paths and warn
+    """Drop entries that fail `_is_contained` and emit a stderr warning
     naming each rejection — silent drops would have the operator
     chasing 'why is data_files smaller than my task.yaml'."""
     import sys as _sys
     safe: list = []
     for p in paths:
-        if is_task_relative_path(str(p)):
+        if _is_contained(str(p)):
             safe.append(p)
         else:
             print(f"[loader] WARNING: dropping {field_name} entry "
@@ -52,11 +90,13 @@ def _filter_contained(paths: list, field_name: str) -> list:
 class TaskConfig:
     """Minimal task configuration parsed from task.yaml.
 
-    The repo is locked to a single combination by construction
-    (Triton-Ascend kernel, Ascend NPU, PyTorch ref). Downstream code
-    refers to those constants directly rather than carrying them on
-    TaskConfig. `arch` (e.g. `ascend910b3`) varies per machine and is
-    derived from the picked --devices via the backend-specific probe.
+    The workspace's target triple ``(backend, framework, dsl)`` is pinned
+    per repo in ``config.yaml``'s ``defaults`` block (single-target-per-
+    repo design); downstream code reads it via ``utils.settings.target_*``
+    rather than carrying it on TaskConfig. ``arch`` (e.g. ``ascend910b3``
+    / ``a100``) varies per machine and is auto-derived from the picked
+    ``--devices`` via the backend-appropriate probe in ``utils.hw_detect``
+    (npu-smi for ascend, nvidia-smi for cuda).
     """
     name: str
     description: str = ""
@@ -70,21 +110,19 @@ class TaskConfig:
     # Sibling files the ref module reads at runtime (NPUKernelBench-style
     # `<op>.json` shape lists, sglang-style `ref.pt` output caches,
     # auxiliary `.py` imports, etc.). Listed by basename relative to
-    # task_dir. The remote-eval package builder ships them alongside
-    # task.yaml + ref + editable; local eval doesn't use the field.
+    # task_dir and forwarded into the formal verifier task package.
     data_files: list = field(default_factory=list)
 
     # Eval params
-    # Per-SHAPE budget for verify/profile in seconds. eval_client scales it
-    # by num_cases (probed from the ref module) before invoking the eval
-    # subprocess, so the wall-clock cap is eval_timeout * num_cases.
+    # Per-SHAPE budget for verify/profile in seconds. The formal eval
+    # path accounts for num_cases when sizing verifier work.
     # Single-shape refs (num_cases=1) keep the original semantics.
     eval_timeout: int = 600
 
     # Explicit case-count override (task.yaml `eval.num_cases`). When > 0,
-    # eval_request uses it directly instead of importing the ref module to
-    # probe get_inputs/get_input_groups — lets dev hosts without torch/CANN
-    # scale the eval timeout and sticky fingerprint correctly. 0 = auto.
+    # the formal eval path uses it directly instead of importing the ref
+    # module to probe get_inputs/get_input_groups on hosts that may lack
+    # torch/CANN. 0 = auto.
     num_cases: int = 0
 
     # Metric
@@ -123,14 +161,15 @@ class TaskConfig:
     the task package via HTTP POST to the first reachable worker. Local
     devices are the fallback."""
 
-    # ascendc_catlass: optional paths (else CATLASS_ROOT env + task_dir/catlass_op/)
-    # Per-DSL knobs (e.g. ascendc_catlass's ``catlass.root`` /
-    # ``catlass.op_dir``). Keys are flat (``catlass_root`` /
-    # ``catlass_op_dir`` historically); eval_client / eval_request /
-    # package_builder forward them verbatim so the adapter's
-    # ``prepare_config`` consumes them without TaskConfig knowing any DSL.
-    # Loader normalizes the ``catlass:`` yaml block into this dict for
-    # back-compat; new DSLs add a sibling block + normalizer.
+    # Per-DSL knobs (e.g. ``catlass.root`` / ``catlass.op_dir`` or
+    # ``ascendc.op_dir``). Keys are flat (``catlass_root`` /
+    # ``catlass_op_dir`` / ``ascendc_op_dir`` historically); akg_eval
+    # forwards them verbatim into the eval ``config_dict`` + ``task_info``
+    # so the adapter's ``prepare_config`` consumes them without TaskConfig
+    # knowing any DSL.
+    # Loader normalizes explicit DSL yaml blocks into this dict; adapter
+    # defaults own absent blocks so unrelated DSLs do not receive stale
+    # keys.
     dsl_config: dict = field(default_factory=dict)
 
 
@@ -205,17 +244,14 @@ def load_task_config(task_dir: str) -> Optional[TaskConfig]:
     else:
         data_files = []
 
-    # Refuse path-escaping entries before they reach package_builder /
-    # eval_runner. The package builder reads the file off disk
-    # (task_dir + name); without containment a `../../secret` in
-    # task.yaml would be slurped into the tar and shipped to the
-    # remote worker even though the worker's safe_extract would reject
-    # it on the other side — the bytes have already left.
+    # Refuse path-escaping entries before they reach verifier packaging.
+    # Without containment, a hand-edited task.yaml could point outside
+    # task_dir and leak unrelated local files into a remote eval bundle.
     raw_editable = raw.get("editable_files") or []
     editable_files = _filter_contained(list(raw_editable), "editable_files")
     data_files = _filter_contained(data_files, "data_files")
     raw_ref = agent_block.get("ref_file") or REF_FILE_DEFAULT
-    if not is_task_relative_path(str(raw_ref)):
+    if not _is_contained(str(raw_ref)):
         import sys as _sys
         print(f"[loader] WARNING: ref_file {raw_ref!r} escapes task_dir; "
               f"falling back to {REF_FILE_DEFAULT}. Hand-edit task.yaml "

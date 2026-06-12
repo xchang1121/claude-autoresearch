@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Run baseline eval and initialize .ar_state.
 
-Calls `task_config.run_eval` in-process — same Python tree as
-pipeline.py and the rest of the engine, so no subprocess / JSON-tail
-parse between this script and the eval pipeline. The eval pipeline
-itself still spawns `eval_kernel.py` (via utils.eval_runner.local_eval);
-that's where the crash isolation lives.
+Calls ``task_config.run_eval`` in-process, the same public eval entry used
+by pipeline.py. ``run_eval`` delegates to ``utils.akg_eval`` so baseline,
+round eval, batch verify, and worker execution all share the formal
+KernelVerifier chain.
 
 Usage:
-    python scripts/engine/baseline.py <task_dir>
-        [--device-id N]
+    python scripts/engine/baseline.py <task_dir> [--device-id N]
 """
 import argparse
 import os

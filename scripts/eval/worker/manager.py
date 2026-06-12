@@ -6,14 +6,12 @@ import os
 from .interface import WorkerInterface
 
 
-def get_akg_env_var(name: str, default=None):
-    """Read an env var honoring both the new (AKG_AGENTS_*) and legacy
-    (AIKG_*) prefixes with the same precedence as earlier autoresearch
-    releases. Inlined here to keep the eval package standalone.
-    """
-    import os
-    return os.environ.get(f"AKG_AGENTS_{name}",
-                          os.environ.get(f"AIKG_{name}", default))
+def get_akg_env_var(var_name: str, default=None):
+    """Read AKG_AGENTS_* first, then legacy AIKG_* for worker env knobs."""
+    return os.environ.get(
+        f"AKG_AGENTS_{var_name}",
+        os.environ.get(f"AIKG_{var_name}", default),
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +37,7 @@ class WorkerManager:
     async def register(self, worker: WorkerInterface, backend: str, arch: str, tags: Set[str] = None, capacity: int = 1):
         """
         注册一个 Worker。
-        
+
         Args:
             worker: Worker 实例
             backend: 后端类型 (cuda/ascend/cpu)
@@ -65,7 +63,7 @@ class WorkerManager:
         1. 筛选符合 backend, arch, tags 的 Worker
         2. 在候选者中选择负载率 (load/capacity) 最低的
         3. 增加该 Worker 的 load 计数 (不独占，仅计数)
-        
+
         Returns:
             WorkerInterface or None
         """
@@ -79,13 +77,13 @@ class WorkerManager:
                 if tags and not tags.issubset(info.tags):
                     continue
                 candidates.append(info)
-            
+
             if not candidates:
                 return None
 
             # 负载均衡策略：选择负载率最低的
             best_info = min(candidates, key=lambda w: w.load / w.capacity)
-            
+
             best_info.load += 1
             logger.debug(f"Selected worker {id(best_info.worker)} (load={best_info.load}/{best_info.capacity})")
             return best_info.worker
@@ -153,23 +151,23 @@ def get_worker_manager() -> WorkerManager:
 async def register_local_worker(device_ids: List[int], backend: str, arch: str, tags: Set[str] = None) -> None:
     """
     便捷函数：创建并注册 LocalWorker 到全局 WorkerManager。
-    
+
     Args:
         device_ids: 设备ID列表，例如 [0] 或 [0, 1, 2, 3]
         backend: 后端类型 (cuda/ascend/cpu)
         arch: 硬件架构 (a100/ascend910b4等)
         tags: 可选的标签集合
-    
+
     Example:
         # 单卡
         await register_local_worker([0], backend="cuda", arch="a100")
-        
+
         # 多卡
         await register_local_worker([0, 1, 2, 3], backend="cuda", arch="a100")
     """
     from .local_worker import LocalWorker
     from .device_pool import DevicePool
-    
+
     device_pool = DevicePool(device_ids)
     local_worker = LocalWorker(device_pool, backend=backend)
     await _GLOBAL_MANAGER.register(
@@ -188,30 +186,30 @@ async def register_remote_worker(backend: str, arch: str, worker_url: Optional[s
     便捷函数：创建并注册 RemoteWorker 到全局 WorkerManager。
     如果未提供 worker_url，将从环境变量 AKG_AGENTS_WORKER_URL 读取。
     如果未提供 capacity，将自动从 remote worker 的 status 接口查询实际设备数量。
-    
+
     Args:
         backend: 后端类型 (cuda/ascend/cpu)
         arch: 硬件架构 (a100/ascend910b4等)
         worker_url: Remote Worker Service 的 URL（可选，默认从环境变量 AKG_AGENTS_WORKER_URL 读取）
         capacity: 并发能力（通常对应设备卡数）。如果为 None，将自动从 remote worker 查询
         tags: 可选的标签集合
-    
+
     Example:
         # 从环境变量读取 worker_url，自动获取 capacity
         export AKG_AGENTS_WORKER_URL=http://localhost:9001
         await register_remote_worker(backend="cuda", arch="a100")
-        
+
         # 显式指定 worker_url 和 capacity
         await register_remote_worker(
-            backend="cuda", 
-            arch="a100", 
+            backend="cuda",
+            arch="a100",
             worker_url="http://localhost:9001",
             capacity=2
         )
     """
     import httpx
     from .remote_worker import RemoteWorker
-    
+
     if worker_url is None:
         worker_url = get_akg_env_var("WORKER_URL")
         if worker_url is None:
@@ -220,7 +218,7 @@ async def register_remote_worker(backend: str, arch: str, worker_url: Optional[s
                 "请提供 worker_url 参数或设置环境变量：\n"
                 "  export AKG_AGENTS_WORKER_URL=http://localhost:9001"
             )
-    
+
     # Probe /status: derives capacity when not given, AND asserts the
     # daemon's reported devices intersect `expected_device_ids` so we
     # don't silently bind the task to the wrong daemon (e.g. someone
@@ -245,14 +243,21 @@ async def register_remote_worker(backend: str, arch: str, worker_url: Optional[s
                     f"期望 device={expected_device_ids}。"
                 )
             logger.warning(f"查询 remote worker status 失败：{e}，使用默认 capacity=1")
-        if expected_device_ids and remote_devices and not (
-                set(remote_devices) & set(expected_device_ids)):
-            raise RuntimeError(
-                f"worker {worker_url} 设备不匹配：daemon 报告 "
-                f"devices={remote_devices}，task 要求 "
-                f"{sorted(expected_device_ids)}。常见原因：task.yaml 的 "
-                f"worker.urls 写错，或 ssh -L tunnel 串到了别人的 daemon。"
-            )
+        if expected_device_ids:
+            if not remote_devices:
+                raise RuntimeError(
+                    f"worker {worker_url} 返回空设备列表，无法校验 "
+                    f"task 要求 device={sorted(expected_device_ids)}。"
+                    f"常见原因：daemon 旧版本 /status 不报 devices，或 "
+                    f"tunnel 串到了别人未完成 init 的 daemon。"
+                )
+            if not (set(remote_devices) & set(expected_device_ids)):
+                raise RuntimeError(
+                    f"worker {worker_url} 设备不匹配：daemon 报告 "
+                    f"devices={remote_devices}，task 要求 "
+                    f"{sorted(expected_device_ids)}。常见原因：task.yaml 的 "
+                    f"worker.urls 写错，或 ssh -L tunnel 串到了别人的 daemon。"
+                )
         if capacity is None:
             capacity = len(remote_devices) if remote_devices else 1
             logger.info(f"从 remote worker 查询到 {capacity} 个设备: {remote_devices}")

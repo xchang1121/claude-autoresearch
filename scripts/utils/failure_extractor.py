@@ -179,7 +179,7 @@ def extract_failure_signals(raw_output: str,
                             max_excerpt: int = 200) -> EvalDiagnostic:
     """Scan combined eval log for known failure patterns.
 
-    `raw_output` is the `log` field from eval_runner's verify/profile
+    `raw_output` is the `log` field from formal eval's verify/profile
     response (or a concatenation of both). Returns an EvalDiagnostic;
     callers that need the JSON form for stdout / history.jsonl call
     `.to_dict()` on the result.

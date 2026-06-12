@@ -14,10 +14,10 @@
 
 """In-tree eval package used by claude-autoresearch.
 
-The verifier, profiler, adapters, worker helpers, templates, and Ascend
-compile helpers all live under `scripts/eval/`. `get_project_root()`
-returns this package directory so those resources can locate their
-siblings without relying on an external package layout.
+The verifier, profiler, adapters, worker helpers, and resource
+templates all live under `scripts/eval/`. `get_project_root()` returns
+this package directory so resources can be addressed through the same
+`op/resources/...` layout used by AKG.
 """
 import os
 
@@ -25,8 +25,7 @@ import os
 def get_project_root() -> str:
     """Return the in-tree eval package root.
 
-    Used by `kernel_verifier.py` / `sol_verifier.py` to locate template
-    files at `<root>/templates/*.j2` and CMake/run.sh at
-    `<root>/compile/ascend/`.
+    Used by `kernel_verifier.py` / `sol_verifier.py` / `cann_verifier.py`
+    to locate files under `<root>/op/resources/...`.
     """
     return os.path.dirname(os.path.abspath(__file__))

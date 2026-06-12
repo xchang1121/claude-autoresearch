@@ -161,16 +161,21 @@ def run_profile_scripts_and_collect_results(
 
     gen_section: Optional[Dict[str, Any]] = None
     gen_script = f"profile_{op_name}_generation.py"
-    gen_result = run_command(
-        ["python", gen_script], cmd_msg="generation_profile",
-        timeout=600, cwd=verify_dir,
-    )
-    if not gen_result[0]:
-        logger.error(f"[{op_name}: {task_id}] 生成代码性能脚本执行失败: "
-                     f"{gen_result[1]}")
+    gen_script_path = os.path.join(verify_dir, gen_script)
+    if os.path.exists(gen_script_path):
+        gen_result = run_command(
+            ["python", gen_script], cmd_msg="generation_profile",
+            timeout=600, cwd=verify_dir,
+        )
+        if not gen_result[0]:
+            logger.error(f"[{op_name}: {task_id}] 生成代码性能脚本执行失败: "
+                         f"{gen_result[1]}")
+        else:
+            gen_section = read_profile_result_from_json(
+                verify_dir, "generation_profile_result.json")
     else:
-        gen_section = read_profile_result_from_json(
-            verify_dir, "generation_profile_result.json")
+        logger.info(f"[{op_name}: {task_id}] 生成代码性能脚本不存在，"
+                    "跳过 generation profile")
 
     base_avg = base_section["avg_us"] if base_section else float("inf")
     gen_avg = gen_section["avg_us"] if gen_section else float("inf")
@@ -183,13 +188,13 @@ def run_profile_scripts_and_collect_results(
 
 def run_msprof(script_path: str, op_name: str = "", task_id: str = "0", timeout: int = 600) -> Tuple[bool, str, Optional[str]]:
     """运行msprof性能分析
-    
+
     Args:
         script_path: Python脚本路径
         op_name: 算子名称（用于日志）
         task_id: 任务ID（用于日志）
         timeout: 超时时间（秒）
-        
+
     Returns:
         (success, error_msg, prof_path): 是否成功，错误信息，prof数据路径
     """
@@ -213,14 +218,14 @@ def run_msprof(script_path: str, op_name: str = "", task_id: str = "0", timeout:
 
 def analyze_prof_data(prof_path: str, warmup_times: int, run_times: int, op_name: str = "", task_id: str = "0") -> Tuple[bool, str, float]:
     """分析PROF数据
-    
+
     Args:
         prof_path: prof数据目录路径
         warmup_times: 预热次数
         run_times: 实际运行次数
         op_name: 算子名称（用于日志）
         task_id: 任务ID（用于日志）
-        
+
     Returns:
         (success, error_msg, avg_time_us): 是否成功，错误信息，平均时间（微秒）
     """
@@ -267,13 +272,13 @@ def analyze_prof_data(prof_path: str, warmup_times: int, run_times: int, op_name
 
 def run_nsys(script_path: str, op_name: str = "", task_id: str = "0", timeout: int = 600) -> Tuple[bool, str, Optional[str]]:
     """运行nsys性能分析
-    
+
     Args:
         script_path: Python脚本路径
         op_name: 算子名称（用于日志）
         task_id: 任务ID（用于日志）
         timeout: 超时时间（秒）
-        
+
     Returns:
         (success, error_msg, rep_path): 是否成功，错误信息，nsys报告文件路径
     """
@@ -294,7 +299,7 @@ def run_nsys(script_path: str, op_name: str = "", task_id: str = "0", timeout: i
 
 def analyze_nsys_data(rep_path: str, warmup_times: int, run_times: int, profile_type: str = "", op_name: str = "", task_id: str = "0") -> Tuple[bool, str, float]:
     """分析nsys生成的rep文件，返回平均耗时(us)
-    
+
     Args:
         rep_path: nsys报告文件路径
         warmup_times: 预热次数
@@ -302,7 +307,7 @@ def analyze_nsys_data(rep_path: str, warmup_times: int, run_times: int, profile_
         profile_type: profile类型标识（用于CSV文件命名）
         op_name: 算子名称（用于日志）
         task_id: 任务ID（用于日志）
-        
+
     Returns:
         (success, error_msg, avg_time_us): 是否成功，错误信息，平均时间（微秒）
     """
@@ -313,7 +318,7 @@ def analyze_nsys_data(rep_path: str, warmup_times: int, run_times: int, profile_
         type_suffix = f"_{profile_type}" if profile_type else ""
         csv_base = f"nsys_report_{timestamp}{type_suffix}"
         csv_path = dir_plib / csv_base
-        
+
         # 导出csv
         cmd = f'nsys stats --report gputrace --timeunit us --format csv --output {csv_path} {rep_path}'
         logger.debug(f"[{task_id}:{op_name}] Running nsys stats: {cmd}")
@@ -322,9 +327,9 @@ def analyze_nsys_data(rep_path: str, warmup_times: int, run_times: int, profile_
 
         if not os.path.exists(csv_path):
             return False, "未生成csv文件", float('inf')
-            
+
         df = pd.read_csv(csv_path)
-        
+
         # 兼容不同nsys版本的列名
         name_col = None
         for col in df.columns:
@@ -337,36 +342,35 @@ def analyze_nsys_data(rep_path: str, warmup_times: int, run_times: int, profile_
                 if "name" in col.lower():
                     name_col = col
                     break
-                    
+
         time_col = None
         for col in df.columns:
             if "time (ns)" in col.lower() or "average" in col.lower() or "duration" in col.lower():
                 time_col = col
                 break
-                
+
         if not name_col or not time_col:
             return False, "未找到kernel名或耗时列", float('inf')
-            
+
         total_count = warmup_times + run_times
         op_counts = df[name_col].value_counts()
         valid_ops = op_counts[op_counts == total_count]
-        
+
         if len(valid_ops) == 0:
             return False, "没有找到符合预期次数的kernel", float('inf')
-            
+
         df_valid = df[df[name_col].isin(valid_ops.index)]
         total_avg_time = 0.0
-        
+
         for op_name_iter in valid_ops.index:
             op_data = df_valid[df_valid[name_col] == op_name_iter][time_col].tolist()
             if len(op_data) > warmup_times:
                 valid_data = op_data[warmup_times:]
                 avg_time = sum(valid_data) / len(valid_data)
                 total_avg_time += avg_time  # timeunit us
-                
+
         return True, "", total_avg_time
-        
+
     except Exception as e:
         logger.error(f"[{task_id}:{op_name}] 分析nsys数据时出错: {e}")
         return False, f"分析nsys数据时出错: {str(e)}", float('inf')
-

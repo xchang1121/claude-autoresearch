@@ -1,8 +1,8 @@
 """Metric comparison and constraint checking.
 
 Pure data-shape and arithmetic logic — no I/O, no subprocess, no YAML.
-The `EvalResult` dataclass is the contract eval_runner writes into;
-downstream consumers (keep_or_discard, baseline_init, dashboard) read
+The `EvalResult` dataclass is the contract `task_config.run_eval`
+returns; downstream consumers (baseline, pipeline, dashboard) read
 from it.
 
 What lives here:

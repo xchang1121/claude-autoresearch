@@ -6,7 +6,7 @@ which is NOT valid strict JSON: FastAPI's encoder rejects them with
 HTTP 500, and consumers that load with the default `parse_constant`
 get back `float('inf')` / `float('nan')` (then break on arithmetic
 or comparison). Run every metrics-bearing dict through this before
-serialising — `eval_assemble` filters most non-finite values, but
+serialising — the eval adapters filter most non-finite values, but
 per-shape arrays / pass-through scalars / artifact JSON blobs still
 slip through, so the sanitiser is the canonical safety net.
 
@@ -15,9 +15,8 @@ through here:
 
   - phase_machine.state_store: state.json (single source of truth)
                                 + history.jsonl (append-only round log)
-  - engine.eval_kernel: .eval_result*.json sidecar
-  - utils.eval_runner: profile-block artifact JSONs
-  - worker.server: /api/v1/run response (FastAPI 500 path)
+  - utils.akg_eval / KernelVerifier sidecars
+  - worker.server: RemoteWorker API responses (FastAPI 500 path)
 """
 from __future__ import annotations
 

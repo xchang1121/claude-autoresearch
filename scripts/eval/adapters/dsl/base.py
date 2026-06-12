@@ -20,37 +20,37 @@ from typing import Any, Optional, Tuple, Dict
 
 class DSLAdapter(ABC):
     """Abstract base class for DSL adapters.
-    
+
     DSL adapters provide a unified interface for different implementation languages
     (Triton, SWFT, AscendC, etc.) to handle function calls, benchmarking, and
     other DSL-specific operations. DSL adapters are unaware of autotune logic.
     """
-    
+
     @abstractmethod
     def get_import_statements(self, framework: str) -> str:
         """Return import statements for the DSL.
-        
+
         Args:
             framework: Framework name (torch, mindspore, numpy)
-            
+
         Returns:
             str: Import statements as a string
         """
         pass
-    
+
     @abstractmethod
     def get_impl_import(self, op_name: str, impl_func_name: str) -> str:
         """Return import statement for implementation function.
-        
+
         Args:
             op_name: Operator name
             impl_func_name: Implementation function name
-            
+
         Returns:
             str: Import statement (e.g., "from {op_name}_triton_cuda_impl import {impl_func_name}\n")
         """
         pass
-    
+
     def create_impl_module(self, framework: str,
                            framework_adapter: Any,
                            init_params_var: str = "init_params",
@@ -70,14 +70,14 @@ class DSLAdapter(ABC):
             str: Code string to create impl_model, or empty string if not needed
         """
         return ""  # 默认返回空字符串，ModelNew 类格式的 DSL 需要override
-    
+
     @abstractmethod
     def call_impl(self, impl_func_name: str, inputs: str, device_id: int,
-                  framework_adapter: Any, op_name: str, 
-                  data_dir: Optional[str] = None, 
+                  framework_adapter: Any, op_name: str,
+                  data_dir: Optional[str] = None,
                   framework_output: Optional[str] = None) -> str:
         """Return code string to call implementation function.
-        
+
         Args:
             impl_func_name: Implementation function name
             inputs: Input variable name (e.g., "inputs_for_impl")
@@ -86,13 +86,14 @@ class DSLAdapter(ABC):
             op_name: Operator name
             data_dir: Data directory variable name (for swft)
             framework_output: Framework output variable name (for swft)
-            
+
         Returns:
             str: Code string to call the implementation
         """
         pass
-    
+
     # needs_binary_io: True iff impl uses file-based I/O (swft).
+    # needs_compilation: True iff impl must be compiled before import/use.
     # static_check_via_python_ast: True iff LLM-submitted source is
     # parseable Python; CodeChecker skips when False.
     needs_binary_io: bool = False
@@ -119,10 +120,10 @@ class DSLAdapter(ABC):
     # DSL's kernel project besides the wrapper itself — sources, headers,
     # build files. Single-file DSLs leave this empty.
     kernel_project_files: list = []
-    # Op entry filename - the file the LLM mainly edits. Format-string
-    # with optional ``{op_name}`` slot. Most Python-fronted DSLs use a
-    # ``ModelNew`` wrapper; native DSLs can override to paths such as
-    # ``"{op_name}_kernel.cpp"``.
+    # Op entry filename — the file the LLM mainly edits. Format-string
+    # with optional ``{op_name}`` slot. ModelNew wrapper for triton /
+    # tilelang / pypto / catlass / ascendc / torch; a pure-C++ DSL would
+    # override to ``"{op_name}_kernel.cpp"`` etc.
     # Consumers should NOT assume Python — check
     # ``static_check_via_python_ast`` for that.
     entry_filename_template: str = "kernel.py"
@@ -135,7 +136,7 @@ class DSLAdapter(ABC):
                       device_id: Optional[int] = None,
                       framework: str = "torch") -> str:
         """Return code string to benchmark implementation function.
-        
+
         Args:
             impl_func_name: Implementation function name
             inputs: Input variable name (e.g., "inputs")
@@ -148,12 +149,12 @@ class DSLAdapter(ABC):
             framework_adapter: Framework adapter (for generating code)
             device_id: Device ID (for swft)
             framework: Framework type ("torch" or "mindspore")
-            
+
         Returns:
             str: Code string for benchmarking
         """
         pass
-    
+
     def get_special_setup_code(self, framework: str = "torch") -> str:
         """Return special setup code (e.g., tilelang cache clear).
 
@@ -301,18 +302,18 @@ class DSLAdapter(ABC):
 
     def get_autotune_info(self, case_idx: int) -> Optional[Dict]:
         """Get autotune information (only for triton_ascend in profiling).
-        
+
         Args:
             case_idx: Case index
-            
+
         Returns:
             dict or None: Autotune information
         """
         return None
-    
+
     def get_binary_io_functions(self) -> str:
         """Get binary I/O functions code (only for swft).
-        
+
         Returns:
             str: Function definitions as string (empty if not needed)
         """

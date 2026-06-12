@@ -1,17 +1,31 @@
+# Copyright 2026 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Kernel / plan validators + plan.md parser.
 
 Validators (each: "is this artifact OK enough to advance the phase?"):
 
-  - validate_kernel: DSL-aware static code check (delegates to
-    engine.quick_check.check_editable_files).
+  - validate_kernel: DSL-aware static check (delegates to
+    engine.quick_check, which uses CodeChecker).
   - validate_plan: structural check on plan.md (≥3 items, rationale length,
     exactly one ACTIVE).
   - validate_diagnose: marker + sections on diagnose_v<N>.md.
 
 Reference validation lives elsewhere: the AST symbol check is in
 [utils/ref_ast.py](../utils/ref_ast.py) and runs once at scaffold time;
-runtime behaviour is validated by scaffold's `--run-baseline` (run_verify
-in eval_kernel.py tags `error_source="ref"` on ref-side failure).
+runtime behaviour is validated by scaffold's `--run-baseline`; the
+formal verifier path tags `error_source="ref"` on ref-side failure.
 
 Plan.md parsing (`parse_plan_text`, `get_plan_items`, `has_pending_items`,
 `get_active_item`, `is_settled_table_header`) is the single source of
@@ -40,16 +54,15 @@ from .state_store import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Kernel static check (DSL-aware code check)
+# Kernel static check (DSL-aware CodeChecker)
 # ---------------------------------------------------------------------------
 
 def validate_kernel(task_dir: str) -> tuple:
     """Static check on every editable file (typically kernel.py).
 
     Delegates to quick_check.check_editable_files (the public lib API —
-    same call the quick_check CLI makes). The check runs
-    CodeChecker on each editable file to detect DSL regressions (for
-    example no Triton kernel, or CATLASS wrapper without torch.ops.catlass).
+    same call the quick_check CLI makes). The check runs CodeChecker on
+    editable source files and applies the policy for the configured DSL.
 
     Never raises. Returns (True, "") on success, (False, reason) otherwise.
     """
@@ -80,7 +93,7 @@ def validate_kernel(task_dir: str) -> tuple:
     try:
         issues = check_editable_files(task_dir, config)
     except Exception as e:
-        return False, f"DSL static code check crashed: {e}"
+        return False, f"CodeChecker crashed: {e}"
 
     if not issues:
         return True, ""
@@ -88,7 +101,7 @@ def validate_kernel(task_dir: str) -> tuple:
     parts = []
     for it in issues:
         parts.append(f"- {it.get('file', '?')}: {it.get('report', '(no report)')}")
-    return False, "DSL static code check found issues:\n" + "\n".join(parts)
+    return False, "CodeChecker found issues:\n" + "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
